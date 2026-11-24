@@ -309,8 +309,11 @@ describe("an upgrade to a version that adds a required private value (issue #89)
 
   it("an upgrade taken back before create keeps the value: the review no longer asks for it and the next attempt needs none", async () => {
     const { stackId, v1, v2 } = await installed("job-retry");
+    // Two tabs review the same upgrade, which asks both for the value.
     const diff = await plan(stackId, v2);
     const planHash = diff.body.data.planHash as string;
+    const otherTab = await plan(stackId, v2);
+    expect(otherTab.body.data.newSecrets).toEqual([{ key: "mail_password", label: "Mail password" }]);
 
     sim.appStacks.failNextAppStackStep("pull", "pull_failed");
     const failed = await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "mail_password", value: MAIL_PASSWORD }] });
@@ -320,15 +323,26 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     expect(await stackRow(stackId)).toMatchObject({ templateVersionId: v1 });
     expect(await versionsOf(stackId)).toEqual(["mail_password:1", "session_key:1"]);
 
+    // The other tab confirms its review with a value: the plan hash is the same, but the review asked for a value the
+    // application has now, so it is stale. The page reviews again instead of showing a field it can never send without.
+    const before = await h.counts();
+    const stale = await upgrade(stackId, {
+      templateVersionId: v2,
+      planHash: otherTab.body.data.planHash as string,
+      secrets: [{ parameterKey: "mail_password", value: "typed in the other tab" }],
+    });
+    expect(stale.status, stale.raw).toBe(400);
+    expect(stale.body.error.details).toEqual([expect.objectContaining({ field: "planHash", reason: "plan_changed" })]);
+    // A generated value the application has keeps the answer of a key that does not exist.
+    const hidden = await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "session_key", value: "x" }] });
+    expectRefusal(hidden, 400, { field: "secrets.session_key", reason: "STACK_PARAMETER_INVALID" });
+    expect(await h.counts()).toEqual(before);
+    expect(await valueOf(stackId, "mail_password")).toBe(MAIL_PASSWORD);
+
     const again = await plan(stackId, v2);
     expect(again.status, again.raw).toBe(200);
     expect(again.body.data.newSecrets).toEqual([]);
     expect(again.body.data.planHash).toBe(planHash);
-    // The value is stored: giving it again is refused, as for any value the application has.
-    expectRefusal(await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "mail_password", value: "other" }] }), 400, {
-      field: "secrets.mail_password",
-      reason: "secret_not_needed",
-    });
     const retried = await upgrade(stackId, { templateVersionId: v2, planHash });
     expect(retried.status, retried.raw).toBe(202);
     expect(await versionsOf(stackId)).toEqual(["mail_password:1", "session_key:1"]);

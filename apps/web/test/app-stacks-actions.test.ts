@@ -474,6 +474,34 @@ describe("upgrade and rollback plan dialog", () => {
       expect(markup).toContain(text);
     });
 
+    it("a stale review (the value is stored now) loads the review again, which shows no field for it", async () => {
+      // An upgrade taken back in another tab kept the value: the same plan no longer asks for it.
+      const FRESH: AppStackPlanDiffDto = { ...ASKING, newSecrets: [] };
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "plan_changed", field: "planHash" });
+      const fetchMock = vi.fn(async () => respond(200, { data: FRESH }));
+      vi.stubGlobal("fetch", fetchMock);
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(input.value).toBe("");
+      expect(sets).toContainEqual([1, en.apps.reasons.plan_changed]);
+      expect(sets).toContainEqual([3, {}]);
+      await vi.waitFor(() => expect(sets).toContainEqual([0, FRESH]));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // Not a refusal of the value: nothing is shown next to the field the fresh review drops.
+      expect(sets.filter(([k]) => k === 3)).toEqual([[3, {}], [3, {}]]);
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(JSON.stringify([sets, parentSets])).not.toContain(TYPED);
+
+      const reviewed = dialog(d, { 0: FRESH, 1: en.apps.reasons.plan_changed }).out;
+      const markup = html(reviewed);
+      expect(markup).toContain(en.apps.reasons.plan_changed);
+      expect(markup).not.toContain("app-upgrade-secret-");
+      expect(markup).not.toContain(en.apps.upgrade.secretsTitle);
+      expect(button(reviewed, en.apps.upgrade.confirm)!.props.disabled).toBe(false);
+    });
+
     it.each(locales)("a value the update does not need has its own sentence (%s)", (_l, m) => {
       expect(appStackRefusalText(m, "VALIDATION_ERROR", "secret_not_needed")).toBe(m.apps.reasons.secret_not_needed);
       expect(m.apps.reasons.secret_not_needed).not.toBe(m.apps.reasons.STACK_PARAMETER_INVALID);

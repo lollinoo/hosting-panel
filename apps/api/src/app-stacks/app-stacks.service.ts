@@ -138,6 +138,8 @@ type Candidate = {
   /** Required private values the customer types that this upgrade is the first to need: the plan pins their version 1,
    *  and the upgrade request must carry them (issue #89). */
   readonly ask?: readonly { readonly key: string; readonly label: string }[];
+  /** Upgrade: the keys the stack had a stored value of when the candidate was read. */
+  readonly stored?: ReadonlySet<string>;
 };
 /** A private value given with an upgrade; it reaches only app_stack_secrets. */
 type TypedSecret = { readonly parameterKey: string; readonly value: string };
@@ -156,10 +158,9 @@ const damaged = (message: string) => new ControlPlaneError("INTERNAL_ERROR", mes
 function refusal(field: string, reason: string, message: string): ControlPlaneError {
   return appRefusal("VALIDATION_ERROR", message, { field, message, reason });
 }
+const planChanged = () => refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
 function assertReviewed(candidate: Candidate, planHash: string): void {
-  if (candidate.plan.planHash !== planHash) {
-    throw refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
-  }
+  if (candidate.plan.planHash !== planHash) throw planChanged();
 }
 /** A draft (no revision yet) is never upgraded: it reaches the current version by being installed again. */
 const draftOutdated = () =>
@@ -705,8 +706,10 @@ export class AppStacksService {
     }
     if (stack.desiredRevisionId === null) throw draftOutdated();
     const spec = validatedSpec(version.source, this.validation);
-    // A generated secret this version brings and the stack never had: version 1, stored when the upgrade is queued.
     const secretVersions = secretVersionsOf(await listAppStackSecretMetadata(db, scope));
+    // Taken before the map below gains what this upgrade adds.
+    const stored = new Set(secretVersions.keys());
+    // A generated secret this version brings and the stack never had: version 1, stored when the upgrade is queued.
     const generate = appSecretsToGenerate(spec, secretVersions);
     // A required private value the customer types and the stack never had: version 1, carried by the upgrade request.
     // An optional one is set after the upgrade, among the private values, so that the reviewed plan stays the same.
@@ -724,7 +727,7 @@ export class AppStacksService {
       },
       this.validation,
     );
-    return { version, ...c, newRevision: true, generate, ask };
+    return { version, ...c, newRevision: true, generate, ask, stored };
   }
 
   /** What an upgrade request carries must be exactly the private values its plan asks for, each under the route's rules. */
@@ -735,7 +738,10 @@ export class AppStacksService {
     for (const entry of given) {
       const field = `secrets.${entry.parameterKey}`;
       assertCustomerSecret(spec, entry, { key: field, value: field });
-      // A value the application already has, or an optional one, is set among its private values instead.
+      // A value the application has now was asked for by an older review (an upgrade taken back keeps its value): the
+      // plan hash is the same, but the review the caller confirmed is stale and is reviewed again.
+      if (candidate.stored?.has(entry.parameterKey)) throw planChanged();
+      // An optional value is set among the private values of the application instead.
       if (!ask.some((s) => s.key === entry.parameterKey)) {
         throw refusal(field, "secret_not_needed", "This update does not need this value: set it among the private values of the application.");
       }
@@ -824,7 +830,7 @@ export class AppStacksService {
     if (typed.length === 0) return [];
     const stored = await insertGeneratedAppStackSecrets(tx, { ...scope, masterKey: this.config.secretsMasterKey, values: typed });
     // A value stored meanwhile (by an upgrade taken back since the review): the review no longer asks for it.
-    if (stored.length !== typed.length) throw refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
+    if (stored.length !== typed.length) throw planChanged();
     return stored;
   }
 
