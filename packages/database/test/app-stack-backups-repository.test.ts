@@ -137,7 +137,12 @@ describe("@hosting-panel/database — application backups", () => {
     });
     const [row] = await db()
       .update(appStacks)
-      .set({ status: options.status ?? "running", appliedRevisionId: created.stack.desiredRevisionId, appliedRoutesHash: hex("routes") })
+      .set({
+        status: options.status ?? "running",
+        appliedRevisionId: created.stack.desiredRevisionId,
+        appliedRoutesHash: hex("routes"),
+        appliedAddressesHash: hex("addresses"),
+      })
       .where(eq(appStacks.id, stackId))
       .returning();
     return row!;
@@ -792,7 +797,8 @@ describe("@hosting-panel/database — application backups", () => {
       const stack = await installed();
       await request(stack);
       const stopped = await settleAppStackBackupStopTransactional(db(), { organizationId: orgA, stackId: stack.id, to: "stopped", routesWithdrawn: true });
-      expect(stopped).toMatchObject({ status: "stopped", appliedRoutesHash: null });
+      // Nothing published, so nothing pending: the fingerprint of the published addresses goes with the routes (ADR-0037).
+      expect(stopped).toMatchObject({ status: "stopped", appliedRoutesHash: null, appliedAddressesHash: null });
       const parts = await db().select().from(appStackComponents).where(eq(appStackComponents.stackId, stack.id));
       expect(parts.map((p) => p.health)).toEqual(["stopped", "stopped"]);
       // Asked again (a worker that lost its answer): no change, no refusal.
@@ -805,7 +811,7 @@ describe("@hosting-panel/database — application backups", () => {
       const stack = await installed();
       await request(stack);
       const degraded = await settleAppStackBackupStopTransactional(db(), { organizationId: orgA, stackId: stack.id, to: "degraded", routesWithdrawn: false });
-      expect(degraded).toMatchObject({ status: "degraded", appliedRoutesHash: stack.appliedRoutesHash });
+      expect(degraded).toMatchObject({ status: "degraded", appliedRoutesHash: stack.appliedRoutesHash, appliedAddressesHash: stack.appliedAddressesHash });
       const parts = await db().select().from(appStackComponents).where(eq(appStackComponents.stackId, stack.id));
       expect(parts.map((p) => p.health)).not.toContain("stopped");
     });

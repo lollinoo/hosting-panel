@@ -299,7 +299,8 @@ export async function settleAppStackBackupStopTransactional(
   }
   const [updated] = await db
     .update(appStacks)
-    .set({ status: input.to, updatedAt: now, ...(input.routesWithdrawn ? { appliedRoutesHash: null } : {}) })
+    // Withdrawn routes take the fingerprint of their addresses with them: nothing published, nothing pending (ADR-0037).
+    .set({ status: input.to, updatedAt: now, ...(input.routesWithdrawn ? { appliedRoutesHash: null, appliedAddressesHash: null } : {}) })
     .where(eq(appStacks.id, stack.id))
     .returning();
   return updated!;
