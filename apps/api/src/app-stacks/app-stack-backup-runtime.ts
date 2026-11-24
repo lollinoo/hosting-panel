@@ -32,6 +32,7 @@ import {
   settleAppStackBackupStopTransactional,
   settleAppStackRestore,
   settleOperation,
+  transitionAppStackTransactional,
   updateOperationStepTransactional,
   type AppStackBackupCopyRow,
   type AppStackBackupCopySettlement,
@@ -43,6 +44,12 @@ import {
 import { isStackExecutor, type DockerExecutorPort, type StackExecutorPort } from "@hosting-panel/executor-contracts";
 import { extractKnownErrorCode, normalizeBackupProblem } from "../backups/site-backups-applier.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import {
+  closeUnconfirmedOperation,
+  type RecoveryGiveUp,
+  type RecoveryOutcome,
+  type RecoveryReadBound,
+} from "../runtime/recovery-read-bound.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { appStackBackupRetentionDays, expiredAppStackBackups } from "./app-stack-backup-retention.js";
 import type { AppStackRuntimeDeps } from "./app-stack-runtime.js";
@@ -131,6 +138,8 @@ interface Settlement {
   readonly write?: (tx: HostingPanelDatabase) => Promise<void>;
   /** Queue the operation that starts the application again, once this one has ended. */
   readonly resume: boolean;
+  /** Recovery gave up its reads (issue #183): the operation is closed as not confirmed instead. */
+  readonly unconfirmed?: RecoveryGiveUp;
 }
 
 function asProblem(value: string | null): BackupProblem {
@@ -184,9 +193,10 @@ export class AppStackBackupRuntime {
 
   /**
    * Settles an `unknown` operation from reads only: the state of its jobs and one read of the application. No job is
-   * started or repeated; a job the executor no longer knows is closed as interrupted.
+   * started or repeated; a job the executor no longer knows is closed as interrupted. `reads` bounds a read that keeps
+   * failing (issue #183): past it the operation is closed as not confirmed, its rows as for a job no longer known.
    */
-  public async recover(op: OperationRow): Promise<"pending" | "settled"> {
+  public async recover(op: OperationRow, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     const { db } = this.#deps;
     const kind = op.kind as AppStackBackupOperationKind;
     const ctx: Ctx = { op, kind, current: "settle" };
@@ -198,18 +208,6 @@ export class AppStackBackupRuntime {
     }
     const scope = { organizationId: op.organizationId, stackId: op.resourceId };
     const backup = await getAppStackBackupByOperation(db, op.id);
-    if (backup) {
-      for (const copy of (await listAppStackBackupCopies(db, [backup.id])).get(backup.id) ?? []) {
-        if (copy.status !== "running") continue;
-        if (copy.jobId === null) {
-          await settleAppStackBackupCopy(db, copy.id, { status: "failed", problem: "interrupted" });
-          continue;
-        }
-        const job = await this.#read(copy.jobId);
-        if (job === null || job.state === "running") return "pending";
-        await settleAppStackBackupCopy(db, copy.id, copyOutcome(job));
-      }
-    }
 
     // The restore job was sent only after its step was marked as started.
     let sent = false;
@@ -220,47 +218,98 @@ export class AppStackBackupRuntime {
         .from(operationSteps)
         .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "restore")));
       sent = step !== undefined && step.status !== "pending" && step.status !== "skipped";
-      if (sent) {
-        applied = await this.#read(`${op.id}-apply`);
-        if (applied === null || applied.state === "running") return "pending";
+    }
+    const settleRestore = async (tx: HostingPanelDatabase) => {
+      if (kind !== "stack.restore") return;
+      const restored = applied?.state === "succeeded";
+      await settleAppStackRestore(tx, {
+        operationId: op.id,
+        status: restored ? "succeeded" : "failed",
+        problem: restored ? null : applied?.state === "failed" ? normalizeBackupProblem(applied.failure) : "interrupted",
+        mayHaveWritten: sent,
+      });
+    };
+    /** A read that failed: pending, unless reads that keep failing have used up the bound. */
+    const unread = async (err: unknown): Promise<RecoveryOutcome> => {
+      const giveUp = reads?.failed(op.id, err) ?? null;
+      if (giveUp === null) return "pending";
+      const closed = await this.#settle(ctx, {
+        outcome: "failed",
+        failedStep: null,
+        // A job may still run: nothing starts the application (ADR-0038); starting it is the customer's choice.
+        resume: false,
+        unconfirmed: giveUp,
+        write: async (tx) => {
+          if (backup) {
+            await failRunningAppStackBackupCopies(tx, backup.id, "interrupted");
+            await settleAppStackBackupAggregate(tx, backup.id);
+          }
+          await settleRestore(tx);
+          // Stopped for certain stays stopped; a stop never confirmed is to be checked.
+          const current = await getAppStack(tx, scope);
+          if (current?.status === "stopping") await transitionAppStackTransactional(tx, { ...scope, to: "unknown" });
+        },
+      });
+      return closed ? "unconfirmed" : "pending";
+    };
+
+    if (backup) {
+      for (const copy of (await listAppStackBackupCopies(db, [backup.id])).get(backup.id) ?? []) {
+        if (copy.status !== "running") continue;
+        if (copy.jobId === null) {
+          await settleAppStackBackupCopy(db, copy.id, { status: "failed", problem: "interrupted" });
+          continue;
+        }
+        const read = await this.#read(copy.jobId);
+        if ("err" in read) return unread(read.err);
+        if (read.job.state === "running") {
+          reads?.answered(op.id);
+          return "pending";
+        }
+        await settleAppStackBackupCopy(db, copy.id, copyOutcome(read.job));
       }
+    }
+    if (sent) {
+      const read = await this.#read(`${op.id}-apply`);
+      if ("err" in read) return unread(read.err);
+      if (read.job.state === "running") {
+        reads?.answered(op.id);
+        return "pending";
+      }
+      applied = read.job;
     }
 
     const stack = await getAppStack(db, scope);
     let observed: { active: boolean; published: boolean } | null = null;
     if (stack && (stack.status === "stopping" || stack.status === "unknown")) {
       const port = this.#port();
+      if (!port) {
+        // No read was made (this server runs no application backups): nothing to count.
+        await parkAppStackOperationUnknown(db, op, null);
+        return "pending";
+      }
       try {
-        if (!port) throw new Error("runtime unavailable");
         const read = await port.getAppStackStatus(scope);
         observed = {
           active: read.components.some((c) => c.state === "running" || c.state === "restarting"),
           published: read.routes.published,
         };
-      } catch {
+      } catch (err) {
         await parkAppStackOperationUnknown(db, op, null);
-        return "pending";
+        return unread(err);
       }
     }
 
     const aggregate = backup ? await settleAppStackBackupAggregate(db, backup.id) : null;
     const saved = aggregate === "succeeded" || aggregate === "partial";
     const restored = applied?.state === "succeeded";
-    const restoreProblem: BackupProblem = applied?.state === "failed" ? normalizeBackupProblem(applied.failure) : "interrupted";
     const stoppedState = observed;
     await this.#settle(ctx, {
       ...((kind === "stack.backup" ? saved : restored) ? ({ outcome: "succeeded" } as const) : interrupted),
       // Data that a restore may have half written stays as it is, with the application stopped.
       resume: backup !== null && backup.resumeAfter && (kind === "stack.backup" || !sent || restored),
       write: async (tx) => {
-        if (kind === "stack.restore") {
-          await settleAppStackRestore(tx, {
-            operationId: op.id,
-            status: restored ? "succeeded" : "failed",
-            problem: restored ? null : restoreProblem,
-            mayHaveWritten: sent,
-          });
-        }
+        await settleRestore(tx);
         if (stoppedState) {
           await settleAppStackBackupStopTransactional(tx, {
             ...scope,
@@ -304,28 +353,31 @@ export class AppStackBackupRuntime {
             errorCode: s.code ?? "INTERNAL_ERROR",
             errorMessage: s.code === "OPERATION_INTERRUPTED" ? APP_STACK_FAILURE.OPERATION_INTERRUPTED.text : APP_STACK_BACKUP_FAILED_TEXT[kind],
           } as const);
+    const write = async (tx: HostingPanelDatabase) => {
+      const steps = await tx
+        .select({ key: operationSteps.key, status: operationSteps.status })
+        .from(operationSteps)
+        .where(eq(operationSteps.operationId, op.id));
+      for (const step of steps) {
+        if (!OPEN_STEP.has(step.status)) continue;
+        const key = step.key as AppStackBackupStepKey;
+        if (s.outcome === "succeeded") {
+          await updateOperationStepTransactional(tx, op.id, key, "succeeded", APP_STACK_BACKUP_STEP_DONE_TEXT[key]);
+        } else if (key === s.failedStep || step.status !== "pending") {
+          await updateOperationStepTransactional(tx, op.id, key, "failed", APP_STACK_STEP_FAILED_TEXT);
+        } else {
+          await updateOperationStepTransactional(tx, op.id, key, "skipped", APP_STACK_STEP_SKIPPED_TEXT);
+        }
+      }
+      await s.write?.(tx);
+    };
+    // Its own code, text and audit row, and nothing queued after it: a job may still run.
+    if (s.unconfirmed) return closeUnconfirmedOperation(db, op.id, s.unconfirmed, write);
     return settleOperation(
       db,
       op.id,
       outcome,
-      async (tx) => {
-        const steps = await tx
-          .select({ key: operationSteps.key, status: operationSteps.status })
-          .from(operationSteps)
-          .where(eq(operationSteps.operationId, op.id));
-        for (const step of steps) {
-          if (!OPEN_STEP.has(step.status)) continue;
-          const key = step.key as AppStackBackupStepKey;
-          if (s.outcome === "succeeded") {
-            await updateOperationStepTransactional(tx, op.id, key, "succeeded", APP_STACK_BACKUP_STEP_DONE_TEXT[key]);
-          } else if (key === s.failedStep || step.status !== "pending") {
-            await updateOperationStepTransactional(tx, op.id, key, "failed", APP_STACK_STEP_FAILED_TEXT);
-          } else {
-            await updateOperationStepTransactional(tx, op.id, key, "skipped", APP_STACK_STEP_SKIPPED_TEXT);
-          }
-        }
-        await s.write?.(tx);
-      },
+      write,
       async (tx) => {
         if (!s.resume) return;
         // A new, ordinary operation: it takes the lock this one has just released.
@@ -626,12 +678,12 @@ export class AppStackBackupRuntime {
     return status;
   }
 
-  /** One status read; null when the executor did not answer. */
-  async #read(jobId: string): Promise<BackupJobStatus | null> {
+  /** One status read: the job's state, or why it could not be read (recovery counts some of them, issue #183). */
+  async #read(jobId: string): Promise<{ readonly job: BackupJobStatus } | { readonly err: unknown }> {
     try {
-      return await this.#deps.executor.backups({ action: "status", jobId });
-    } catch {
-      return null;
+      return { job: await this.#deps.executor.backups({ action: "status", jobId }) };
+    } catch (err) {
+      return { err };
     }
   }
 }

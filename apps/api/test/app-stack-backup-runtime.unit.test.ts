@@ -14,6 +14,7 @@ import {
 import {
   addAppStackDomainsTransactional,
   and,
+  auditEvents,
   appStackBackupCopies,
   appStackBackups,
   appStackDeployments,
@@ -40,6 +41,7 @@ import {
   platformInstallations,
   setPolicyTargets,
   transitionOperation,
+  unlockOperationBreakGlassTransactional,
   updateAppTemplate,
   type DatabaseClient,
   type NewAppStackRevision,
@@ -49,6 +51,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../src/app-stacks/app-stack-backup-retention.js";
 import {
   APP_STACK_BACKUP_FAILED_TEXT,
@@ -67,6 +70,12 @@ import {
 } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 import type { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 import type { SiteDomainsApplier } from "../src/sites/site-domains-applier.js";
 import type { SiteFilesApplier } from "../src/sites/site-files-applier.js";
@@ -1233,6 +1242,262 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect((await stackOf(b.stackId)).status).toBe("running");
       expect((await opOf(backup.id)).status).toBe("succeeded");
       expect(sim.appStackSnapshots(a.stackId)).toHaveLength(1);
+    });
+  });
+
+  describe("a recovery read that keeps failing (issue #183)", () => {
+    const MINUTE = 60_000;
+    const coded = (code: string) => Object.assign(new Error(`executor said ${code}`), { code });
+    const schemaError = (): unknown => z.object({ state: z.literal("running") }).safeParse({ state: "lost" }).error;
+    const bound = () => new RecoveryReadBound(() => clock.now());
+    const unconfirmed = (operationId: string) =>
+      db()
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.targetId, operationId), eq(auditEvents.action, RECOVERY_UNCONFIRMED_AUDIT_ACTION)));
+    /** Only reads: nothing the application or the backup jobs would act on. */
+    const writes = (requests: readonly BackupsIpcRequest[]) => [
+      ...trace().filter((m) => !m.startsWith("get")),
+      ...requests.filter((r) => r.action !== "status").map((r) => r.action),
+    ];
+
+    /** Every status read of a job throws `fault.err` while it is not null; every backup request is recorded. */
+    function faulty(fault: { err: unknown }): BackupsIpcRequest[] {
+      const seen: BackupsIpcRequest[] = [];
+      before = (req) => {
+        seen.push(req);
+        if (req.action === "status" && fault.err !== null) throw fault.err;
+      };
+      return seen;
+    }
+
+    /** A backup parked while its copy job runs (held): unknown, the application stopped and locked. */
+    async function parkedCopy() {
+      const { stackId } = await running();
+      const { operation: op, backup } = await request(stackId);
+      before = (req) => {
+        if (req.action !== "stackStart") return;
+        sim.holdJobs();
+        lease.failures = 1;
+      };
+      expectParked(await apply(op));
+      before = null;
+      await transitionOperation(db(), op.id, "unknown");
+      fake.calls.length = 0;
+      return { stackId, op, backup };
+    }
+
+    function worker(): OutboxWorkerService {
+      const w = new OutboxWorkerService(
+        dbClient,
+        fake,
+        {} as unknown as HostAgentPort,
+        config,
+        {} as unknown as SiteProvisioner,
+        {} as unknown as SiteDomainsApplier,
+        {} as unknown as SiteFilesApplier,
+        undefined,
+        undefined,
+        undefined,
+        runtime(),
+      );
+      w.recoveryReads = bound();
+      return w;
+    }
+
+    it("a copy whose job cannot be read for the whole bound is closed as not confirmed: copy interrupted, application left stopped, nothing sent", async () => {
+      const { stackId, op, backup } = await parkedCopy();
+      const fault: { err: unknown } = { err: coded("INTERNAL_ERROR") };
+      const seen = faulty(fault);
+      const w = worker();
+
+      await w.recoverUnknownOperations();
+      clock.advance(RECOVERY_READ_GIVE_UP_MS - 1);
+      fault.err = new SyntaxError("Unexpected token < in JSON");
+      await w.recoverUnknownOperations();
+      expect((await opOf(op.id)).status).toBe("unknown");
+      await expectLocked(stackId);
+
+      clock.advance(1);
+      await w.recoverUnknownOperations();
+
+      expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      expect(await stepsOf(op.id)).toEqual({ ...done("stack.backup"), copy: FAILED, settle: SKIPPED });
+      // The rows a job the executor no longer knows gets: interrupted. The job may still run: nothing starts the application.
+      expect(await backupOf(backup.id)).toMatchObject({ status: "failed", problem: "interrupted" });
+      expect((await copiesOf(backup.id)).map((c) => [c.status, c.problem])).toEqual([["failed", "interrupted"]]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await resumeOf(op.id)).toBeNull();
+      const audits = await unconfirmed(op.id);
+      expect(audits).toHaveLength(1);
+      expect(audits[0]!.details).toEqual({
+        operationId: op.id,
+        kind: "stack.backup",
+        resourceType: "stack",
+        resourceId: stackId,
+        minutesWaited: 30,
+        failure: "unexpected_error",
+      });
+      const events = await db().select().from(outboxEvents);
+      expect(events.filter((e) => (e.payload as { operationId?: string }).operationId === op.id).map((e) => e.status)).toEqual(["failed"]);
+      expect(seen.filter((r) => r.action === "status" && r.jobId === op.id)).toHaveLength(3);
+      expect(writes(seen)).toEqual([]);
+      expect(sim.appStackJobs()).toHaveLength(1);
+
+      // A second pass finds nothing in doubt: no read, no row.
+      const closed = await opOf(op.id);
+      await w.recoverUnknownOperations();
+      expect(seen.filter((r) => r.action === "status" && r.jobId === op.id)).toHaveLength(3);
+      expect(await opOf(op.id)).toEqual(closed);
+      expect(await unconfirmed(op.id)).toHaveLength(1);
+      expect(w.recoveryReads.size).toBe(0);
+      // The lock is free as after any failed operation; the executor refuses a start while the job is awake (STACK_BUSY).
+      n += 1;
+      const next = await enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId,
+        kind: "stack.start",
+        requestedByUserId: null,
+        idempotencyKey: `bk-${String(n)}`,
+        requestHash: hex(`lifecycle ${String(n)}`),
+        revision: null,
+        destroyData: false,
+      });
+      expect(next.operation).toMatchObject({ kind: "stack.start", status: "queued" });
+    });
+
+    it("an executor that cannot be reached never closes it, however long; the job's end read later settles it", async () => {
+      const { stackId, op, backup } = await parkedCopy();
+      const honest = [coded("DOCKER_ENGINE_UNAVAILABLE"), Object.assign(coded("OPERATION_AMBIGUOUS"), { ambiguousOutcome: true }), busy()];
+      const fault: { err: unknown } = { err: honest[0] };
+      const seen = faulty(fault);
+      const reads = bound();
+
+      for (let pass = 0; pass < 48; pass += 1) {
+        fault.err = honest[pass % honest.length];
+        expect(await runtime().recover(await opOf(op.id), reads)).toBe("pending");
+        clock.advance(30 * MINUTE);
+      }
+      expect((await opOf(op.id)).status).toBe("unknown");
+      await expectLocked(stackId);
+      expect(reads.size).toBe(0);
+
+      fault.err = null;
+      sim.finishHeld();
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("settled");
+      expect((await opOf(op.id)).status).toBe("succeeded");
+      expect((await backupOf(backup.id)).status).toBe("succeeded");
+      expect(await unconfirmed(op.id)).toHaveLength(0);
+      expect(writes(seen)).toEqual([]);
+    });
+
+    it("a readable answer that the job still runs starts the count again", async () => {
+      const { op } = await parkedCopy();
+      const fault: { err: unknown } = { err: coded("INTERNAL_ERROR") };
+      faulty(fault);
+      const reads = bound();
+      const pass = async () => runtime().recover(await opOf(op.id), reads);
+
+      expect(await pass()).toBe("pending");
+      clock.advance(20 * MINUTE);
+      fault.err = null; // the job reads as running
+      expect(await pass()).toBe("pending");
+      clock.advance(20 * MINUTE);
+      fault.err = coded("NOT_FOUND");
+      expect(await pass()).toBe("pending");
+      clock.advance(29 * MINUTE);
+      expect(await pass()).toBe("pending");
+      expect((await opOf(op.id)).status).toBe("unknown");
+      clock.advance(MINUTE);
+      expect(await pass()).toBe("unconfirmed");
+
+      expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+      expect((await unconfirmed(op.id))[0]!.details).toMatchObject({ minutesWaited: 30, failure: "error_code" });
+    });
+
+    it("a restore whose job cannot be read once sent is closed as not confirmed: the data may be half written, nothing starts, nothing is sent again", async () => {
+      const { stackId, source } = await withBackup();
+      const { operation: op, backup: safety } = await request(stackId, "stack.restore", source.id);
+      before = (req) => {
+        if (req.action !== "stackRestore") return;
+        sim.holdJobs();
+        lease.failures = 1;
+      };
+      expectParked(await apply(op));
+      before = null;
+      await transitionOperation(db(), op.id, "unknown");
+      fake.calls.length = 0;
+      const seen = faulty({ err: schemaError() });
+      const reads = bound();
+
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("pending");
+      clock.advance(RECOVERY_READ_GIVE_UP_MS);
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("unconfirmed");
+
+      expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      expect(await stepsOf(op.id)).toEqual({ ...done("stack.restore"), restore: FAILED, settle: SKIPPED });
+      expect(await backupOf(source.id)).toMatchObject({ restoreStatus: "failed", restoreProblem: "interrupted" });
+      // The job was sent: the safety backup says the data may be half written, and the application stays stopped.
+      expect(await backupOf(safety.id)).toMatchObject({ status: "succeeded", leftIncomplete: true });
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await resumeOf(op.id)).toBeNull();
+      expect(sim.appStackJobs().filter((j) => j.action === "stackRestore")).toHaveLength(1);
+      expect(writes(seen)).toEqual([]);
+      expect((await unconfirmed(op.id))[0]!.details).toMatchObject({ kind: "stack.restore", minutesWaited: 30, failure: "unreadable_answer" });
+    });
+
+    it("an application whose state cannot be read after its stop was lost is closed and left to be checked", async () => {
+      const { stackId } = await running();
+      const { operation: op, backup } = await request(stackId);
+      fake.failNext("stopAppStack", "ambiguous");
+      expectParked(await apply(op));
+      await transitionOperation(db(), op.id, "unknown");
+      fake.calls.length = 0;
+      Object.assign(fake, {
+        getAppStackStatus: async () => {
+          fake.calls.push({ method: "getAppStackStatus", request: { organizationId: ORG, stackId } });
+          throw coded("HOST_POLICY_DENIED");
+        },
+      });
+      const seen = faulty({ err: null });
+      const reads = bound();
+
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("pending");
+      clock.advance(RECOVERY_READ_GIVE_UP_MS);
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("unconfirmed");
+
+      expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      // Neither running nor stopped for certain: the state the page shows as to be checked.
+      expect((await stackOf(stackId)).status).toBe("unknown");
+      expect(await backupOf(backup.id)).toMatchObject({ status: "failed", problem: "interrupted" });
+      expect(await resumeOf(op.id)).toBeNull();
+      expect(trace()).toEqual(["getAppStackStatus", "getAppStackStatus"]);
+      expect(writes(seen)).toEqual([]);
+      expect((await unconfirmed(op.id))[0]!.details).toMatchObject({ kind: "stack.backup", failure: "error_code" });
+    });
+
+    it("an operation unlocked by hand between the last failed read and the closing is left as the administrator left it", async () => {
+      const { op, backup } = await parkedCopy();
+      let unlockNow = false;
+      Object.assign(fake, {
+        backups: async (req: BackupsIpcRequest) => {
+          if (req.action !== "status") return sim.handle(req);
+          if (unlockNow) await unlockOperationBreakGlassTransactional(db(), { operationId: op.id, reason: "checked by hand" });
+          throw coded("INTERNAL_ERROR");
+        },
+      });
+      const reads = bound();
+
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("pending");
+      clock.advance(RECOVERY_READ_GIVE_UP_MS);
+      unlockNow = true;
+      expect(await runtime().recover(await opOf(op.id), reads)).toBe("pending");
+
+      expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+      expect(await unconfirmed(op.id)).toHaveLength(0);
+      // The command touches no row of the application, and the closing wrote none either.
+      expect((await backupOf(backup.id)).status).toBe("running");
+      expect((await copiesOf(backup.id)).map((c) => c.status)).toEqual(["running"]);
     });
   });
 });

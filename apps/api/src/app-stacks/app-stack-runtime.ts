@@ -207,7 +207,7 @@ export class AppStackRuntime {
 
   /** Worker recovery for an `unknown` stack operation; read-only. `reads` bounds a read that keeps failing (issue #183). */
   public recover(op: OperationRow, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
-    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op);
+    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op, reads);
     return recoverAppStackOperation(this.#deps, op, reads);
   }
 
