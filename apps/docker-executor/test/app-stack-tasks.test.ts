@@ -328,6 +328,105 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect(JSON.stringify(result)).not.toContain(CANARY);
   });
 
+  describe("when the private values of the component cannot be read (#188)", () => {
+    /** The folder of the secret files of `web`, and the bind that gives the container one of them. */
+    const folderOf = (root: string) => path.join(path.resolve(root), appStackSecretDirKey(STACK, "web"));
+    const bindOf = (root: string, name: string) => `${path.join(folderOf(root), name)}:/run/secrets/${name}:ro`;
+    const envLabel = (name: string) => ({ [APP_STACK_LABELS.secretEnvironment]: JSON.stringify([[name, null]]) });
+    /** What a result shows, as booleans and markers only: a failing test must never print what the run printed. */
+    const shown = (result: AppStackTaskRunIpcResult) => ({
+      outcome: result.outcome,
+      exitCode: result.exitCode,
+      empty: result.output === "",
+      truncated: result.outputTruncated,
+      leaks: JSON.stringify(result).includes(CANARY),
+      valid: AppStackTaskRunIpcResultSchema.safeParse(result).success,
+    });
+
+    /** A component whose container was given one secret file, and a way to leave the folder as the case needs. */
+    async function withSecretFile(script: Script, folder: (dir: string) => Promise<void>) {
+      const made = await setup(script);
+      made.mockDaemon.containers.set(`${WEB}_id`, component("web", { hostConfig: { Binds: [bindOf(made.secretsRootDir, "app_key")] } }));
+      await folder(folderOf(made.secretsRootDir));
+      return made;
+    }
+
+    const cannotBeRead: Array<[string, (dir: string) => Promise<void>]> = [
+      ["the folder is gone (a reboot emptied the tmpfs)", () => Promise.resolve()],
+      ["Docker made the missing file a directory", async (dir) => {
+        await mkdir(path.join(dir, "app_key"), { recursive: true });
+      }],
+      ["the file holds a value too short to mask", async (dir) => {
+        await mkdir(dir, { recursive: true });
+        await writeFile(path.join(dir, "app_key"), "abc");
+      }],
+    ];
+
+    it.each(cannotBeRead)("keeps nothing of what the run printed, and says so: %s", async (_case, folder) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter } = await withSecretFile({ command: (call) => (call.Env.some((env) => env.endsWith(RUN(2))) ? { frames: [[1, `key=${CANARY}\n`], [2, "second\n"]], exitCode: 3 } : { frames: [[1, `key=${CANARY}\n`]], exitCode: 0 }) }, folder);
+      // The outcome and the exit code are the command's own; only the output is withheld.
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+      expect(shown(await adapter.runAppStackTask(request(2)))).toEqual({ outcome: "failed", exitCode: 3, empty: true, truncated: true, leaks: false, valid: true });
+      // Each withheld output is logged once, in the executor's fixed style: no output, no value, no name, no id.
+      expect(warn).toHaveBeenCalledTimes(2);
+      for (const call of warn.mock.calls) {
+        const logged = JSON.parse(String(call[0])) as Record<string, unknown>;
+        expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
+        expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_output_withheld", "DOCKER_ENGINE_UNAVAILABLE"]);
+        expect(String(call[0]).includes(CANARY)).toBe(false);
+      }
+    });
+
+    it("keeps nothing when the label names an environment secret the container does not hold", async () => {
+      const { adapter, mockDaemon } = await setup({ command: () => ({ frames: [[1, `token=${CANARY}\n`]] }) });
+      mockDaemon.containers.set(`${WEB}_id`, component("web", { labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: ["OTHER=value-of-six"] }));
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+    });
+
+    it("answers an empty output, not flagged, for a run that printed nothing, whether or not the values can be read", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      // Nothing at all, and a blank line: the ordinary side answers "" and not flagged for both.
+      const plans: MockExecPlan[] = [{ frames: [] }, { frames: [[1, "\n"]] }];
+      const { adapter } = await withSecretFile({ command: () => plans.shift() }, () => Promise.resolve());
+      for (const n of [1, 2]) {
+        expect(shown(await adapter.runAppStackTask(request(n)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: false, leaks: false, valid: true });
+      }
+      // Nothing was withheld, so nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("masks a value that only the environment of the container holds: the secret folder is empty, as after a reboot", async () => {
+      const { adapter, mockDaemon, secretsRootDir } = await setup({ command: () => ({ frames: [[1, `token=${CANARY} and again ${CANARY}\n`], [2, "clean\n"]] }) });
+      mockDaemon.containers.set(`${WEB}_id`, component("web", { labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: [`API_TOKEN=${CANARY}`, "PLAIN=not-a-secret"] }));
+      await mkdir(folderOf(secretsRootDir), { recursive: true });
+      const result = await adapter.runAppStackTask(request(1));
+      // Booleans only: a failing run must not print what the command printed.
+      expect([result.output === "token=[REDACTED] and again [REDACTED]\nclean", result.outputTruncated, JSON.stringify(result).includes(CANARY)]).toEqual([true, false, false]);
+    });
+
+    it("masks with the secret file and the environment secret together", async () => {
+      const second = `${CANARY}-file`;
+      const { adapter, mockDaemon, secretsRootDir } = await setup({ command: () => ({ frames: [[1, `a=${CANARY} b=${second}\n`]] }) });
+      mockDaemon.containers.set(
+        `${WEB}_id`,
+        component("web", { hostConfig: { Binds: [bindOf(secretsRootDir, "app_key")] }, labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: [`API_TOKEN=${CANARY}`] }),
+      );
+      await mkdir(folderOf(secretsRootDir), { recursive: true });
+      await writeFile(path.join(folderOf(secretsRootDir), "app_key"), second);
+      const result = await adapter.runAppStackTask(request(1));
+      expect([result.output === "a=[REDACTED] b=[REDACTED]", JSON.stringify(result).includes("CANARY")]).toEqual([true, false]);
+    });
+
+    it("answers the same pair for one very long line, which no cause of this section makes: it was so before", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter } = await setup({ command: () => ({ frames: [[1, "a".repeat(70_000)]] }) });
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+      // Its values could be read: nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
   it("keeps the last lines only, cleaned, and says when something was left out", async () => {
     const many = Array.from({ length: 300 }, (_, i) => `line ${String(i + 1)}\n`).join("");
     const plans: MockExecPlan[] = [
