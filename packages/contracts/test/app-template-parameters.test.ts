@@ -97,10 +97,17 @@ describe("resolveAppTemplateParameters: the A3 matrix", () => {
     ["a string naming docker.sock", [["title", "/var/run/Docker.Sock"]], [["parameters.title", "PARAM_VALUE_FORBIDDEN_CONTENT"]]],
     ["a string naming a metadata endpoint", [["title", "169.254.169.254"]], [["parameters.title", "PARAM_VALUE_FORBIDDEN_CONTENT"]]],
     ["a string with URL credentials", [["title", "http://u:p@h"]], [["parameters.title", "PARAM_VALUE_FORBIDDEN_CONTENT"]]],
+    ["a string carrying a terminal's mark", [["title", "x HP_TERMINAL_SESSION=term_"]], [["parameters.title", "PARAM_VALUE_FORBIDDEN_CONTENT"]]],
+    ["a string carrying a task run's mark", [["title", "xHP_TASK_RUN=srun_1"]], [["parameters.title", "PARAM_VALUE_FORBIDDEN_CONTENT"]]],
     ["a boolean as a string", [["debug", "true"]], [["parameters.debug", "PARAM_VALUE_INVALID_TYPE"]]],
     ["a size outside the pattern", [["upload", "1T"]], [["parameters.upload", "PARAM_VALUE_INVALID_TYPE"]]],
   ])("refuses %s", (_name, items, expected) => {
     expect(codesOf(resolve(...items))).toEqual(expected);
+  });
+
+  // ADR-0041: only the marks of the platform's processes are refused, never ordinary text that holds "HP_".
+  it.each(["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "SHP_X=1", "HP_HOME=/x", "ends with HP_TERMINAL_"])("accepts the string %j", (title) => {
+    expect(valuesOf(resolve(["title", title])).title).toBe(title);
   });
 
   it("A3 variant: worker_count customer:false refuses even the default value 2", () => {

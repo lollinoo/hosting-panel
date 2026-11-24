@@ -15,6 +15,7 @@ import {
   AppStackRefIpcRequestSchema,
   AppStackRemoveIpcRequestSchema,
   AppStackRoutesIpcRequestSchema,
+  AppStackTerminalOpenIpcRequestSchema,
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
@@ -59,6 +60,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
+  isAppStackTerminalExecutor,
   isStackExecutor,
   type DockerExecutionResult,
   type DockerExecutorPort,
@@ -631,6 +633,17 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/terminal/open") {
         const req = this.parseBody(TerminalOpenIpcRequestSchema, rawBody, "terminal open");
         writeJson(res, 200, { data: await this.executor.openTerminal(req) });
+        return;
+      }
+
+      // A terminal in one component of an application (ADR-0041). It is its own optional port, so it is answered here,
+      // before the application routes; the session then lives with the sites' ones (write, read, close and list below).
+      if (method === "POST" && pathname === "/v1/app-stacks/terminal/open") {
+        if (!isAppStackTerminalExecutor(this.executor)) {
+          throw new ExecutorCodedError("Application terminals are not supported by the active executor backend", "NOT_SUPPORTED");
+        }
+        const req = this.parseBody(AppStackTerminalOpenIpcRequestSchema, rawBody, "application terminal open");
+        writeJson(res, 200, { data: await this.executor.openAppStackTerminal(req) });
         return;
       }
 

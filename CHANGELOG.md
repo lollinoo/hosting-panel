@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Terminal and logs of an application for the server administrator (2026-11-24)
+*hosting-panel v0.15.0*
+
+**New Features**
+- **apps**: Terminal and logs of an application for the server administrator
+
+---
+
 ### Email, webhook and Telegram for the administrator and the customer (2026-11-24)
 *hosting-panel v0.14.0*
 

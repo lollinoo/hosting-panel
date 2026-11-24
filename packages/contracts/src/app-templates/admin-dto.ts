@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { AppTemplateIssueSchema } from "./issues.js";
-import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_CATEGORY_PATTERN, APP_TEMPLATE_LIMITS } from "./limits.js";
+import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_CATEGORY_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema } from "./limits.js";
 import { AppStackPreviewSchema } from "./plan.js";
 import { AppTemplateAnyParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
-import { APP_TEMPLATE_STATES, AppStackStatusSchema } from "./stack-status.js";
+import { APP_TEMPLATE_STATES, AppStackComponentHealthSchema, AppStackStatusSchema } from "./stack-status.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
 const noControl = (s: string): boolean => !/[\p{Cc}\p{Cs}]/u.test(s);
@@ -191,3 +191,18 @@ export const AdminAppStacksDtoSchema = z.object({
   truncated: z.boolean(), // more than ADMIN_APP_STACKS_MAX live stacks exist
 });
 export type AdminAppStacksDto = z.infer<typeof AdminAppStacksDtoSchema>;
+/** One application for the administrator (ADR-0041): the row of the list, its customer and its components. No secret, no parameter value, no plan. */
+export const AdminAppStackDtoSchema = z.object({
+  id: AppEntityIdSchema,
+  name: z.string(),
+  organizationId: z.string(),
+  organizationName: z.string(),
+  templateId: AppEntityIdSchema,
+  templateName: z.string(),
+  versionNumber: z.number().int().positive(),
+  status: AppStackStatusSchema,
+  primaryHostname: z.string().nullable(), // same rule as the list
+  // the customer's page order (desired plan order; a draft: spec services by key)
+  components: z.array(z.object({ key: AppStackKeySchema, health: AppStackComponentHealthSchema })), // health effective: stale → unknown
+});
+export type AdminAppStackDto = z.infer<typeof AdminAppStackDtoSchema>;

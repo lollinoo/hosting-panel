@@ -89,6 +89,7 @@ export interface DockerExecutorPort {
   getPanelContainerLogs(req: { readonly component: PanelContainer; readonly tail: number }): Promise<readonly ServiceLogLine[]>;
   /** /bin/sh as the site type's owner in the site container; nothing typed or printed is ever logged. */
   openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult>;
+  // write, read, close and list serve the sessions of sites and of application components alike (ADR-0041).
   writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void>;
   /** Long poll: waits up to TERMINAL_READ_WAIT_MS when nothing is new. */
   readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult>;
@@ -106,10 +107,16 @@ export interface TerminalEnded { readonly reason: TerminalExecutorEndReason; rea
 export interface TerminalOpenRequest { readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string; readonly siteType?: SiteTypeKey }
 export interface TerminalOpenResult { readonly containerName: string; readonly openedAt: string }
 export interface TerminalReadResult { readonly output: string; readonly cursor: number; readonly dropped: boolean; readonly ended: TerminalEnded | null }
-export interface TerminalSessionRecord {
+export interface SiteTerminalSessionRecord {
   readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string;
   readonly containerName: string; readonly openedAt: string; readonly ended: TerminalEnded | null;
 }
+/** A session in one component of an application (ADR-0041). */
+export interface AppStackTerminalSessionRecord {
+  readonly sessionId: string; readonly stackId: string; readonly organizationId: string; readonly componentKey: string;
+  readonly containerName: string; readonly openedAt: string; readonly ended: TerminalEnded | null;
+}
+export type TerminalSessionRecord = SiteTerminalSessionRecord | AppStackTerminalSessionRecord;
 
 export type PinnedPanelContainer = (typeof PINNED_PANEL_CONTAINERS)[number];
 

@@ -321,7 +321,9 @@ un'applicazione. Le decisioni L22–L28 sono state prese con lui; L31 è una sce
 - **L26 Limiti e dati.** `max_sites` e il limite degli stack restano due limiti distinti; nessuna tabella, DTO o route rinominata.
 - **L27 Amministratore.** La voce «Siti» diventa «Applicazioni» (`/admin/sites`): le applicazioni WordPress come prima e, con il
   flag acceso, gli stack di tutti i clienti in sola lettura, letti dalla route nuova `GET /v1/admin/app-stacks`
-  (amministratore del server, al più 200, nessun segreto né valore di parametro). «Modelli» è un solo elenco dei due tipi con un
+  (amministratore del server, al più 200, nessun segreto né valore di parametro). Dall'`ADR-0041` la riga di uno stack porta
+  alla sua pagina, dove l'amministratore legge i log di un componente e vi apre un terminale; non può ancora avviarlo,
+  fermarlo o cambiarlo. «Modelli» è un solo elenco dei due tipi con un
   solo «Nuovo modello»; `/admin/templates/apps` porta a `/admin/templates`.
 - **L28 Modificare un modello multi-servizio.** Nome, descrizione e categoria si cambiano dalla pagina del modello (la `PATCH`
   esistente); valgono quelli della riga, non quelli dell'intestazione `x-hp-stack` di una versione nuova. «Modifica contenuto»
