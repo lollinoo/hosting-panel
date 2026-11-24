@@ -113,7 +113,7 @@ describe("statuses of a run", () => {
   it("are the closed lists of ADR-0042", () => {
     expect(APP_STACK_TASK_RUN_STATUSES).toEqual(["queued", "running", "succeeded", "failed", "timed_out", "not_started", "unknown"]);
     expect(APP_STACK_TASK_RUN_FINAL_STATUSES).toEqual(["succeeded", "failed", "timed_out", "not_started", "unknown"]);
-    expect(APP_STACK_TASK_EXECUTOR_OUTCOMES).toEqual(["succeeded", "failed", "timed_out", "not_started"]);
+    expect(APP_STACK_TASK_EXECUTOR_OUTCOMES).toEqual(["succeeded", "failed", "timed_out", "not_started", "unknown"]);
     expect(APP_STACK_TASK_RUN_PROBLEMS).toEqual([
       "component_not_running",
       "cannot_run_tasks",
@@ -395,7 +395,7 @@ describe("the executor call that runs a task", () => {
   const ended = "2026-11-23T10:00:02.000Z";
   const result = { runId: RUN, outcome: "succeeded", problem: null, exitCode: 0, startedAt: started, endedAt: ended, output: "done", outputTruncated: false };
 
-  it("accepts the four ways a run ends", () => {
+  it("accepts the five ways a run ends", () => {
     for (const good of [
       result,
       { ...result, outcome: "failed", exitCode: 3 },
@@ -403,6 +403,9 @@ describe("the executor call that runs a task", () => {
       { ...result, outcome: "failed", exitCode: null }, // the engine did not tell
       { ...result, outcome: "timed_out", exitCode: null, outputTruncated: true },
       { ...result, outcome: "not_started", problem: "no_shell", exitCode: null, startedAt: null, output: "" },
+      // The kill of the command was not confirmed: it started, and nobody can say it is not still going. Its output stays.
+      { ...result, outcome: "unknown", exitCode: null },
+      { ...result, outcome: "unknown", exitCode: null, output: "", outputTruncated: true },
     ]) {
       expect(AppStackTaskRunIpcResultSchema.parse(good), JSON.stringify(good)).toEqual(good);
     }
@@ -419,7 +422,10 @@ describe("the executor call that runs a task", () => {
     ["not started with output", { outcome: "not_started", problem: "no_shell", exitCode: null, startedAt: null }],
     ["not started with a start", { outcome: "not_started", problem: "no_shell", exitCode: null, output: "" }],
     ["not started with an exit code", { outcome: "not_started", problem: "no_shell", startedAt: null, output: "" }],
-    ["an outcome only the API gives", { outcome: "unknown", exitCode: null }],
+    ["an unknown outcome with an exit code", { outcome: "unknown", exitCode: 0 }],
+    ["an unknown outcome with another exit code", { outcome: "unknown", exitCode: 137 }],
+    ["an unknown outcome with a problem", { outcome: "unknown", exitCode: null, problem: "no_shell" }],
+    ["an unknown outcome for a run that did not start", { outcome: "unknown", exitCode: null, startedAt: null }],
     ["a problem only the API gives", { outcome: "not_started", problem: "task_gone", exitCode: null, startedAt: null, output: "" }],
     ["exit code 256", { outcome: "failed", exitCode: 256 }],
     ["a negative exit code", { outcome: "failed", exitCode: -1 }],

@@ -62,7 +62,7 @@ export const APP_STACK_TASK_RUN_PROBLEMS = [
   "task_gone", // the installed version no longer has the task, or its template no longer validates
   "unavailable", // this server cannot run tasks, or the executor was not reached
   "refused", // the executor refused the request
-  "outcome_lost", // the answer was lost and the executor does not know the run
+  "outcome_lost", // nobody knows how it ended: the answer was lost and the executor does not know the run, or it could not confirm the stop
   "busy", // when it was to begin, another action of the application was queued or running
 ] as const;
 export type AppStackTaskRunProblem = (typeof APP_STACK_TASK_RUN_PROBLEMS)[number];
@@ -215,7 +215,11 @@ export const AppStackTaskRunIpcRequestSchema = AppStackRefIpcRequestSchema.exten
 }).strict();
 export type AppStackTaskRunIpcRequest = z.infer<typeof AppStackTaskRunIpcRequestSchema>;
 
-export const APP_STACK_TASK_EXECUTOR_OUTCOMES = ["succeeded", "failed", "timed_out", "not_started"] as const satisfies
+/**
+ * `unknown`: the command started and the executor could not confirm that it stopped what the run started (every try of
+ * the clean-up failed, or the clean-up cannot work in that component). The command may still be going.
+ */
+export const APP_STACK_TASK_EXECUTOR_OUTCOMES = ["succeeded", "failed", "timed_out", "not_started", "unknown"] as const satisfies
   readonly AppStackTaskRunFinalStatus[];
 export type AppStackTaskExecutorOutcome = (typeof APP_STACK_TASK_EXECUTOR_OUTCOMES)[number];
 /** The one reason the executor answers `not_started` instead of refusing: the component has no shell for the clean-up. */
@@ -251,6 +255,7 @@ export const AppStackTaskRunIpcResultSchema = z
     if (result.outcome === "succeeded" && result.exitCode !== 0) wrong("A run succeeds only with exit code 0.");
     if (result.outcome === "failed" && result.exitCode === 0) wrong("A failed run has no exit code 0.");
     if (result.outcome === "timed_out" && result.exitCode !== null) wrong("A run ended at its time limit has no exit code.");
+    if (result.outcome === "unknown" && result.exitCode !== null) wrong("A run whose outcome is not known has no exit code.");
   });
 export type AppStackTaskRunIpcResult = z.infer<typeof AppStackTaskRunIpcResultSchema>;
 
