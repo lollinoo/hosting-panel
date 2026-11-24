@@ -277,3 +277,51 @@ describe("the shared rule and the last guard", () => {
     expect(stored([{ key: "tidy", label: "Tidy up", service: "app", command: ["/app/bin/tidy"] }])).toBe(false);
   });
 });
+
+// ADR-0042 §7: the clean-up finds what a run started by "HP_TASK_RUN=" as text anywhere in a process's environment, so
+// no value of a component may hold that text, whoever wrote it. The rule is PR #74's (the closed list of the platform's
+// process marks, which names HP_TASK_RUN); the cases marked skip pass once main, with PR #74, is merged into this branch:
+// the coder of that merge switches them on.
+describe("the mark of a task run is never in the environment of a component", () => {
+  const ids = {
+    stackId: "stk_0123456789abcdef0123456789abcdef",
+    organizationId: "org_acme",
+    hostAllocationId: "alloc_0123456789abcdef0123456789abcdef",
+    templateVersionId: "atv_0123456789abcdef01234567",
+    revisionId: "astr_0123456789abcdef0123456789abcdef",
+  };
+  /** Replaces `from`, which must be present, so a stale edit cannot pass silently. */
+  const edit = (source: string, from: string, to: string): string => {
+    if (!source.includes(from)) throw new Error(`not in the source: ${from}`);
+    return source.replace(from, () => to);
+  };
+  // A customer's text parameter that lands in an environment value of the component "app".
+  const titled = edit(
+    edit(SOURCE, "x-hp-parameters:\n", 'x-hp-parameters:\n  - key: title\n    label: Title\n    type: string\n    default: "Notes"\n    customer: true\n'),
+    "        value: cache\n",
+    '        value: cache\n      - name: TITLE\n        value: "${title}"\n',
+  );
+  const compile = (source: string, title: string) =>
+    compileAppStackPlan({ source, parameters: [{ key: "title", value: title }], secretVersions: new Map([["app_secret", 1]]), ids }, options);
+
+  it("lands a customer's ordinary text in the environment as it is", () => {
+    const result = compile(titled, "My notes");
+    if (!result.ok) throw new Error(`expected a plan, got ${JSON.stringify(result.issues)}`);
+    expect(result.plan.components.find((c) => c.key === "app")?.environment).toContainEqual({ name: "TITLE", value: "My notes" });
+  });
+
+  it.skip("refuses a customer's text that holds the mark of a task run [switch on once PR #74 is merged]", () => {
+    for (const title of ["HP_TASK_RUN=srun_", "x HP_TASK_RUN=srun_0123456789abcdef01234567"]) {
+      const result = compile(titled, title);
+      expect(result.ok, title).toBe(false);
+      if (!result.ok) expect(summary(result.issues), title).toEqual([{ path: "parameters.title", code: "PARAM_VALUE_FORBIDDEN_CONTENT" }]);
+    }
+  });
+
+  it.skip("refuses a template whose own environment value holds the mark of a task run [switch on once PR #74 is merged]", () => {
+    const source = edit(SOURCE, "        value: cache\n", "        value: cache\n      - name: MODE\n        value: x HP_TASK_RUN=srun_1\n");
+    const result = validateAppTemplateSource(source, options);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(summary(result.errors)).toContainEqual({ path: "services.app.environment[1].value", code: "ENV_VALUE_PROCESS_MARK" });
+  });
+});

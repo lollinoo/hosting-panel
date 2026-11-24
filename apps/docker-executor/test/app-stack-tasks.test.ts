@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   APP_STACK_TASK_LIMITS,
   AppStackTaskRunIpcResultSchema,
+  appStackTextProblem,
   type AppStackTaskRunIpcRequest,
   type AppStackTaskRunIpcResult,
   type IpcSigningKey,
@@ -33,6 +34,7 @@ import {
   InMemoryDockerSimulatorAdapter,
   SignedDockerExecutorIpcClient,
   appStackContainerName,
+  assertExecutableAppStackPlan,
   appStackSecretDirKey,
   type IngressCapableDockerExecutor,
 } from "../src/index.js";
@@ -166,6 +168,25 @@ describe("the clean-up script of tasks", () => {
     // The one exit 0 is a pass that found nothing new; at the bound the clean-up did not finish (the retry path).
     expect(APP_STACK_TASK_KILL_SCRIPT.match(/exit 0/g)).toHaveLength(1);
     expect(APP_STACK_TASK_KILL_SCRIPT.endsWith("exit 1")).toBe(true);
+  });
+});
+
+describe("the mark of a run in the environment of a component", () => {
+  // ADR-0042 §7: the clean-up finds what a run started by "HP_TASK_RUN=" as text anywhere in an environment, so no value
+  // of a component may hold it; the executor re-checks every plan. The rule is PR #74's (the platform's process marks);
+  // switch this on once main, with PR #74, is merged into this branch.
+  it.skip("is refused in a plan before anything reaches Docker [switch on once PR #74 is merged]", () => {
+    const [web, worker] = appStackTestPlan().components;
+    const marked = appStackTestPlan({ components: [{ ...web!, environment: [{ name: "APP_MODE", value: `x ${APP_STACK_TASK_MARK}=srun_` }] }, worker!] });
+    let refused: unknown = null;
+    try {
+      assertExecutableAppStackPlan(marked, { allowlist: TEST_ALLOWLIST });
+    } catch (err) {
+      refused = err;
+    }
+    expect(refused).toMatchObject({ reason: "STACK_PLAN_INVALID" });
+    // The mark the executor sets is the one the rule names.
+    expect(appStackTextProblem(`x ${APP_STACK_TASK_MARK}=srun_1`)).toBe("process_mark");
   });
 });
 
