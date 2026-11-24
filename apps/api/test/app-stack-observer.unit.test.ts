@@ -450,9 +450,29 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(calls.filter((c) => c.method === "syncAppStackLinks").map((c) => c.stackId)).toEqual([linkable.id]);
       const rows = await db().select().from(appStackLinks);
       expect(rows.filter((row) => row.providerStackId === linkable.id).map((row) => row.state)).toEqual(["active"]);
-      // Reported as a link the server could not be asked for: waiting, not connected.
-      const waiting = rows.filter((row) => unusable.includes(row.providerStackId)).map((row) => row.state);
-      expect(waiting).toEqual(Array.from({ length: APP_STACK_LINK_RETRY_BATCH + 1 }, () => "pending"));
+      // Their rows are touched, not changed: nothing was detached, so a connected link stays connected.
+      const kept = rows.filter((row) => unusable.includes(row.providerStackId)).map((row) => [row.id, row.state]);
+      expect(Object.fromEntries(kept)).toEqual({
+        ...Object.fromEntries(unusable.map((_, i) => [`slnk_obs_${String(i)}`, "pending"])),
+        slnk_obs_99: "active",
+      });
+    });
+
+    it("an active link of a database whose version cannot be linked stays active when its links are applied", async () => {
+      const application = await seedStack({ status: "running" });
+      const database = await seedStack({ status: "running" });
+      await db()
+        .insert(appStackLinks)
+        .values({ id: "slnk_obs_kept", organizationId: ORG, consumerStackId: application.id, providerStackId: database.id, state: "active", updatedAt: at(-60) });
+      const links = new AppStackLinksApplier(client, executor(), { runtimeBackend: "local-simulator" } as ControlPlaneRuntimeConfig);
+
+      await links.apply(database.id);
+
+      expect(calls.filter((c) => c.method === "syncAppStackLinks")).toEqual([]);
+      const [row] = await db().select().from(appStackLinks).where(eq(appStackLinks.id, "slnk_obs_kept"));
+      expect(row!.state).toBe("active");
+      // Touched: it goes behind the databases that waited longer.
+      expect(row!.updatedAt.getTime()).toBeGreaterThan(at(-60).getTime());
     });
   });
 
