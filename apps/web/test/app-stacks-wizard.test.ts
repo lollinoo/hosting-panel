@@ -4,12 +4,7 @@ import * as React from "react";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  APP_STACK_PROCESS_MARKS,
-  APP_STACK_SECRET_ENV_LIMITS,
-  type AppTemplateParameter,
-  type CustomerAppTemplateDto
-} from "@hosting-panel/contracts";
+import { APP_STACK_PROCESS_MARKS, APP_STACK_SECRET_ENV_LIMITS, type AppTemplateParameter, type CustomerAppTemplateDto } from "@hosting-panel/contracts";
 
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
 const fetchUpstream = vi.hoisted(() => vi.fn());
