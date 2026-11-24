@@ -8,6 +8,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  appStackComponents,
   appStackLinks,
   appStacks,
   auditEvents,
@@ -582,6 +583,53 @@ describe("private links between a database and an application (ADR-0039)", () =>
     expect((await disconnect(app.stackId, made.body.data.links[0].id as string)).status).toBe(200);
     const taken = await upgrade();
     expect(taken.status, taken.raw).toBe(202);
+  }, 60_000);
+
+  it("an upgrade of a linked database that fails at pull is taken back: its links and its component row are as before", async () => {
+    const { templateId, versionId } = await h.publish(VALKEY.source);
+    const database = await create(versionId);
+    await deploy(database.stackId);
+    const app = await application(true);
+    expect((await connect(app.stackId, database.stackId)).status).toBe(201);
+    const added = await h.call(h.adminToken, "POST", `/v1/admin/app-templates/${templateId}/versions`, {
+      source: VALKEY.source.replace('"256mb"', '"128mb"'),
+      makeDefault: true,
+    });
+    expect(added.status, added.raw).toBe(201);
+    const next = added.body.data.versionId as string;
+    const links = async () => (await linkRows()).filter((row) => row.providerStackId === database.stackId);
+    // Keyed on the stack and the component key; its health is the settle's new reading.
+    const components = async () =>
+      (await h.dbClient.db.select().from(appStackComponents).where(eq(appStackComponents.stackId, database.stackId))).map(
+        ({ updatedAt: _u, healthObservedAt: _h, ...row }) => row,
+      );
+    const linksBefore = await links();
+    const componentsBefore = await components();
+    expect(linksBefore).toEqual([expect.objectContaining({ consumerStackId: app.stackId, state: "active" })]);
+    expect(componentsBefore).toHaveLength(1);
+    const before = await stackRow(database.stackId);
+    const callsBefore = sim.appStacks.appStackCalls.length;
+
+    const plan = await h.call(h.a.token, "POST", path(database.stackId, "/plan"), { templateVersionId: next });
+    expect(plan.status, plan.raw).toBe(200);
+    sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+    const upgrade = await h.call(h.a.token, "POST", path(database.stackId, "/upgrade"), { templateVersionId: next, planHash: plan.body.data.planHash }, idem());
+    expect(upgrade.status, upgrade.raw).toBe(202);
+    await drain(database.stackId);
+
+    expect((await opsOf(database.stackId)).filter((o) => o.kind === "stack.upgrade").map((o) => o.status)).toEqual(["failed"]);
+    // Taken back to what the request replaced; nothing of the database was touched on the server.
+    expect(await stackRow(database.stackId)).toMatchObject({
+      status: "running",
+      desiredRevisionId: before.desiredRevisionId,
+      appliedRevisionId: before.appliedRevisionId,
+      templateVersionId: versionId,
+    });
+    expect(await links()).toEqual(linksBefore);
+    expect(await components()).toEqual(componentsBefore);
+    expect(sim.appStacks.appStackCalls.slice(callsBefore).map((c) => c.method)).not.toContain("syncAppStackLinks");
+    expect(linked(database.stackId)).toEqual([app.stackId]);
+    expect((await read(app.stackId)).body.data.links).toEqual([expect.objectContaining({ state: "active" })]);
   }, 60_000);
 });
 
