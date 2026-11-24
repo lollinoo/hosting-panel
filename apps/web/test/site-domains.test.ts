@@ -86,6 +86,17 @@ describe("domains BFF", () => {
     ]);
     expect(fetchUpstream.mock.calls[1]![1].body).toEqual({ hostname: "hotel.it", includeWww: true });
   });
+
+  it("add forwards the Idempotency-Key it carries (a certificate needs it), and an add without one goes as before", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 201, data: { data: {} } });
+    const withCertificate = { hostname: "hotel.it", includeWww: false, tlsVersionId: "tv_1" };
+    expect((await addDomain(req("POST", { "Idempotency-Key": "k-add-1" }, withCertificate), sp)).status).toBe(201);
+    expect(fetchUpstream).toHaveBeenLastCalledWith(base, expect.objectContaining({ method: "POST", idempotencyKey: "k-add-1", body: withCertificate }));
+    expect((await addDomain(req("POST", {}, { hostname: "hotel.it", includeWww: true }), sp)).status).toBe(201);
+    expect(fetchUpstream.mock.calls[1]![1]).not.toHaveProperty("idempotencyKey");
+    await listDomains(req("GET", { "Idempotency-Key": "k-list" }), sp);
+    expect(fetchUpstream.mock.calls[2]![1]).not.toHaveProperty("idempotencyKey");
+  });
 });
 
 describe("domainView", () => {

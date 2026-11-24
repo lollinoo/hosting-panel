@@ -115,7 +115,7 @@ export async function forwardToUpstream(
   upstreamPath: string,
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>,
-  opts?: { timeoutMs?: number; body?: (b: unknown) => boolean }
+  opts?: { timeoutMs?: number; body?: (b: unknown) => boolean; idempotencyKey?: boolean }
 ): Promise<NextResponse> {
   const session = await getSessionFromRequest(req);
   if (method === "GET") {
@@ -135,11 +135,14 @@ export async function forwardToUpstream(
     }
   }
 
+  // Opt-in: the page's key goes on when it sent one; a call without one goes as before.
+  const idempotencyKey = opts?.idempotencyKey ? req.headers.get("idempotency-key")?.trim() : undefined;
   const upstreamRes = await fetchUpstream(upstreamPath, {
     method,
     accessToken: session!.accessToken,
     body,
     timeoutMs: opts?.timeoutMs,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
   });
   const response = bffUpstreamResponse(upstreamRes);
   if (upstreamRes.ok && onSuccess) await onSuccess(session!, body, response);
