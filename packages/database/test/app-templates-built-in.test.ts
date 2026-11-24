@@ -29,6 +29,15 @@ const seededBeforeVersion2 = (): readonly BuiltInAppTemplateItem[] =>
       : i,
   );
 
+/** The databases that shipped a second version: each has its first one in `previousVersions`. */
+const databasesWithVersion2 = () => builtInAppTemplateItems().filter((i) => i.category === "database" && i.previousVersions !== undefined);
+/** The seed as the release before the second version of the databases shipped it: version 1 is the newest and the default. */
+const seededBeforeDatabaseVersion2 = (): readonly BuiltInAppTemplateItem[] =>
+  builtInAppTemplateItems().map((i) => {
+    const earlier = i.category === "database" ? i.previousVersions?.[0] : undefined;
+    return earlier === undefined ? i : { ...i, versionId: earlier.versionId, description: earlier.description, version: earlier.version, previousVersions: [] };
+  });
+
 describe("@hosting-panel/database - built-in app templates", () => {
   it("validates and hashes the six seeds, each in the format it was written in", () => {
     const items = builtInAppTemplateItems();
@@ -36,7 +45,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       ["atpl_http_cache", "atv_http_cache_1", "http-cache", "web"],
       ["atpl_worker_storage", "atv_worker_storage_1", "worker-storage", "jobs"],
       ["atpl_wordpress_mariadb", "atv_wordpress_mariadb_2", "wordpress-mariadb", "content"],
-      ["atpl_mariadb", "atv_mariadb_1", "mariadb", "database"],
+      ["atpl_mariadb", "atv_mariadb_2", "mariadb", "database"],
       ["atpl_postgresql", "atv_postgresql_1", "postgresql", "database"],
       ["atpl_valkey", "atv_valkey_1", "valkey", "database"],
     ]);
@@ -53,7 +62,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
 
   it("carries the earlier WordPress version, validated and hashed, before the newest one", () => {
     const items = builtInAppTemplateItems();
-    expect(items.filter((i) => i.previousVersions !== undefined).map((i) => i.slug)).toEqual(["wordpress-mariadb"]);
+    expect(items.filter((i) => i.previousVersions !== undefined).map((i) => i.slug)).toEqual(["wordpress-mariadb", "mariadb"]);
     const item = items.find((i) => i.slug === "wordpress-mariadb")!;
     const t = APP_BUILT_IN_TEMPLATES.find((s) => s.slug === "wordpress-mariadb")!;
     expect(item.previousVersions).toHaveLength(1);
@@ -67,6 +76,23 @@ describe("@hosting-panel/database - built-in app templates", () => {
     expect(first.description).toBe((first.version.compiledSchema as AppTemplateSpec).description);
     expect(first.description).not.toBe(item.description);
     expect(item.version.specHash).not.toBe(first.version.specHash);
+  });
+
+  it("carries the earlier version of each database that has one, validated and hashed, byte for byte as the seed gives it", () => {
+    const items = databasesWithVersion2();
+    expect(items.map((i) => i.slug)).toEqual(["mariadb"]);
+    for (const item of items) {
+      const t = APP_BUILT_IN_TEMPLATES.find((s) => s.slug === item.slug)!;
+      expect(item.previousVersions).toHaveLength(1);
+      const first = item.previousVersions![0]!;
+      expect(first.versionId).toBe(t.previousVersions![0]!.versionId);
+      expect(first.version.source).toBe(t.previousVersions![0]!.source);
+      expect(first.version.specVersion).toBe(1);
+      expect(first.version.specHash).toBe(computeAppTemplateSpecHash(first.version.compiledSchema as AppTemplateSpec));
+      expect(first.version.specHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(first.version.source).not.toBe(item.version.source);
+      expect(first.version.specHash).not.toBe(item.version.specHash);
+    }
   });
 
   it("throws naming the slug and the issue codes only when a seed does not validate", () => {
@@ -95,7 +121,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       await client.close();
     });
 
-    it("seeds six disabled built-in templates, one version each and both WordPress ones, twice without change, keeping an admin rename", async () => {
+    it("seeds six disabled built-in templates, one version each but the WordPress and the database ones that have an earlier one, twice without change, keeping an admin rename", async () => {
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
       await updateAppTemplate(db(), { templateId: "atpl_http_cache", name: "Il mio sito" });
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
@@ -103,7 +129,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       const templates = await db().select().from(appTemplates).orderBy(appTemplates.id);
       expect(templates.map((t) => [t.id, t.builtIn, t.enabled, t.defaultVersionId])).toEqual([
         ["atpl_http_cache", true, false, "atv_http_cache_1"],
-        ["atpl_mariadb", true, false, "atv_mariadb_1"],
+        ["atpl_mariadb", true, false, "atv_mariadb_2"],
         ["atpl_postgresql", true, false, "atv_postgresql_1"],
         ["atpl_valkey", true, false, "atv_valkey_1"],
         ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_2"],
@@ -116,6 +142,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
         atv_wordpress_mariadb_1: 2,
         atv_wordpress_mariadb_2: 2,
         atv_mariadb_1: 1,
+        atv_mariadb_2: 1,
         atv_postgresql_1: 1,
         atv_valkey_1: 1,
       });
@@ -129,7 +156,12 @@ describe("@hosting-panel/database - built-in app templates", () => {
                 ["atv_wordpress_mariadb_1", 1],
                 ["atv_wordpress_mariadb_2", 2],
               ]
-            : [[t.defaultVersionId, 1]],
+            : t.id === "atpl_mariadb"
+              ? [
+                  ["atv_mariadb_1", 1],
+                  ["atv_mariadb_2", 2],
+                ]
+              : [[t.defaultVersionId, 1]],
         );
       }
       expect(await getAppTemplate(db(), "atpl_wordpress_mariadb")).toMatchObject({ description: WORDPRESS.description });
@@ -205,6 +237,67 @@ describe("@hosting-panel/database - built-in app templates", () => {
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
       expect(await getAppTemplate(db(), "atpl_wordpress_mariadb")).toMatchObject({ defaultVersionId: "atv_wordpress_mariadb_1" });
       expect((await versionsOf("atpl_wordpress_mariadb")).map((v) => v.id)).toEqual(["atv_wordpress_mariadb_1", "atv_wordpress_mariadb_2"]);
+    });
+  });
+
+  describe("an installation seeded before the second version of the databases (PGlite)", () => {
+    let client: DatabaseClient;
+    const db = () => client.db;
+    const versionsOf = (templateId: string) =>
+      db().select().from(appTemplateVersions).where(eq(appTemplateVersions.templateId, templateId)).orderBy(appTemplateVersions.versionNumber);
+
+    beforeEach(async () => {
+      client = createDatabaseClient({ mode: "pglite" });
+      await client.migrate();
+      await ensureBuiltInAppTemplates(db(), seededBeforeDatabaseVersion2());
+    }, 120_000);
+
+    afterEach(async () => {
+      await client.close();
+    });
+
+    it("gets version 2 of each database at the next start, as number 2 and the default; version 1 is not rewritten; an enabled template stays enabled", async () => {
+      const items = databasesWithVersion2();
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) {
+        const [before] = await versionsOf(item.templateId);
+        expect(before).toMatchObject({ id: item.previousVersions![0]!.versionId, versionNumber: 1, source: item.previousVersions![0]!.version.source });
+        expect(await getAppTemplate(db(), item.templateId)).toMatchObject({ defaultVersionId: before!.id, description: item.previousVersions![0]!.description });
+        await updateAppTemplate(db(), { templateId: item.templateId, enabled: true });
+      }
+
+      await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
+      for (const item of items) {
+        const first = item.previousVersions![0]!;
+        const after = await versionsOf(item.templateId);
+        expect(after.map((v) => [v.id, v.versionNumber, v.createdBy])).toEqual([
+          [first.versionId, 1, null],
+          [item.versionId, 2, null],
+        ]);
+        expect(after[0]).toMatchObject({ source: first.version.source, specHash: first.version.specHash });
+        expect(after[1]).toMatchObject({ source: item.version.source, specHash: item.version.specHash });
+        expect(await getAppTemplate(db(), item.templateId)).toMatchObject({
+          defaultVersionId: item.versionId,
+          description: item.description,
+          enabled: true,
+          name: item.name,
+        });
+      }
+
+      // A third start changes nothing.
+      const settled = await Promise.all(items.map(async (item) => [await versionsOf(item.templateId), await getAppTemplate(db(), item.templateId)] as const));
+      await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
+      expect(await Promise.all(items.map(async (item) => [await versionsOf(item.templateId), await getAppTemplate(db(), item.templateId)] as const))).toEqual(settled);
+    });
+
+    it("keeps a description the administrator wrote, while the default still moves; the databases without a second version are untouched", async () => {
+      const item = databasesWithVersion2()[0]!;
+      await updateAppTemplate(db(), { templateId: item.templateId, description: "Il nostro database" });
+      await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
+      expect(await getAppTemplate(db(), item.templateId)).toMatchObject({ defaultVersionId: item.versionId, description: "Il nostro database" });
+      for (const other of builtInAppTemplateItems().filter((i) => i.category === "database" && i.previousVersions === undefined)) {
+        expect((await versionsOf(other.templateId)).map((v) => [v.id, v.versionNumber])).toEqual([[other.versionId, 1]]);
+      }
     });
   });
 });

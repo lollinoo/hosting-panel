@@ -7,6 +7,8 @@ import { APP_STACK_ID_PATTERN, APP_TEMPLATE_CATEGORY_PATTERN, APP_TEMPLATE_LIMIT
 import { APP_DATABASE_TEMPLATE_CATEGORY } from "../src/app-templates/stack-links.js";
 import { appStackTextProblem } from "../src/app-templates/text.js";
 
+const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+const databaseSeed = (slug: string): (typeof APP_BUILT_IN_TEMPLATES)[number] => APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug)!;
 const CUSTOMER_WORDING = /container|image|volume|service|network|template|immagin|volum|servizi|\brete\b|\breti\b/i;
 const IMAGE_LINE = /^ {4}image: (.+)$/gm;
 const PINNED_IMAGE = /^([^:@\s]+):[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}$/;
@@ -40,7 +42,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
         category: "content",
         name: "WordPress in contenitore",
       },
-      { templateId: "atpl_mariadb", versionId: "atv_mariadb_1", slug: "mariadb", category: "database", name: "Database MariaDB" },
+      { templateId: "atpl_mariadb", versionId: "atv_mariadb_2", slug: "mariadb", category: "database", name: "Database MariaDB" },
       { templateId: "atpl_postgresql", versionId: "atv_postgresql_1", slug: "postgresql", category: "database", name: "Database PostgreSQL" },
       { templateId: "atpl_valkey", versionId: "atv_valkey_1", slug: "valkey", category: "database", name: "Archivio Valkey" },
     ]);
@@ -152,8 +154,8 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
     expect(createHash("sha256").update(first.source).digest("hex")).toBe("90d98e325ce227a7b442f6291bd84f3f821c4e2f20e90e8d4b68c4b30d9ed29e");
     expect(first.source).not.toContain("command:");
     expect(first.source).not.toContain("WORDPRESS_CONFIG_EXTRA");
-    // The only seed with an earlier version.
-    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb"]);
+    // The seeds with an earlier version.
+    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb", "mariadb"]);
   });
 
   it("wordpress-mariadb version 2: the site follows the address it is asked by, and takes uploads of up to 64 MB", () => {
@@ -173,6 +175,27 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
         .replace(/^ {4}command: .*\n/m, "")
         .replace(/^ {6}- name: WORDPRESS_CONFIG_EXTRA\n {8}value: .*\n/m, "");
     expect(strip(t.source)).toBe(strip(first));
+  });
+
+  it("mariadb: version 2 keeps the database's temporary files on its data area; version 1 is kept byte for byte as the earlier version", () => {
+    const t = databaseSeed("mariadb");
+    expect(t.versionId).toBe("atv_mariadb_2");
+    expect(t.templateId).toBe("atpl_mariadb");
+    expect(Object.isFrozen(t.previousVersions)).toBe(true);
+    expect(t.previousVersions?.map((v) => v.versionId)).toEqual(["atv_mariadb_1"]);
+    const first = t.previousVersions![0]!;
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.source.length).toBe(1395);
+    expect(sha256(first.source)).toBe("a3c7de82e0b0b51d33fa9194d82b37ee98a8573f1c881e2023bd25cd6ea0cebc");
+    const commandOf = (source: string) => [...source.matchAll(/^ {4}command: (.*)$/gm)].map((m) => m[1]);
+    expect(commandOf(first.source)).toEqual(['["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]']);
+    // The strict profile's /tmp is a 64 MB area counted as memory: a sort or an index build larger than that failed there.
+    expect(commandOf(t.source)).toEqual(['["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid", "--tmpdir=/var/lib/mysql"]']);
+    expect(t.source).toContain("      - data:/var/lib/mysql\n");
+    // Everything else of version 1 is unchanged: the description, the parameters, the environment, the limits.
+    const strip = (source: string) => source.replace(/^ {4}command: .*\n/m, "");
+    expect(strip(t.source)).toBe(strip(first.source));
+    expect(t.source.includes(`description: "${t.description}"`)).toBe(true);
   });
 
   it("exports no *_IMAGE constant carrying a seed image", () => {

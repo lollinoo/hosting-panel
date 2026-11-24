@@ -10,9 +10,12 @@
  * reach each other; the link follows a database whose container was replaced; removing an application detaches a
  * running database and a stopped one; an attachment to a network that is gone, or that was made again under the same
  * name, is repaired before the start; a target of another customer is refused; a removed link takes the way away.
+ * A database application created on version 1 of its template (the source of the seed's `previousVersions`) and moved to
+ * the newest version in place, the way the API does it (the container is made again on the same volume), keeps what it
+ * held and starts; the newest version also starts on an empty volume (the steps that deploy it).
  *
  * Machine safety (this machine may run a live panel):
- *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x, so every container, network
+ *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x|u, so every container, network
  *    and volume name the engine derives contains swarmtest_<hex>; the script's own names and paths use
  *    hp_swarmtest_stk_<hex>; the names of the links contain swarmtest-<hex>.
  *  - The adapter talks only to a gate socket in the temp dir. Its default-deny judge() forwards a request to
@@ -36,7 +39,7 @@
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-databases.mjs
  * Steps: gate-self-test, preflight, snapshot-before, plans-compile-from-seeds, applications-deploy,
  * mariadb-starts-hardened, postgresql-starts-hardened, valkey-starts-hardened, data-survives-restart,
- * unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
+ * mariadb-earlier-version-upgrades, unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
  * link-follows-a-replaced-database, application-stop-start-keeps-links,
  * application-removal-detaches-running-database,
  * stopped-database-survives-application-removal, stale-attachment-repaired, refuses-foreign-targets,
@@ -84,10 +87,11 @@ const secretsRoot = `/dev/shm/${runPrefix}-secrets`;
 const ORG = `org_swarmtest_${hex}`;
 const OTHER_ORG = `org_swarmtest_${hex}_other`;
 /** a, b: applications · v, m, p: the Valkey, MariaDB and PostgreSQL databases · n: an application that is only
- *  prepared (a private network and a volume, no container) · x: the same, of another customer. */
-const [A, B, V, M, P, N, X] = ["a", "b", "v", "m", "p", "n", "x"].map((s) => `stk_swarmtest_${hex}_${s}`);
+ *  prepared (a private network and a volume, no container) · x: the same, of another customer · u: a MariaDB that is
+ *  created on its version 1 and moved to the newest version. */
+const [A, B, V, M, P, N, X, UM] = ["a", "b", "v", "m", "p", "n", "x", "u"].map((s) => `stk_swarmtest_${hex}_${s}`);
 /** Removal order of the cleanup: the databases first. */
-const STACKS = [[M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
+const STACKS = [[UM, ORG], [M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
 // hex: can never form an hp_ token
 const PASSWORDS = { mariadbApp: randomBytes(16).toString("hex"), mariadbAdmin: randomBytes(16).toString("hex"), postgresApp: randomBytes(16).toString("hex") };
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
@@ -104,20 +108,23 @@ function variant(source, pairs) {
   }
   return out;
 }
-/** Never throws: a seed that is missing or cannot be changed answers like a plan that does not compile. */
-function compile(slug, stackId, { parameters = [], secretKeys = [], n = 1, edit = [], organizationId = ORG } = {}) {
+/** Never throws: a seed that is missing or cannot be changed answers like a plan that does not compile. `earlier`: the
+ *  seed's version 1 (the first of its `previousVersions`) instead of its newest version. */
+function compile(slug, stackId, { parameters = [], secretKeys = [], n = 1, edit = [], organizationId = ORG, earlier = false } = {}) {
   try {
     const seed = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug);
     if (seed === undefined) return { ok: false, issues: [`no built-in template ${slug}`] };
+    const version = earlier ? seed.previousVersions?.[0] : seed;
+    if (version === undefined) return { ok: false, issues: [`no earlier version of ${slug}`] };
     return compileAppStackPlan({
-      source: variant(seed.source, edit),
+      source: variant(version.source, edit),
       parameters,
       secretVersions: new Map(secretKeys.map((k) => [k, 1])),
       ids: {
         stackId,
         organizationId,
         hostAllocationId: `alloc_swarmtest_${hex}`,
-        templateVersionId: seed.versionId,
+        templateVersionId: version.versionId,
         revisionId: `srev_swarmtest_${hex}_${stackId.at(-1)}${String(n)}`,
       },
     });
@@ -136,6 +143,9 @@ const compiled = {
   v2: compile("valkey", V, { n: 2, edit: [['"256mb"', '"192mb"']] }),
   m: compile("mariadb", M, { secretKeys: ["database_password", "admin_password"] }),
   p: compile("postgresql", P, { secretKeys: ["database_password"] }),
+  // The same MariaDB application as it is on version 1, and as it is after the move to the newest version.
+  um1: compile("mariadb", UM, { secretKeys: ["database_password", "admin_password"], earlier: true }),
+  um2: compile("mariadb", UM, { secretKeys: ["database_password", "admin_password"], n: 2 }),
 };
 /** The only images the gate inspects and accepts in a create body. */
 const IMAGES = new Set(Object.values(compiled).flatMap((c) => (c.ok ? c.plan.components.map((x) => x.image) : [])));
@@ -524,8 +534,8 @@ async function main() {
   const unknownName = (answer) => answer !== null && answer.includes("bad address");
 
   // ---- clients, run inside the database's own container; the password is in the docker CLI's environment only ----
-  const mariadb = (host, sql, value = PASSWORDS.mariadbApp) =>
-    docker(["exec", "-e", "MYSQL_PWD", DB(M), "mariadb", "-h", host, "-P", "3306", "--connect-timeout=5", "-uapp", "-N", "-B", "-e", sql, "app"], 60_000, { MYSQL_PWD: value });
+  const mariadb = (host, sql, value = PASSWORDS.mariadbApp, from = DB(M), timeout = 60_000) =>
+    docker(["exec", "-e", "MYSQL_PWD", from, "mariadb", "-h", host, "-P", "3306", "--connect-timeout=5", "-uapp", "-N", "-B", "-e", sql, "app"], timeout, { MYSQL_PWD: value });
   const mariadbAdmin = (where) =>
     docker(["exec", "-e", "MYSQL_PWD", DB(M), "mariadb", ...where, "--connect-timeout=5", "-uroot", "-N", "-B", "-e", "SELECT CURRENT_USER()"], 60_000, {
       MYSQL_PWD: PASSWORDS.mariadbAdmin,
@@ -540,6 +550,13 @@ async function main() {
   const SQL_WRITE_POSTGRES =
     "CREATE TABLE IF NOT EXISTS probe (id int PRIMARY KEY, note text); INSERT INTO probe VALUES (1, 'kept') ON CONFLICT (id) DO UPDATE SET note = EXCLUDED.note";
   const SQL_READ = "SELECT note FROM probe WHERE id = 1";
+  // More temporary space than the 64 MB of /tmp in the strict profile. The Sequence engine makes 900000 rows and no table;
+  // each is a 128-byte binary key (8 times the 16 bytes of an MD5). COUNT(DISTINCT) keeps the keys in a tree of at most
+  // 16 MB (tmp_table_size) and writes the rest to temporary files in the server's tmpdir: about 900000 * 128 B = 115 MB,
+  // 1.8 times the area of version 1 and well under 300 MB of disk. It is one thread: on 4 processors it asks for one, and
+  // it is sized by that arithmetic, not by a measurement (the INFO line below prints the time of each run).
+  const SQL_BIG_DISTINCT = "SELECT COUNT(DISTINCT REPEAT(UNHEX(MD5(seq)), 8)) FROM seq_1_to_900000";
+  const NO_SPACE = /No space left|Errcode: 28|error 28|is full/i;
   const mariadbContents = [
     { parameterKey: "database_password", version: 1, content: PASSWORDS.mariadbApp },
     { parameterKey: "admin_password", version: 1, content: PASSWORDS.mariadbAdmin },
@@ -772,6 +789,22 @@ async function main() {
       }
       assert(leaked(JSON.stringify(plans)) === 0, "no plan holds a part of a password", "leaked");
       assert(plans.v2.planHash !== plans.v.planHash && plans.v2.components[0].argv.includes("192mb"), "the second Valkey plan differs by one option", plans.v2.components[0].argv.join(" "));
+      const [oldM, newM] = [plans.um1.components[0], plans.um2.components[0]];
+      assert(
+        plans.um1.templateVersionId === "atv_mariadb_1" && plans.um2.templateVersionId === "atv_mariadb_2" && plans.m.templateVersionId === "atv_mariadb_2",
+        "the MariaDB plans are of version 1 and of version 2 (newest)",
+        [plans.um1, plans.um2, plans.m].map((x) => x.templateVersionId).join(","),
+      );
+      assert(
+        same(oldM.argv, ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]) && same(newM.argv, [...oldM.argv, "--tmpdir=/var/lib/mysql"]),
+        "MariaDB version 2 adds the temporary directory on the data area to the command of version 1",
+        JSON.stringify([oldM.argv, newM.argv]),
+      );
+      assert(
+        plans.um1.planHash !== plans.um2.planHash && same(oldM.image, newM.image) && same(plans.um1.volumes, plans.um2.volumes) && same(oldM.volumes, newM.volumes),
+        "the two versions differ by the command only: same image, same volume and mount",
+        JSON.stringify({ i: [oldM.image, newM.image], v: [oldM.volumes, newM.volumes] }),
+      );
       assert(plans.x.organizationId === OTHER_ORG, "the foreign application belongs to another customer", plans.x.organizationId);
       for (const stackId of [V, M, P]) {
         assert(aliasOf(stackId) === stackId.replaceAll("_", "-") && aliasOf(stackId).includes(aliasMarker), `the name of ${stackId} for its links`, String(aliasOf(stackId)));
@@ -809,6 +842,9 @@ async function main() {
       assert((await mariadbAdmin(["--socket=/tmp/mysqld.sock"])).trim() === "root@localhost", "the administrator signs in on the local socket with its own password", "another user");
       await mariadb("db", SQL_WRITE_MARIADB);
       assert((await mariadb("db", SQL_READ)).trim() === "kept", "a row is written and read back", "another value");
+      // Version 2 on an empty volume: it starts and keeps its temporary files on the data area.
+      assert((await inspectOf(DB(M))).Config.Cmd.includes("--tmpdir=/var/lib/mysql"), "the newest version runs with its temporary directory", "no --tmpdir");
+      assert((await mariadb("db", "SELECT @@tmpdir")).trim() === "/var/lib/mysql", "its temporary files are on the data area", "another directory");
     });
 
     const postgresOk = await step("postgresql-starts-hardened", async () => {
@@ -846,6 +882,62 @@ async function main() {
       assert((await mariadb("db", SQL_READ)).trim() === "kept", "MariaDB still has its row", "another value");
       assert((await psql("db", SQL_READ)).trim() === "kept", "PostgreSQL still has its row", "another value");
       assert((await valkey(DB(V), "db", "GET", "probe")) === "kept", "Valkey still has its key", "another value");
+    });
+
+    // ADR-0039: an application created on version 1 of a database and moved to the newest version, the way the API does
+    // it: the container is made again on the same volume (a new version replaces it) and started with its password files.
+    const upgradeInPlace = async (newest, contents) => {
+      const stackId = newest.stackId;
+      const oldId = (await inspectOf(DB(stackId))).Id;
+      const made = await adapter.createAppStackComponents({ plan: newest });
+      assert(same(made.components, [{ componentKey: "db", outcome: "replaced" }]), "the new version replaces the container", JSON.stringify(made));
+      const fresh = await inspectOf(DB(stackId));
+      assert(fresh.Id !== oldId && fresh.State.Running === false, "a new container, not started", `${String(fresh.Id !== oldId)} ${String(fresh.State.Running)}`);
+      assert(same((fresh.Mounts ?? []).map((mt) => mt.Name), [appStackVolumeName(stackId, "data")]), "on the same volume", JSON.stringify((fresh.Mounts ?? []).map((mt) => mt.Name)));
+      const started = await adapter.startAppStackComponent(startReq(newest, "db", contents));
+      assert(started.outcome === "started", "the new container starts on the data of version 1", JSON.stringify(started));
+      await waitHealthy(stackId, ["db"], 180_000);
+      assert(same((await inspectOf(DB(stackId))).Config.Cmd, newest.components[0].argv), "it runs the command of the newest version", JSON.stringify((await inspectOf(DB(stackId))).Config.Cmd));
+    };
+    /** Removal with the data, and the proof that nothing of the application is left. */
+    const dropWithData = async (plan, what) => {
+      const dir = path.join(secretsRoot, appStackSecretDirKey(plan.stackId, "db"));
+      const out = await adapter.removeAppStack({ stackId: plan.stackId, organizationId: ORG, removeVolumes: true });
+      assert(same(out.removedComponents, ["db"]) && same(out.removedVolumes, ["data"]), `${what}: removed with its data`, JSON.stringify(out));
+      await gone(plan.stackId, what);
+      assert(!(await exists(dir)), `${what}: the password files are gone with it`, dir);
+    };
+
+    await step("mariadb-earlier-version-upgrades", async () => {
+      const [earlier, newest] = [plans.um1, plans.um2];
+      const out = await deploy(earlier, mariadbContents, 180_000);
+      assert(out.pulls.every((p) => p.pulled === false) && same(out.prepare.networks, [{ role: "app_internal", created: true }]), "local image, private network only", JSON.stringify(out));
+      await hardening(earlier);
+      await passwordFiles(earlier, mariadbContents);
+      const view = (sql) => mariadb("db", sql, PASSWORDS.mariadbApp, DB(UM));
+      await view(SQL_WRITE_MARIADB);
+      assert((await view(SQL_READ)).trim() === "kept", "version 1 holds a row", "another value");
+      assert(!(await inspectOf(DB(UM))).Config.Cmd.includes("--tmpdir=/var/lib/mysql"), "version 1 has no temporary directory of its own", "it has one");
+      assert((await view("SELECT @@tmpdir")).trim() !== "/var/lib/mysql", "version 1 keeps its temporary files outside the data area", "on the data area");
+      // The defect: the temporary files of a statement go to /tmp, a 64 MB area, and a larger one stops.
+      const t1 = performance.now();
+      const refused = await rejection(mariadb("db", SQL_BIG_DISTINCT, PASSWORDS.mariadbApp, DB(UM), 110_000));
+      assert(refused !== null && NO_SPACE.test(refused.message), "version 1 stops a statement that needs more than its temporary area", refused ? refused.message.slice(0, 200) : "it ran");
+      info(`MariaDB version 1: the statement stopped after ${((performance.now() - t1) / 1000).toFixed(1)}s: ${refused.message.split("\n").at(-1).slice(0, 120)}`);
+      assert((await view(SQL_READ)).trim() === "kept", "and the server still answers", "another value");
+      await upgradeInPlace(newest, mariadbContents);
+      await hardening(newest);
+      await passwordFiles(newest, mariadbContents);
+      assert((await view(SQL_READ)).trim() === "kept", "the row written on version 1 is still there", "another value");
+      assert((await view("SELECT @@tmpdir")).trim() === "/var/lib/mysql", "its temporary files are on the data area", "another directory");
+      const t2 = performance.now();
+      const counted = (await view(SQL_BIG_DISTINCT).catch((err) => `failed: ${err.message.slice(0, 160)}`)).trim();
+      const seconds = (performance.now() - t2) / 1000;
+      info(`MariaDB version 2: the same statement took ${seconds.toFixed(1)}s, answer ${counted}`);
+      assert(counted === "900000", "version 2 runs the same statement to its end", counted);
+      assert(seconds < 120, "in under 2 minutes", `${seconds.toFixed(1)}s`);
+      assert((await view(SQL_READ)).trim() === "kept", "and the row is still there", "another value");
+      await dropWithData(newest, "MariaDB upgraded from version 1");
     });
 
     const worker = cName(A, "worker");

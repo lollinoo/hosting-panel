@@ -52,6 +52,12 @@ const planOf = (t: AppBuiltInTemplate, parameters?: readonly AppTemplateParamete
   return result.plan;
 };
 const component = (plan: ApprovedStackPlan, key: string) => plan.components.find((c) => c.key === key);
+/** The template as one of its earlier versions was shipped: the id and the source of that version. */
+const earlierVersion = (t: AppBuiltInTemplate, index = 0): AppBuiltInTemplate => {
+  const found = t.previousVersions?.[index];
+  if (!found) throw new Error(`no earlier version ${index} of ${t.slug}`);
+  return { ...t, versionId: found.versionId, source: found.source };
+};
 /** The seeds of the first format (ADR-0035); the WordPress one is of the extended format (ADR-0036). */
 const FIRST_FORMAT = APP_BUILT_IN_TEMPLATES.filter((t) => t.slug !== "wordpress-mariadb");
 const WORDPRESS_SECRETS = new Map([
@@ -82,13 +88,13 @@ describe("the built-in application templates", () => {
     expect(plan.components.flatMap((c) => c.secretFiles.map((f) => f.parameterKey)).sort()).toEqual([...(SECRET_KEYS[t.slug] ?? [])]);
   });
 
-  it("mariadb: one component as 999:999, socket and pid file under /tmp, passwords as files, no address", () => {
+  it("mariadb: one component as 999:999, socket and pid file under /tmp, temporary files on the data area, passwords as files, no address", () => {
     const plan = planOf(seed("mariadb"));
     expect(plan.components.map((c) => c.key)).toEqual(["db"]);
     const db = component(plan, "db");
     expect(db?.image).toBe("docker.io/library/mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3");
     expect(db?.runAsUser).toBe("999:999");
-    expect(db?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]);
+    expect(db?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid", "--tmpdir=/var/lib/mysql"]);
     expect(db?.environment).toEqual([
       { name: "MARIADB_DATABASE", value: "app" },
       { name: "MARIADB_ROOT_HOST", value: "localhost" },
@@ -135,6 +141,32 @@ describe("the built-in application templates", () => {
     expect(db?.expose).toEqual([6379]);
     expect(plan.ingress).toEqual([]);
     expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "402653184" });
+  });
+
+  it.each(APP_BUILT_IN_TEMPLATES.filter((t) => isDatabase(t) && t.previousVersions !== undefined).map((t) => [t.slug, t] as const))(
+    "%s: every earlier version still validates and compiles to a valid, allowlisted, hashed plan of its own version",
+    (_slug, t) => {
+      expect(t.previousVersions?.length).toBeGreaterThan(0);
+      t.previousVersions?.forEach((v, index) => {
+        const first = earlierVersion(t, index);
+        expect(validateAppTemplateSource(first.source).ok, v.versionId).toBe(true);
+        const plan = planOf(first);
+        expect(plan.templateVersionId).toBe(v.versionId);
+        expect(ApprovedStackPlanSchema.safeParse(plan).success, v.versionId).toBe(true);
+        expect(appStackPlanImageProblems(plan), v.versionId).toEqual([]);
+        expect(verifyAppStackPlanHash(plan), v.versionId).toBe(true);
+      });
+    },
+  );
+
+  it("mariadb: version 1 compiles as it did, with no temporary directory; version 2 differs from it in that argument only", () => {
+    const t = seed("mariadb");
+    const [before, after] = [planOf(earlierVersion(t)), planOf(t)];
+    expect(component(before, "db")?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]);
+    expect(component(after, "db")?.argv).toEqual([...component(before, "db")!.argv!, "--tmpdir=/var/lib/mysql"]);
+    expect({ ...component(after, "db")!, argv: null }).toEqual({ ...component(before, "db")!, argv: null });
+    expect(after.volumes).toEqual(before.volumes);
+    expect(sumAppStackPlanResources(after)).toEqual(sumAppStackPlanResources(before));
   });
 
   it.each(["mariadb", "postgresql"])("%s does not compile until the customer has set its passwords", (slug) => {

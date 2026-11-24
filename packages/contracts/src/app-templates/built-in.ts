@@ -304,16 +304,9 @@ const DATABASE_LIMITS = ["    deploy:", "      resources:", "        limits:", '
 const tcpHealth = (port: number) => ["    healthcheck:", "      kind: tcp", `      port: ${port}`, "      intervalSeconds: 10", "      timeoutSeconds: 3"];
 const databasePassword = ["  - key: database_password", '    label: "Password del database"', "    type: secret", "    required: true", "    customer: true"];
 
-const mariadb: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_mariadb",
-  versionId: "atv_mariadb_1",
-  slug: "mariadb",
-  name: "Database MariaDB",
-  category: "database",
-  description: MARIADB_DESCRIPTION,
-  descriptionEn:
-    "A MariaDB database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
-  source: [
+/** The MariaDB source; `command` is the line that starts the server (version 2 adds the temporary directory). */
+function mariadbSource(command: string): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Database MariaDB"',
@@ -329,8 +322,7 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
     "services:",
     "  db:",
     "    image: docker.io/library/mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
-    // Socket and pid file under /tmp: the root file system is read-only.
-    '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]',
+    command,
     "    environment:",
     "      - name: MARIADB_DATABASE",
     "        value: app",
@@ -352,7 +344,28 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const mariadb: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_mariadb",
+  versionId: "atv_mariadb_2",
+  slug: "mariadb",
+  name: "Database MariaDB",
+  category: "database",
+  description: MARIADB_DESCRIPTION,
+  descriptionEn:
+    "A MariaDB database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  source: mariadbSource(
+    // Socket and pid file under /tmp: the root file system is read-only. The temporary files of a sort or of an index
+    // build go to the data area: the 64 MB /tmp of the strict profile is memory, and a statement that needed more
+    // than that failed there.
+    '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid", "--tmpdir=/var/lib/mysql"]',
+  ),
+  // Version 1 as it shipped: the databases installed on it are offered version 2.
+  previousVersions: Object.freeze([
+    Object.freeze({ versionId: "atv_mariadb_1", source: mariadbSource('    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]') }),
+  ]),
 });
 
 const postgresql: AppBuiltInTemplate = Object.freeze({

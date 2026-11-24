@@ -92,6 +92,8 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
     expect(databaseDigests.length).toBeGreaterThanOrEqual(3);
     for (const s of ["0028_app_stack_links.sql", "APP_IMAGE_ALLOWLIST", "D12", ...databaseDigests]) expect(adr, s).toContain(s);
+    // The second versions of the database templates (the first stays as history): what they change is written down.
+    for (const s of ["atv_mariadb_2", "--tmpdir=/var/lib/mysql"]) expect(adr, s).toContain(s);
   });
 
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
@@ -178,7 +180,7 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       "accept-app-stack-databases.mjs": [
         "gate-self-test", "preflight", "snapshot-before", "plans-compile-from-seeds", "applications-deploy",
         "mariadb-starts-hardened", "postgresql-starts-hardened", "valkey-starts-hardened", "data-survives-restart",
-        "unlinked-application-cannot-reach", "link-reaches-by-alias", "link-idempotent", "two-applications-stay-apart",
+        "mariadb-earlier-version-upgrades", "unlinked-application-cannot-reach", "link-reaches-by-alias", "link-idempotent", "two-applications-stay-apart",
         "link-follows-a-replaced-database", "application-removal-detaches-running-database",
         "stopped-database-survives-application-removal", "stale-attachment-repaired", "refuses-foreign-targets",
         "detach-removes-reachability", "remove-everything", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
