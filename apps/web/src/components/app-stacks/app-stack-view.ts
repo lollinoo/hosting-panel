@@ -58,7 +58,7 @@ export function appStackRefusalText(m: Messages, code: string, reason?: string, 
   return errorMessage(m, code);
 }
 
-/** An install, upgrade or rollback: an address being removed holds it until the routes are refreshed, which a failed application needs a restart for, unlike a change of that address (issue #112). */
+/** An install, upgrade or rollback: an address being removed holds it until the routes are refreshed or withdrawn, which a failed application needs a restart or a stop for, unlike a change of that address (issue #112). */
 export function appStackChangeRefusalText(m: Messages, code: string, reason?: string, status?: AppStackStatus): string {
   return reason === "address_removing" ? m.apps.reasons.versionAddressRemoving : appStackRefusalText(m, code, reason, status);
 }
