@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Helpers shared by install.sh and update.sh. Source this file; functions return non-zero, never exit.
+# Helpers shared by install.sh, update.sh and restore-panel.sh. Source this file; functions return non-zero, never exit.
+
+# Four numbers from 0 to 255 without leading zeros: the only IPv4 form hp-accounts setup records.
+_hp_ipv4_re='^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
 
 env_value() { # env_value <file> <KEY>: prints the value (for internal use only, never echoed)
   local line
