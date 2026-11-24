@@ -138,6 +138,13 @@ describe("keyedSend", () => {
     expect(bare).toEqual({ ok: false, code: "RESOURCE_LOCKED" });
     expect(bare.ok === false && bare.reason).toBeUndefined();
     expect(bare.ok === false && bare.field).toBeUndefined();
+    expect(bare.ok === false && bare.limit).toBeUndefined();
+  });
+
+  it("a refusal of a value too long gives back the bound its first detail names", async () => {
+    const refusal = { error: { code: "VALIDATION_ERROR", details: [{ field: "value", reason: "value_too_long", limit: "store" }] } };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(refusal), { status: 400 })));
+    expect(await keyedSend({}, "csrf", "n", "POST", "/x", {})).toEqual({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "value", limit: "store" });
   });
 });
 

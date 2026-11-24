@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
-import { appStackRefusalText } from "./app-stack-view";
+import { appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
 
 export type StackAction = "start" | "stop" | "restart" | "deploy";
 type QueuedAction = StackAction | "upgrade" | "rollback";
@@ -219,7 +219,7 @@ function PlanDialog({
     for (const input of inputs.current.values()) input.value = "";
     if (sent && !sent.ok && sent.field?.startsWith(SECRET_FIELD)) {
       const key = sent.field.slice(SECRET_FIELD.length);
-      const text = appStackRefusalText(m, sent.code, sent.reason);
+      const text = appStackSecretRefusalText(m, sent);
       if (asked.some((wanted) => wanted.key === key)) setFieldErrors({ [key]: text });
       else setError(text);
       return;
