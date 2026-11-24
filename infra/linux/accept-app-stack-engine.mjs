@@ -757,6 +757,8 @@ async function main() {
       await docker(["exec", "-u", "0", cName(A, "worker"), "touch", "/data/marker"]);
       for (const id of [A, B]) {
         const attached = Object.values((await networkOf(appStackEdgeNetworkName(id))).Containers ?? {}).map((c) => String(c.Name));
+        // The web component joins it at create: an empty list would make the check below prove nothing.
+        assert(attached.length > 0, `the edge network of ${id} lists its containers`, "none");
         const foreign = attached.filter((n) => !n.includes(marker));
         assert(foreign.length === 0, `only this run's containers are on the edge network of ${id}`, foreign.join(","));
       }

@@ -777,6 +777,8 @@ async function main() {
         assert(on.length === 0, `${name} is on no network of stack a`, on.join(","));
       }
       const attached = Object.values((await networkOf(appStackEdgeNetworkName(B))).Containers ?? {}).map((c) => String(c.Name));
+      // The web component joins it at create: an empty list would make the check below prove nothing.
+      assert(attached.length > 0, "the edge network of stack b lists its containers", "none");
       assert(attached.every(ours), "only this run's containers are on the edge network of stack b", attached.filter((n) => !ours(n)).join(","));
       await adapter.removeAppStack({ stackId: B, organizationId: ORG, removeVolumes: true });
       const left = ownNames(await snapshot(), B);
@@ -891,6 +893,8 @@ async function main() {
 
     await step("remove-leaves-no-orphans", async () => {
       const attached = Object.values((await networkOf(appStackEdgeNetworkName(A))).Containers ?? {}).map((c) => String(c.Name));
+      // The web component and this run's proxy are on it: an empty list would make the check below prove nothing.
+      assert(attached.length > 0, "the edge network lists its containers", "none");
       assert(attached.every(ours), "only this run's containers are on the edge network", attached.filter((n) => !ours(n)).join(","));
       const unpublished = await adapter.unpublishAppStackRoutes({ stackId: A, organizationId: ORG });
       assert(unpublished.changed === true, "the route file is withdrawn", JSON.stringify(unpublished));
