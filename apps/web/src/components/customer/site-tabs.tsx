@@ -21,7 +21,7 @@ export const SITE_TABS: {
 
 // Route tabs are page links, so they are a nav with aria-current rather than an ARIA tablist.
 // The site type's own tabs follow the overview; the layout passes them as plain data.
-// A site with no known type is not managed (ADR 0029 §2): the routes behind every tab but the overview answer 404 for it.
+// A site with no known type is not managed (ADR 0029 §2): every tab but the overview is hidden for it.
 export function SiteTabs({
   siteId,
   typeTabs = [],

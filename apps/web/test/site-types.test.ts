@@ -76,7 +76,7 @@ describe("the site pages ask the site type", () => {
   });
 
   it("a site without a type gets only the overview tab and no header button, and keeps its visit link (L49)", async () => {
-    // The managed-site routes behind the other tabs answer 404 for it (ADR 0029 §2).
+    // A site with no known type is not managed (ADR 0029 §2): the other tabs are hidden.
     const { html, tabs } = await layoutOf({ ...SITE, siteType: null }, true);
     expect(tabs).toEqual(["/sites/site_t1"]);
     expect(html).not.toContain("/wp-admin/");
