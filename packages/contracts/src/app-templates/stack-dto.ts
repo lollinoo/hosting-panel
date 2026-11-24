@@ -7,7 +7,7 @@ import { AppTemplateParameterEntriesSchema, AppTemplateParameterValueSchema } fr
 import { AppStackPlanIngressSchema } from "./plan.js";
 import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
-import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
+import { APP_STACK_LOG_TAIL_MAX, APP_STACK_SECRET_MIN_LENGTH, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_ALLOWED_ACTION_KINDS, APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
@@ -87,9 +87,10 @@ export const PlanAppStackInputSchema = z
   .refine((p) => !(p.templateVersionId !== undefined && p.revisionId !== undefined), { message: "Choose a version or a revision." })
   .refine((p) => !(p.revisionId !== undefined && p.parameters !== undefined), { message: "A rollback keeps the settings of that revision." });
 export type PlanAppStackInput = z.infer<typeof PlanAppStackInputSchema>;
-/** A private value an upgrade brings (issue #89): the same rule as SetAppStackSecretInputSchema, write-only alike. */
+/** A private value an upgrade brings (issue #89): the same rule as SetAppStackSecretInputSchema, write-only alike, long
+ *  enough for the log reader to mask (BUG-43). */
 const UpgradeAppStackSecretSchema = z
-  .object({ parameterKey: AppTemplateParameterKeySchema, value: AppStackSecretFileContentSchema.shape.content })
+  .object({ parameterKey: AppTemplateParameterKeySchema, value: AppStackSecretFileContentSchema.shape.content.min(APP_STACK_SECRET_MIN_LENGTH) })
   .strict();
 export const UpgradeAppStackInputSchema = z
   .object({
@@ -114,7 +115,8 @@ export type DeleteAppStackInput = z.infer<typeof DeleteAppStackInputSchema>;
 export const SetAppStackSecretInputSchema = z
   .object({
     parameterKey: AppTemplateParameterKeySchema,
-    value: AppStackSecretFileContentSchema.shape.content, // the executor's rule
+    // The executor's rule, and a new value long enough for the log reader to mask (a stored shorter one still starts).
+    value: AppStackSecretFileContentSchema.shape.content.min(APP_STACK_SECRET_MIN_LENGTH),
   })
   .strict();
 export type SetAppStackSecretInput = z.infer<typeof SetAppStackSecretInputSchema>;

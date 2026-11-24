@@ -63,6 +63,7 @@ import {
   AppStackSettings,
 } from "@/components/app-stacks/app-stack-sections";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
+import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
 import { APP_STACK_LOG_TAIL, AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
@@ -685,6 +686,30 @@ describe("private values", () => {
     const shown = html(callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD", 2: text }).out);
     expect(shown).toMatch(/<input[^>]*aria-invalid="true"/);
     expect(shown).toContain(text);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: a value shorter than six characters is an error on the field that states the minimum, and sends nothing (BUG-43)", async (_n, m) => {
+    const text = format(m.apps.reasons.value_too_short, { min: 6 });
+    expect(text).toContain("6");
+    expect(text).not.toContain("{");
+    expect(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")).toBe(text);
+    const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+    const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: "Zq9ab" };
+    await submit(out);
+    expect(keyedSend).not.toHaveBeenCalled();
+    expect(sets).toContainEqual([2, text]);
+    expect(ref.current.value).toBe("Zq9ab"); // kept, so the customer can lengthen it
+    // Six are enough; a refusal by the same reason (from an older page) is still a field error.
+    ref.current = { value: "Zq9abc" };
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_short" });
+    await submit(out);
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(sets.filter(([k, v]) => k === 2 && v === text)).toHaveLength(2);
+    expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
   });
 
   it.each([

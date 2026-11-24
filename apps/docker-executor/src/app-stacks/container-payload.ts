@@ -217,7 +217,8 @@ export function buildAppStackContainerCreatePayload(
   };
 }
 
-const SECRET_BIND_PATTERN = /:\/run\/secrets\/([a-z][a-z0-9_]{0,31}):ro$/;
+/** A secret file's bind as the executor makes it ends so; the key is the first group. */
+export const APP_STACK_SECRET_BIND_PATTERN = /:\/run\/secrets\/([a-z][a-z0-9_]{0,31}):ro$/;
 const TOP_LEVEL_KEYS = new Set(["Image", "User", "Cmd", "Env", "Labels", "ExposedPorts", "StopTimeout", "HostConfig", "NetworkingConfig"]);
 const HOST_CONFIG_KEYS = new Set([
   "Privileged",
@@ -324,7 +325,7 @@ export function assertAppStackPayloadHardening(
   };
   if (!isDeepStrictEqual(payload.NetworkingConfig, { EndpointsConfig: endpoints })) refuse("NetworkingConfig");
   for (const bind of host.Binds) {
-    const k = SECRET_BIND_PATTERN.exec(bind)?.[1];
+    const k = APP_STACK_SECRET_BIND_PATTERN.exec(bind)?.[1];
     if (k === undefined || bind !== `${path.join(secretDir, k)}:${appStackSecretFilePath(k)}:ro` || hostPath(bind)) refuse("Binds");
   }
   for (const mount of host.Mounts) {

@@ -35,7 +35,9 @@ import {
   APP_STACK_LABELS,
   AppStackExecutorError,
   appStackContainerIsCurrent,
+  appStackContainerMaskValues,
   appStackContainerName,
+  appStackContainerSecretFileNames,
   appStackEdgeNetworkName,
   appStackInternalNetworkName,
   appStackLogMaskValues,
@@ -103,7 +105,8 @@ interface SimStack {
   networks: Map<AppStackNetworkRole, Readonly<Record<string, string>>>;
   volumes: Map<string, Readonly<Record<string, string>>>;
   containers: Map<string, SimContainer>;
-  secrets: Map<string, string[]>;
+  /** The secret files of each started component, by name (what the engine keeps in its folder). */
+  secrets: Map<string, Readonly<Record<string, string>>>;
   routeYaml: string;
 }
 
@@ -189,6 +192,13 @@ export class SimulatedAppStacks implements StackExecutorPort {
     this.logs.set(appStackContainerName(stackId, componentKey), lines.map((line) => ({ ...line })));
   }
 
+  /** Test hook: the binds a component's container reports, as a container created elsewhere or earlier would. */
+  public setAppStackComponentBinds(stackId: string, componentKey: string, binds: readonly string[]): void {
+    const container = this.stacks.get(stackId)?.containers.get(componentKey);
+    if (container === undefined) return;
+    container.payload = { ...container.payload, HostConfig: { ...container.payload.HostConfig, Binds: [...binds] } };
+  }
+
   /** The applications a stack's components are attached to through a link, ascending; [] when it has none. */
   public getAppStackLinkedApplications(stackId: string): string[] {
     const linked = new Set<string>();
@@ -239,7 +249,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
     const secretValues =
       this.options.secretsRootDir !== null
         ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : (stack.secrets.get(req.componentKey) ?? []);
+        : Object.values(stack.secrets.get(req.componentKey) ?? {});
     return { running: container.state === "running", secretValues };
   }
 
@@ -518,10 +528,17 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
       if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      const files = this.options.secretsRootDir !== null
-        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : (stack?.secrets.get(req.componentKey) ?? []);
-      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files);
+      // The engine's rule, from the container's binds: every secret file it was given must be there.
+      const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
+      let values: string[];
+      if (this.options.secretsRootDir !== null) {
+        values = await appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
+      } else {
+        const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
+        const held = stack?.secrets.get(req.componentKey) ?? {};
+        const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
+        values = appStackLogMaskValues(req.componentKey, inspected, files);
+      }
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }
@@ -643,7 +660,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
 
   private async writeSecrets(stack: SimStack, stackId: string, key: string, contents: Readonly<Record<string, string>> | null): Promise<void> {
     if (contents === null) stack.secrets.delete(key);
-    else stack.secrets.set(key, Object.values(contents));
+    else stack.secrets.set(key, { ...contents });
     const root = this.options.secretsRootDir;
     if (root === null) return;
     try {
