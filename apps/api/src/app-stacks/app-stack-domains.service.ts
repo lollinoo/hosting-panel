@@ -132,10 +132,7 @@ export class AppStackDomainsService {
         const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
         const last = await lastOperation(t, stack.id);
         const when = appStackOptionsApply(locked, last);
-        if (when === null) {
-          const message = `This change cannot reach the web address while the application is ${locked.status}.`;
-          throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: locked.status }, false);
-        }
+        if (when === null) throw notNow(locked, last, "This change cannot reach the web address");
         await this.#assertPathTargets(t, locked, input.pathRoutes);
         await ctx.audit(t, {
           action: APP_AUDIT_ACTIONS.domainUpdate,
@@ -172,10 +169,8 @@ export class AppStackDomainsService {
           throw appNotFound();
         }
         const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
-        if (appStackOptionsApply(locked, await lastOperation(t, stack.id)) === null) {
-          const message = `This web address cannot be withdrawn while the application is ${locked.status}.`;
-          throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: locked.status }, false);
-        }
+        const last = await lastOperation(t, stack.id);
+        if (appStackOptionsApply(locked, last) === null) throw notNow(locked, last, "This web address cannot be withdrawn");
         await ctx.audit(t, {
           action: APP_AUDIT_ACTIONS.domainRemove,
           targetType: "app_stack",
@@ -264,6 +259,18 @@ export class AppStackDomainsService {
     const opts = { forceDnsIds, ...(optionsChanged ? { optionsChanged } : {}), ...(routesQueued ? { routesQueued } : {}) };
     await this.observer?.reconcileStack(stack.organizationId, stack.id, new Date(), opts).catch(() => undefined);
   }
+}
+
+/**
+ * ADR-0037: a route file may be in place that nothing rewrites now. After a stop that did not finish the status reads
+ * running or degraded, as on applications that take the change, so the reason says that instead.
+ */
+function notNow(stack: AppStackRow, last: Awaited<ReturnType<typeof lastOperation>>, what: string): ControlPlaneError {
+  const unfinished = last?.kind === "stack.stop" && (stack.status === "running" || stack.status === "degraded");
+  const message = unfinished
+    ? `${what} until the application is stopped again or restarted: its stop did not finish.`
+    : `${what} while the application is ${stack.status}.`;
+  return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: unfinished ? "stop_unfinished" : stack.status }, false);
 }
 
 /** The latest operation of the stack; the caller holds the stack row. */

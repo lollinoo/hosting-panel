@@ -6273,10 +6273,11 @@ paths:
         `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
         point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
         pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
-        published or is refused: while a route file may be in place that the panel cannot rewrite now (an action in
-        progress other than the panel's own route refresh, a failed or unknown application, or a stop the customer
-        asked for that did not finish) the answer is
-        409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status, and nothing is
+        published or is refused: on a running application the route refresh is queued in the same request; while a
+        route file may be in place that the panel cannot rewrite now (an action in progress other than the panel's own
+        route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
+        answer is 409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status
+        (`stop_unfinished` after a stop that did not finish, whose status reads running or degraded), and nothing is
         written. The audit row holds the user name and whether a password was sent, never the password. No
         Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
@@ -6335,7 +6336,8 @@ paths:
         Removing frees the hostname, so while a route file of the application may be in place that the panel cannot
         rewrite now (an action in progress other than the panel's own route refresh, a failed or unknown application,
         or a stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with
-        `details[0].field: status` and `details[0].reason` the status, and the address is kept. No Idempotency-Key.
+        `details[0].field: status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not
+        finish), and the address is kept. No Idempotency-Key.
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:

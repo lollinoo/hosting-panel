@@ -503,13 +503,16 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
       expectRefusal(await patch(other.stackId, other.id, { ...OFF, compression: true }), 409, "RESOURCE_LOCKED", { field: "status", reason: "updating" });
     });
 
-    it("a running application the customer last asked to stop, whose stop failed, takes no change either", async () => {
+    it("a running application the customer last asked to stop, whose stop failed, takes no change either, and says why in its own words", async () => {
       const { stackId, id } = await installed("running", true);
       expect((await verb(stackId, "stop")).status).toBe(202);
       await h.dbClient.db.update(operations).set({ status: "failed", completedAt: new Date() }).where(and(eq(operations.resourceId, stackId), eq(operations.kind, "stack.stop")));
       await h.dbClient.db.update(appStacks).set({ status: "degraded" }).where(eq(appStacks.id, stackId));
       const before = await h.counts();
-      expectRefusal(await patch(stackId, id, { ...OFF, compression: true }), 409, "RESOURCE_LOCKED", { field: "status", reason: "degraded" });
+      // Other degraded applications take the change: the status alone would not say what to do.
+      const unfinished = { field: "status", reason: "stop_unfinished" };
+      expectRefusal(await patch(stackId, id, { ...OFF, compression: true }), 409, "RESOURCE_LOCKED", unfinished);
+      expectRefusal(await h.call(h.a.token, "DELETE", `${base(h.a, stackId)}/${id}`), 409, "RESOURCE_LOCKED", unfinished);
       expect(await h.counts()).toEqual(before);
     });
 

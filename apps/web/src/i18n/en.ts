@@ -3215,6 +3215,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Check the highlighted settings.",
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
+      stop_unfinished: "The application did not stop completely: press Stop again, or Restart, then try again.",
       confirmation_mismatch: "The typed name does not match.",
       plan_changed: "Something changed meanwhile: check the differences again.",
       unknown_version: "This version no longer exists.",

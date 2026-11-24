@@ -278,7 +278,9 @@ administrator's console has no such action, and nobody writes proxy configuratio
      application is started (`applies: at_start`); the next start publishes them;
    - any other state (an action the customer asked for in progress, failed, outcome to be verified, or a stop the
      customer asked for that did not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
-     nothing would rewrite. Let the action finish, or start or restart the application, then save again.
+     nothing would rewrite. Let the action finish, or start or restart the application, then save again. After a stop
+     that did not finish the application reads running or degraded, so the reason is `stop_unfinished` and the page
+     says to press Stop again or Restart.
 
    Removing an address follows the same rule and is refused in the same states: removing frees the name for anyone,
    another customer included, while the live file would still serve it. Adding an address is always possible: it

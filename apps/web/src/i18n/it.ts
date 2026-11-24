@@ -3243,6 +3243,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Controlla le impostazioni evidenziate.",
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
+      stop_unfinished: "L'applicazione non si è arrestata del tutto: premi di nuovo Arresta, oppure Riavvia, poi riprova.",
       confirmation_mismatch: "Il nome scritto non corrisponde.",
       plan_changed: "Qualcosa è cambiato nel frattempo: controlla di nuovo le differenze.",
       unknown_version: "Questa versione non esiste più.",
