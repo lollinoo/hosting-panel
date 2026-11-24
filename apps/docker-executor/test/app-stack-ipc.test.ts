@@ -215,6 +215,20 @@ describe("application stack IPC routes", () => {
     }
   });
 
+  it("carries the number of secret files of a log read, and leaves it out when the caller gives none", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    await client.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 50, secretFileCount: 2 });
+    await client.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 50, secretFileCount: 0 });
+    await client.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 50 });
+    expect(fns.getAppStackComponentLogs.mock.calls.map(([req]) => req)).toEqual([
+      { ...ref, componentKey: "web", tail: 50, secretFileCount: 2 },
+      { ...ref, componentKey: "web", tail: 50, secretFileCount: 0 },
+      { ...ref, componentKey: "web", tail: 50 },
+    ]);
+    expect(Object.keys(fns.getAppStackComponentLogs.mock.calls[2]?.[0] ?? {})).not.toContain("secretFileCount");
+  });
+
   it("refuses unsigned (401) and replayed (409) requests before any executor call", async () => {
     const { executor, fns } = stackStub();
     const { socketPath } = await serve(executor);
@@ -345,6 +359,9 @@ describe("application stack IPC routes", () => {
       `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&tail=501`,
       `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}`,
       `/v1/app-stacks/${id}/components/Web_1/logs?organizationId=${org}&tail=5`,
+      ...["-1", "9", "1.5", "", "x", "1&secretFileCount=1", "0001"].map(
+        (count) => `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&tail=5&secretFileCount=${count}`,
+      ),
       `/v1/app-stacks/BAD%2Fid/status?organizationId=${org}`,
     ]) {
       const res = await raw(socketPath, "GET", path);

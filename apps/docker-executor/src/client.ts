@@ -724,6 +724,8 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
 
   public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
     const query = new URLSearchParams({ organizationId: req.organizationId, tail: String(req.tail) });
+    // An executor one release older ignores a query parameter it does not read, and serves the read as it did.
+    if (req.secretFileCount !== undefined) query.set("secretFileCount", String(req.secretFileCount));
     const pathWithQuery = `/v1/app-stacks/${encodeURIComponent(req.stackId)}/components/${encodeURIComponent(req.componentKey)}/logs?${query}`;
     const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_LOGS_TIMEOUT_MS);
     return z.object({ data: AppStackLogsIpcResultSchema }).parse(json).data;
