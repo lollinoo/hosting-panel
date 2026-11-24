@@ -53,7 +53,7 @@ Nessuna rotta dell'API, nessuna tabella, nessuna chiave del formato, nessuna rig
 
 ### I8 — Fuori ambito
 
-Un cliente che nomina un'immagine; un'immagine fuori dall'elenco o senza impronta; cercare l'impronta di una versione su un registro; più di un componente (c'è l'importatore di file Compose della PR #43); un comando di avvio diverso da quello dell'immagine, più porte o più cartelle (si aggiungono a mano nell'editor); installare direttamente dal modulo, senza un modello; riaprire nel modulo un modello già scritto.
+Un cliente che nomina un'immagine; un'immagine fuori dall'elenco o senza impronta; cercare l'impronta di una versione su un registro; più di un componente (c'è l'importatore di file Compose, `ADR-0036`); un comando di avvio diverso da quello dell'immagine, più porte o più cartelle (si aggiungono a mano nell'editor); installare direttamente dal modulo, senza un modello; riaprire nel modulo un modello già scritto.
 
 ### Alternative scartate
 
@@ -86,11 +86,11 @@ Un cliente che nomina un'immagine; un'immagine fuori dall'elenco o senza impront
 ## 6. Non provato
 
 - **La pagina in un browser.** È coperta dai test della pagina, non vista da una persona.
-- **Su un pannello installato.** `applicationTemplatesAvailable` è `false` su `main`.
-- **Un modello scritto dal modulo, installato su Docker reale.** Il sorgente è accettato dal validatore e diventa un piano; nessuna applicazione è stata avviata da un modello nato dal modulo (le immagini ammesse su questo ramo sono le tre dei modelli integrati).
+- **Su un pannello installato.** Il flag `applicationTemplatesAvailable` è `true` sul backend `linux-systemd` (`ADR-0036` §2.10), quindi la pagina è raggiungibile su un pannello installato; nessuno l'ha aperta lì.
+- **Un modello scritto dal modulo, installato su Docker reale.** Il sorgente è accettato dal validatore e diventa un piano; nessuna applicazione è stata avviata da un modello nato dal modulo (l'elenco ammette oggi cinque immagini: le tre dei modelli integrati e le due basi di dati, MariaDB e PostgreSQL, di `ADR-0039`).
 
 ## 7. Punti aperti
 
 - **Le decisioni I1–I8 sono dell'agente.** Nessun proprietario le ha approvate.
-- **Con tre immagini nell'elenco il modulo serve a poco**: diventa utile quando l'elenco cresce (la PR #43 ne aggiunge).
-- **La PR #43 aggiunge l'importatore di file Compose nella stessa voce di menu**: chi entra dopo deve unire `main` e tenere entrambe le voci.
+- **Con cinque immagini nell'elenco il modulo serve ancora a poco**: diventa utile quando l'elenco cresce.
+- **Il modulo offre anche le due immagini delle basi di dati, ma non scrive un comando di avvio.** Un modello MariaDB nato dal modulo passa il validatore ma non ha gli argomenti di avvio del modello integrato (`mariadbd` con socket e file del pid sotto `/tmp`), che vanno aggiunti a mano nell'editor; per una base di dati conviene partire dal modello integrato.
