@@ -105,7 +105,7 @@ const byStartDesc = ([ka, a]: [string, SimContainer], [kb, b]: [string, SimConta
   startIndex(b) - startIndex(a) || kb.localeCompare(ka);
 const notReady = (message: string) => new AppStackExecutorError("STACK_COMPONENT_NOT_READY", message);
 /** The steps the real engine refuses while a backup job holds the application's lane. */
-const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove"]);
+const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove", "remove_components"]);
 
 /** In-memory stack engine: the production plan check, names, labels and container builder over a simulated Engine. */
 export class SimulatedAppStacks implements StackExecutorPort {

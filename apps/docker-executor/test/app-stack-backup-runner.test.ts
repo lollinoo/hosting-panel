@@ -986,6 +986,7 @@ describe("the stack engine and a job of the same application (ADR-0038 K4)", () 
       guarded: [
         () => engine.startAppStackComponent(web),
         () => engine.restartAppStackComponent(web),
+        () => engine.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
         () => engine.createAppStackComponents({ plan }),
         () => engine.removeAppStack({ ...REF, removeVolumes: true }),
       ],

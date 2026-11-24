@@ -376,6 +376,7 @@ describe("the simulated executor: backups of a simulated application", () => {
     const guarded = [
       () => sim.startAppStackComponent(webCall),
       () => sim.restartAppStackComponent(webCall),
+      () => sim.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
       () => sim.createAppStackComponents({ plan }),
       () => sim.removeAppStack({ ...ref, removeVolumes: true }),
     ];

@@ -280,7 +280,7 @@ approval.
    stopped stays stopped. While the backup runs, every other action on that application is refused
    (`409 RESOURCE_LOCKED`, to try again later). The executor keeps the rule by itself: while a copy, restore or
    removal job of the application runs or is being cleaned up, it refuses to start, restart, install, update or remove
-   that application, also when the panel has already closed its action; stopping it stays possible. The same refusals,
+   that application or a part of it, also when the panel has already closed its action; stopping it stays possible. The same refusals,
    and the refusal of a new copy or restore, hold while a job container of an earlier one still runs, even after its
    job ended or the executor restarted (the executor could not stop or remove it:
    `sudo docker ps --filter label=io.hostingpanel.app_backup_of=<stackId>`); one that has stopped (created, exited or

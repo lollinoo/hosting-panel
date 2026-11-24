@@ -86,8 +86,9 @@ export interface AppStackEngineDeps {
   readonly probe?: AppStackHealthProbe;
   readonly now?: () => Date;
   /**
-   * The job lanes of the backup runner (ADR-0038 K4). Start, restart, create and remove hold the application's lane
-   * while they run, and are refused while a copy, restore or removal job of that application holds it.
+   * The job lanes of the backup runner (ADR-0038 K4). Start, restart, create and remove (of the application or of some
+   * of its components) hold the application's lane while they run, and are refused while a copy, restore or removal
+   * job of that application holds it.
    */
   readonly backupLanes?: { holdAppStackLane(stackId: string): (() => void) | null };
 }
@@ -486,8 +487,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
-    return this.locked(req.plan.stackId, async () => {
-      const plan = this.check(req.plan);
+    return this.lockedOutsideBackups(req.plan.stackId, () => this.check(req.plan), async (plan) => {
       const listed = await this.listContainers(plan);
       const removedComponents: string[] = [];
       for (const key of [...req.componentKeys].sort()) {

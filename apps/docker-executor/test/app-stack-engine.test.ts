@@ -1137,6 +1137,7 @@ describe("the backup lane of the application (ADR-0038 K4)", () => {
       () => engine.restartAppStackComponent(web),
       () => engine.createAppStackComponents({ plan }),
       () => engine.removeAppStack({ ...REF, removeVolumes: false }),
+      () => engine.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
     ]) {
       await expect(call()).rejects.toMatchObject({
         reason: "STACK_BUSY",
@@ -1145,15 +1146,15 @@ describe("the backup lane of the application (ADR-0038 K4)", () => {
       });
     }
     expect(h.fake.log).toEqual([]);
-    expect(lanes.state.asked).toEqual([ID, ID, ID, ID]);
+    expect(lanes.state.asked).toEqual([ID, ID, ID, ID, ID]);
+    expect(h.fake.containers.has(WORKER)).toBe(true);
     // Stopping, reading and preparing never make the application write to its volumes.
     await engine.stopAppStack(REF);
     await engine.unpublishAppStackRoutes(REF);
     await engine.pullAppStackImage({ plan, image: IMAGE });
     await engine.prepareAppStack({ plan });
     await engine.getAppStackStatus(REF);
-    await engine.removeAppStackComponents({ plan, componentKeys: ["worker"] });
-    expect(lanes.state.asked).toHaveLength(4);
+    expect(lanes.state.asked).toHaveLength(5);
   });
 
   it("is held for the whole change and given back after it, also after a refusal or a failure", async () => {
@@ -1193,11 +1194,12 @@ describe("the backup lane of the application (ADR-0038 K4)", () => {
         () => engine.restartAppStackComponent(web),
         () => engine.createAppStackComponents({ plan }),
         () => engine.removeAppStack({ ...REF, removeVolumes: false }),
+        () => engine.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
       ]) {
         await expect(call()).rejects.toMatchObject({ reason: "STACK_BUSY", code: "RESOURCE_LOCKED" });
       }
       // One list of the job containers per call, all states, and nothing else reaches Docker.
-      expect(h.fake.log).toEqual([JOB_LIST, JOB_LIST, JOB_LIST, JOB_LIST]);
+      expect(h.fake.log).toEqual([JOB_LIST, JOB_LIST, JOB_LIST, JOB_LIST, JOB_LIST]);
       h.fake.log.length = 0;
     }
     expect(lanes.held.size).toBe(0);
