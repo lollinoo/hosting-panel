@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import * as contracts from "../src/index.js";
 import { APP_BUILT_IN_TEMPLATES } from "../src/app-templates/built-in.js";
@@ -15,6 +16,9 @@ const seedImages = APP_BUILT_IN_TEMPLATES.flatMap(imagesOf);
 const isExtended = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.source.startsWith("x-hp-stack:\n  schemaVersion: 2\n");
 const FIRST_FORMAT = APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t));
 const EXTENDED = APP_BUILT_IN_TEMPLATES.filter(isExtended);
+/** WORDPRESS_CONFIG_EXTRA as written in the source: a "$$" is one "$" for PHP. */
+const CONFIG_EXTRA_YAML =
+  "\"if (isset($$_SERVER['HTTP_HOST']) && preg_match('/^[A-Za-z0-9.-]+(:[0-9]{1,5})?$$/D', $$_SERVER['HTTP_HOST'])) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$_SERVER['HTTP_HOST']); define('WP_SITEURL', WP_HOME); }\"";
 
 describe("APP_BUILT_IN_TEMPLATES", () => {
   it("holds the six seeds with their fixed ids, frozen", () => {
@@ -31,7 +35,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
       },
       {
         templateId: "atpl_wordpress_mariadb",
-        versionId: "atv_wordpress_mariadb_1",
+        versionId: "atv_wordpress_mariadb_2",
         slug: "wordpress-mariadb",
         category: "content",
         name: "WordPress in contenitore",
@@ -131,9 +135,44 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
       "WORDPRESS_DB_HOST=db",
       "WORDPRESS_DB_NAME=wordpress",
       "WORDPRESS_DB_USER=wordpress",
+      `WORDPRESS_CONFIG_EXTRA=${CONFIG_EXTRA_YAML}`,
       "MARIADB_DATABASE=wordpress",
       "MARIADB_USER=wordpress",
     ]);
+  });
+
+  it("wordpress-mariadb: version 1 is kept byte for byte as the earlier version, version 2 is the newest", () => {
+    const t = EXTENDED[0]!;
+    expect(t.versionId).toBe("atv_wordpress_mariadb_2");
+    expect(Object.isFrozen(t.previousVersions)).toBe(true);
+    expect(t.previousVersions?.map((v) => v.versionId)).toEqual(["atv_wordpress_mariadb_1"]);
+    const first = t.previousVersions![0]!;
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.source.length).toBe(2361);
+    expect(createHash("sha256").update(first.source).digest("hex")).toBe("90d98e325ce227a7b442f6291bd84f3f821c4e2f20e90e8d4b68c4b30d9ed29e");
+    expect(first.source).not.toContain("command:");
+    expect(first.source).not.toContain("WORDPRESS_CONFIG_EXTRA");
+    // The only seed with an earlier version.
+    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb"]);
+  });
+
+  it("wordpress-mariadb version 2: the site follows the address it is asked by, and takes uploads of up to 64 MB", () => {
+    const t = EXTENDED[0]!;
+    expect(t.source).toContain(
+      '\n    x-hp-profile: standard\n    command: ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"]\n    environment:\n',
+    );
+    expect([...t.source.matchAll(/^ {4}command: /gm)]).toHaveLength(1);
+    expect(t.source).toContain(`\n      - name: WORDPRESS_CONFIG_EXTRA\n        value: ${CONFIG_EXTRA_YAML}\n`);
+    expect(t.description).toContain("64 MB");
+    expect(t.descriptionEn).toContain("64 MB");
+    // Everything else of version 1 is unchanged.
+    const first = t.previousVersions![0]!.source;
+    const strip = (source: string) =>
+      source
+        .replace(/^ {2}description: ".*"$/m, "")
+        .replace(/^ {4}command: .*\n/m, "")
+        .replace(/^ {6}- name: WORDPRESS_CONFIG_EXTRA\n {8}value: .*\n/m, "");
+    expect(strip(t.source)).toBe(strip(first));
   });
 
   it("exports no *_IMAGE constant carrying a seed image", () => {

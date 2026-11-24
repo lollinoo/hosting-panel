@@ -21,7 +21,7 @@ import {
   type AppTemplateParameterEntry,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
-import { verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
+import { computeAppTemplateSpecHash, verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { compileAppStackPlan } from "../src/app-template-compile.js";
 import { validateAppTemplateSource } from "../src/app-template-validation.js";
 
@@ -58,6 +58,11 @@ const WORDPRESS_SECRETS = new Map([
   ["db_password", 1],
   ["db_root_password", 1],
 ]);
+/** WORDPRESS_CONFIG_EXTRA as PHP reads it (one line): the site's address is the one it is asked by, when it is a plain
+ *  host name with an optional port. */
+const CONFIG_EXTRA =
+  "if (isset($_SERVER['HTTP_HOST']) && preg_match('/^[A-Za-z0-9.-]+(:[0-9]{1,5})?$/D', $_SERVER['HTTP_HOST'])) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST']); define('WP_SITEURL', WP_HOME); }";
+const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 
 describe("the built-in application templates", () => {
   it.each(FIRST_FORMAT.map((t) => [t.slug, t] as const))("%s validates with the default allowlist only", (_slug, t) => {
@@ -176,24 +181,53 @@ describe("the built-in application templates", () => {
 
   describe("wordpress-mariadb (extended format)", () => {
     const t = seed("wordpress-mariadb");
-    const wordpress = (secretVersions: ReadonlyMap<string, number> = WORDPRESS_SECRETS) =>
+    const earlier = () => t.previousVersions![0]!;
+    const wordpress = (secretVersions: ReadonlyMap<string, number> = WORDPRESS_SECRETS, version: { source: string; versionId: string } = t) =>
       compileAppStackPlan({
-        source: t.source,
+        source: version.source,
         parameters: [],
         secretVersions,
         ids: {
           stackId: "stk_0123456789abcdef0123456789abcdef",
           organizationId: "org_acme",
           hostAllocationId: "alloc_0123456789abcdef0123456789abcdef",
-          templateVersionId: t.versionId,
+          templateVersionId: version.versionId,
           revisionId: "srev_0123456789abcdef0123456789abcdef",
         },
       });
-    const plan = (): ApprovedStackPlan => {
-      const result = wordpress();
+    const plan = (version: { source: string; versionId: string } = t): ApprovedStackPlan => {
+      const result = wordpress(WORDPRESS_SECRETS, version);
       if (!result.ok) throw new Error(`expected a plan, got ${JSON.stringify(result.issues)}`);
       return result.plan;
     };
+
+    it("version 1 still validates to the same spec, and compiles without a command or a config line", () => {
+      const first = earlier();
+      const result = validateAppTemplateSource(first.source);
+      if (!result.ok) throw new Error(JSON.stringify(result.errors));
+      expect(first.versionId).toBe("atv_wordpress_mariadb_1");
+      expect(computeAppTemplateSpecHash(result.spec)).toBe("78625e4ec918338d8c20b88ce42f1ec366f065412d0b1a190ee211a886bf42eb");
+      const p = plan(first);
+      expect(p.templateVersionId).toBe("atv_wordpress_mariadb_1");
+      expect(p.components.map((c) => [c.key, c.argv])).toEqual([
+        ["db", null],
+        ["wordpress", null],
+      ]);
+      expect(component(p, "wordpress")?.environment.map((e) => e.name)).toEqual(["WORDPRESS_DB_HOST", "WORDPRESS_DB_NAME", "WORDPRESS_DB_USER"]);
+    });
+
+    it("version 2 differs from version 1 only in the wordpress component: same parameters, volumes, address and database", () => {
+      const first = earlier();
+      const [before, after] = [plan(first), plan()];
+      const [specBefore, specAfter] = [validateAppTemplateSource(first.source), validateAppTemplateSource(t.source)];
+      if (!specBefore.ok || !specAfter.ok) throw new Error("expected both versions to validate");
+      expect(specAfter.spec.parameters).toEqual(specBefore.spec.parameters);
+      expect(after.volumes).toEqual(before.volumes);
+      expect(after.ingress).toEqual(before.ingress);
+      expect(component(after, "db")).toEqual(component(before, "db"));
+      expect(component(after, "wordpress")).not.toEqual(component(before, "wordpress"));
+      expect({ ...component(after, "wordpress")!, argv: null, environment: component(before, "wordpress")!.environment }).toEqual(component(before, "wordpress"));
+    });
 
     it("validates with any allowlist: its images are pinned by digest and need no row", () => {
       for (const options of [undefined, { allowlist: [] }]) {
@@ -226,7 +260,8 @@ describe("the built-in application templates", () => {
       expect(p.schemaVersion).toBe(2);
       expect(p.components.map((c) => [c.key, appStackComponentProfile(c), c.runAsUser, c.argv])).toEqual([
         ["db", "standard", null, null],
-        ["wordpress", "standard", null, null],
+        // The uploads limit is set on the command line of the image's own start program: no file to write, no shell.
+        ["wordpress", "standard", null, UPLOADS_ARGV],
       ]);
       expect(p.components.map((c) => c.image)).toEqual([
         "mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
@@ -252,10 +287,15 @@ describe("the built-in application templates", () => {
         { name: "MARIADB_USER", value: "wordpress" },
       ]);
       expect(component(p, "wordpress")?.environment).toEqual([
+        { name: "WORDPRESS_CONFIG_EXTRA", value: CONFIG_EXTRA },
         { name: "WORDPRESS_DB_HOST", value: "db" },
         { name: "WORDPRESS_DB_NAME", value: "wordpress" },
         { name: "WORDPRESS_DB_USER", value: "wordpress" },
       ]);
+      // One line, no other constant, nothing the customer typed.
+      expect(CONFIG_EXTRA).not.toContain("\n");
+      expect([...CONFIG_EXTRA.matchAll(/define\('([A-Z_]+)'/g)].map((m) => m[1])).toEqual(["WP_HOME", "WP_SITEURL"]);
+      expect(CONFIG_EXTRA).not.toMatch(/eval|\$\{|\$\$/);
       expect(appStackComponentSecretEnvironment(component(p, "db")!)).toEqual([
         { name: "MARIADB_PASSWORD", pieces: [{ parameterKey: "db_password", version: 1 }] },
         { name: "MARIADB_ROOT_PASSWORD", pieces: [{ parameterKey: "db_root_password", version: 1 }] },
