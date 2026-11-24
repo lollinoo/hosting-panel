@@ -3646,6 +3646,10 @@ x-hp-ingress:
       STACK_TEMPLATE_UNPUBLISHED: "This application or version is no longer offered in the catalog.",
       STACK_IMAGE_NOT_ALLOWED: "This application's software is not approved on this server.",
       STACK_QUOTA_EXCEEDED: "You have reached the application or resource limit of your plan.",
+      cpu_limit_reached:
+        "Your applications would use more processor than you have on this server. Delete an application you no longer need, or ask your administrator.",
+      memory_limit_reached:
+        "Your applications would use more memory than you have on this server. Delete an application you no longer need, or ask your administrator.",
       STACK_DEPENDENCY_CYCLE: "This application's components depend on each other in a loop: contact support.",
       STACK_HEALTH_TIMEOUT: "The application did not become ready in time. Your data is kept: check the logs and try again.",
       STACK_PORT_UNAVAILABLE: "The requested port is not available.",

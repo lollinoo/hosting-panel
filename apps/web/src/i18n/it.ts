@@ -3675,6 +3675,10 @@ x-hp-ingress:
       STACK_TEMPLATE_UNPUBLISHED: "Questa applicazione o versione non è più offerta nel catalogo.",
       STACK_IMAGE_NOT_ALLOWED: "Il software di questa applicazione non è approvato su questo server.",
       STACK_QUOTA_EXCEEDED: "Hai raggiunto il limite di applicazioni o di risorse del tuo piano.",
+      cpu_limit_reached:
+        "Le tue applicazioni userebbero più processore di quello che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
+      memory_limit_reached:
+        "Le tue applicazioni userebbero più memoria di quella che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
       STACK_DEPENDENCY_CYCLE: "I componenti di questa applicazione dipendono l'uno dall'altro in cerchio: contatta l'assistenza.",
       STACK_HEALTH_TIMEOUT: "L'applicazione non è diventata pronta in tempo. I dati sono conservati: guarda i registri e riprova.",
       STACK_PORT_UNAVAILABLE: "La porta richiesta non è disponibile.",

@@ -253,6 +253,19 @@ describe("AppStackActions requests", () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
+  it.each(locales)("a reinstall refused for the processor or the memory shows that sentence on the page, not the generic limit (issue #151, %s)", async (_l, m) => {
+    for (const reason of ["cpu_limit_reached", "memory_limit_reached"] as const) {
+      keyedSend.mockResolvedValue({ ok: false, code: "QUOTA_EXCEEDED", reason });
+      const { out, sets } = callHooks(AppStackActions, actionProps("failed"), m);
+      await click(button(out, m.apps.actions.reinstall));
+      const shown = sets.find(([slot, v]) => slot === 2 && v !== null)?.[1];
+      expect(shown, reason).not.toBe(m.apps.codes.QUOTA_EXCEEDED);
+      expect(shown, reason).not.toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+      expect(shown, reason).toBe((m.apps.reasons as Record<string, string>)[reason]);
+      expect(router.refresh).not.toHaveBeenCalled();
+    }
+  });
+
   it.each(locales)("issue #106: a refusal never names a status other than the one the page shows (%s)", async (_l, m) => {
     // The page read «failed» (a crashed component), the API refused from its stored «running», or the list went stale.
     keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "running" });
@@ -457,6 +470,23 @@ describe("upgrade and rollback plan dialog", () => {
     expect(parent.sets.filter(([k]) => k === 2)).toEqual([[2, null]]);
     expect(parent.sets).not.toContainEqual([4, null]);
     expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(locales)("an upgrade or rollback confirm refused for the processor or the memory says it in the dialog and stays open (issue #151, %s)", async (_l, m) => {
+    for (const mode of ["upgrade", "rollback"] as const) {
+      for (const reason of ["cpu_limit_reached", "memory_limit_reached"] as const) {
+        keyedSend.mockResolvedValue({ ok: false, code: "QUOTA_EXCEEDED", reason });
+        const parent = callHooks(AppStackActions, actionProps("running"), m, { 4: mode });
+        const confirmed = run(planDialog(parent.out), m, { 0: DIFF, 2: true });
+        await click(button(confirmed.out, mode === "upgrade" ? m.apps.upgrade.confirm : m.apps.rollback.confirm));
+        const shown = confirmed.sets.find(([slot, v]) => slot === 1 && v !== null)?.[1];
+        expect(shown, `${mode} ${reason}`).not.toBe(m.apps.codes.QUOTA_EXCEEDED);
+        expect(shown, `${mode} ${reason}`).not.toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+        expect(shown, `${mode} ${reason}`).toBe((m.apps.reasons as Record<string, string>)[reason]);
+        expect(parent.sets, `${mode} ${reason}`).not.toContainEqual([4, null]);
+        expect(router.refresh).not.toHaveBeenCalled();
+      }
+    }
   });
 
   describe("private values the new version needs (issue #89)", () => {
