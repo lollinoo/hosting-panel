@@ -312,15 +312,16 @@ describe("app API input schemas", () => {
   it("an upgrade carries each private value once, under the rule of the private values route", () => {
     const base = { templateVersionId: "atv_demo_2", planHash: HASH };
     const parse = (secrets: unknown): boolean => UpgradeAppStackInputSchema.safeParse({ ...base, secrets }).success;
-    expect(parse([{ parameterKey: "mail_password", value: "v" }])).toBe(true);
+    const v = "v4lue6";
+    expect(parse([{ parameterKey: "mail_password", value: v }])).toBe(true);
     expect(parse([])).toBe(true);
-    expect(parse([{ parameterKey: "mail_password", value: "v" }, { parameterKey: "mail_password", value: "w" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: v }, { parameterKey: "mail_password", value: "w4lue6" }])).toBe(false);
     expect(parse([{ parameterKey: "mail_password", value: "" }])).toBe(false);
-    expect(parse([{ parameterKey: "mail_password", value: "a\u0000b" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "a\u0000bcdef" }])).toBe(false);
     expect(parse([{ parameterKey: "mail_password", value: "v".repeat(16_385) }])).toBe(false);
-    expect(parse([{ parameterKey: "hp_reserved", value: "v" }])).toBe(false);
-    expect(parse([{ parameterKey: "mail_password", value: "v", version: 1 }])).toBe(false);
-    expect(parse(Array.from({ length: 9 }, (_, i) => ({ parameterKey: `k${String(i)}`, value: "v" })))).toBe(false);
+    expect(parse([{ parameterKey: "hp_reserved", value: v }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: v, version: 1 }])).toBe(false);
+    expect(parse(Array.from({ length: 9 }, (_, i) => ({ parameterKey: `k${String(i)}`, value: v })))).toBe(false);
   });
 
   it("a plan previews a version or a revision, and a rollback takes no parameters", () => {
@@ -392,6 +393,16 @@ describe("app API input schemas", () => {
       const refused = parse(value);
       expect(refused.success, value).toBe(false);
       expect(refused.error?.issues[0]).toMatchObject({ path: ["value"], code: "too_small" });
+      if (value !== "") expect(JSON.stringify(refused.error?.issues)).not.toContain(value);
+    }
+    // An upgrade is the other request that stores a new value: the same minimum, on that entry's value.
+    const upgrade = (value: string) =>
+      UpgradeAppStackInputSchema.safeParse({ templateVersionId: "atv_demo_2", planHash: HASH, secrets: [{ parameterKey: "app_secret", value }] });
+    expect(upgrade("Zq9abc").success).toBe(true);
+    for (const value of ["Zq9ab", "Zq9", ""]) {
+      const refused = upgrade(value);
+      expect(refused.success, value).toBe(false);
+      expect(refused.error?.issues[0]).toMatchObject({ path: ["secrets", 0, "value"], code: "too_small" });
       if (value !== "") expect(JSON.stringify(refused.error?.issues)).not.toContain(value);
     }
     // The executor's schema of the values sent at a start is not held to it: a value stored before the minimum is read.

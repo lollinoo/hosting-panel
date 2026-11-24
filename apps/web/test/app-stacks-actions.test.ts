@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_PROCESS_MARKS,
   APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
   APP_STACK_STATUSES,
   appStackEnqueueTarget,
   type AppStackPlanDiffDto,
@@ -459,6 +460,21 @@ describe("upgrade and rollback plan dialog", () => {
       }
     });
 
+    it.each(locales)("a value shorter than the log reader masks is marked at its field, kept there, and nothing is sent (%s)", async (_l, m) => {
+      const text = appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short");
+      expect(text).toContain(String(APP_STACK_SECRET_MIN_LENGTH));
+      const typed = "Zq9ab";
+      expect(typed).toHaveLength(APP_STACK_SECRET_MIN_LENGTH - 1);
+      const { d, parentSets } = openDialog("upgrade", m);
+      const { input, refs } = fields(typed);
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING }, refs);
+      await click(button(out, m.apps.upgrade.confirm));
+      expect(keyedSend).not.toHaveBeenCalled();
+      expect(sets).toContainEqual([3, { mail_password: text }]);
+      expect(input.value).toBe(typed);
+      expect(JSON.stringify([sets, parentSets])).not.toContain(typed);
+    });
+
     it("confirm sends the typed values with the plan hash, empties the fields and keeps no value in state", async () => {
       keyedSend.mockResolvedValue(accepted);
       const { d, parentSets } = openDialog("upgrade");
@@ -477,6 +493,7 @@ describe("upgrade and rollback plan dialog", () => {
 
     it.each([
       ["value_too_long", "VALIDATION_ERROR"],
+      ["value_too_short", "VALIDATION_ERROR"],
       ["STACK_SECRET_MISSING", "VALIDATION_ERROR"],
       ["secret_not_needed", "VALIDATION_ERROR"],
     ])("a refusal of a value (%s) is shown next to its field, in the open dialog, with the field emptied", async (reason, code) => {

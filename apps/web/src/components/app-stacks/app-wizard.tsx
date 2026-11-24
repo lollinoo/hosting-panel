@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   APP_STACK_PROCESS_MARK_PATTERN,
+  APP_STACK_SECRET_MIN_LENGTH,
   APP_TEMPLATE_LIMITS,
   AppStackDomainEntrySchema,
   MAX_APP_STACK_DOMAINS,
@@ -180,9 +181,12 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     if (step === "configure") {
       if (!name.trim()) errors.name = t.required;
       for (const k of missingSecretKeys(params, new Set(typedSecrets))) errors[`param:${k}`] = t.required;
-      // The server refuses a platform mark with no reason a page can show: say it here (ADR-0041).
+      // The server refuses a platform mark with no reason a page can show: say it here (ADR-0041); and a value shorter than
+      // the log reader masks, as the server would (BUG-43).
       for (const k of typedSecrets) {
-        if (APP_STACK_PROCESS_MARK_PATTERN.test(secretValues.current.get(k) ?? "")) errors[`param:${k}`] = t.valueReserved;
+        const v = secretValues.current.get(k) ?? "";
+        if (v.length > 0 && v.length < APP_STACK_SECRET_MIN_LENGTH) errors[`param:${k}`] = appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short");
+        else if (APP_STACK_PROCESS_MARK_PATTERN.test(v)) errors[`param:${k}`] = t.valueReserved;
       }
       for (const [k, v] of Object.entries(inputs)) {
         if (typeof v === "string" && APP_STACK_PROCESS_MARK_PATTERN.test(v)) errors[`param:${k}`] = t.valueReserved;
@@ -246,10 +250,15 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       setCreatedStackId(id);
       if (body.deploy) return router.push(detailHref(id));
     }
-    // A value typed again gets the check Next gave the first one: the server refuses a platform mark with no reason a page can show.
-    const reserved = typedSecrets.filter((k) => APP_STACK_PROCESS_MARK_PATTERN.test(retyped.current.get(k) ?? ""));
-    if (reserved.length > 0) {
-      setFieldErrors(Object.fromEntries(reserved.map((k) => [`param:${k}`, t.valueReserved])));
+    // A value typed again gets the checks Next gave the first one: a platform mark, and a value too short to mask.
+    const refused = typedSecrets.flatMap((k): [string, string][] => {
+      const v = retyped.current.get(k);
+      if (v === undefined) return [];
+      if (v.length < APP_STACK_SECRET_MIN_LENGTH) return [[`param:${k}`, appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")]];
+      return APP_STACK_PROCESS_MARK_PATTERN.test(v) ? [[`param:${k}`, t.valueReserved]] : [];
+    });
+    if (refused.length > 0) {
+      setFieldErrors(Object.fromEntries(refused));
       setError(t.secretFailed);
       setBusy(false);
       return;

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   APP_STACK_PROCESS_MARK_PATTERN,
+  APP_STACK_SECRET_MIN_LENGTH,
   SetAppStackSecretInputSchema,
   appStackEnqueueTarget,
   type AppStackDetailDto,
@@ -205,13 +206,16 @@ function PlanDialog({
   async function confirm() {
     if (!diff) return;
     const secrets = asked.map((wanted) => ({ parameterKey: wanted.key, value: inputs.current.get(wanted.key)?.value ?? "" }));
-    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041).
+    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041),
+    // and one shorter than the log reader masks (BUG-43), as the server would.
     const problems = secrets.flatMap((typed): [string, string][] =>
       !typed.value
         ? [[typed.parameterKey, m.apps.wizard.required]]
-        : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
-          ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
-          : [],
+        : typed.value.length < APP_STACK_SECRET_MIN_LENGTH
+          ? [[typed.parameterKey, appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")]]
+          : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
+            ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
+            : [],
     );
     if (problems.length > 0) return setFieldErrors(Object.fromEntries(problems));
     setFieldErrors({});

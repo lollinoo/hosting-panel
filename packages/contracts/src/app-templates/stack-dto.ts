@@ -87,9 +87,10 @@ export const PlanAppStackInputSchema = z
   .refine((p) => !(p.templateVersionId !== undefined && p.revisionId !== undefined), { message: "Choose a version or a revision." })
   .refine((p) => !(p.revisionId !== undefined && p.parameters !== undefined), { message: "A rollback keeps the settings of that revision." });
 export type PlanAppStackInput = z.infer<typeof PlanAppStackInputSchema>;
-/** A private value an upgrade brings (issue #89): the same rule as SetAppStackSecretInputSchema, write-only alike. */
+/** A private value an upgrade brings (issue #89): the same rule as SetAppStackSecretInputSchema, write-only alike, long
+ *  enough for the log reader to mask (BUG-43). */
 const UpgradeAppStackSecretSchema = z
-  .object({ parameterKey: AppTemplateParameterKeySchema, value: AppStackSecretFileContentSchema.shape.content })
+  .object({ parameterKey: AppTemplateParameterKeySchema, value: AppStackSecretFileContentSchema.shape.content.min(APP_STACK_SECRET_MIN_LENGTH) })
   .strict();
 export const UpgradeAppStackInputSchema = z
   .object({
