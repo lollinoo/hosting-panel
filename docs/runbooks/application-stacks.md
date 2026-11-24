@@ -337,8 +337,11 @@ administrator's console has no such action, and nobody writes proxy configuratio
      that did not finish the application reads running or degraded, so the reason is `stop_unfinished` and the page
      says to press Stop again or Restart.
 
-   Removing an address follows the same rule and is refused in the same states: removing frees the name for anyone,
-   another customer included, while the live file would still serve it. Adding an address is always possible: it
+   Removing an address frees the name for anyone, another customer included, while a live file could still serve
+   it, so it is stricter: it is accepted only when the refresh it queues withdraws the name now (first case above), or
+   when nothing is published and no action is open (never installed, or stopped). While the panel's own refresh is
+   queued or running (it may have read the address already) or a first install runs, it is refused with the same
+   `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
    reads «In attesa» until a published file holds it.
 
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps

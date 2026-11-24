@@ -38,7 +38,7 @@ import { validatedSpec } from "./app-stack-compile.js";
 import { appStackDomainDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { mapAppStackError } from "./app-stack-errors.js";
 import { AppStackObserverService } from "./app-stack-observer.service.js";
-import { appStackOptionsApply, appStackRoutesFollowAddresses } from "./app-stack-runtime-policy.js";
+import { appStackAddressRemovable, appStackOptionsApply, appStackRoutesFollowAddresses } from "./app-stack-runtime-policy.js";
 import { apr1Verifier } from "./apr1.js";
 import type { AppStackRequestContext } from "./app-stacks.service.js";
 
@@ -157,7 +157,7 @@ export class AppStackDomainsService {
 
   /**
    * The route refresh queued in the same transaction withdraws the route. Removing frees the host name for anyone, so
-   * where a route file may be in place that nothing rewrites now (ADR-0037) the address is kept and the removal refused.
+   * unless that refresh withdraws it now or nothing is published (ADR-0037) the address is kept and the removal refused.
    */
   public async remove(ctx: AppStackRequestContext, stack: AppStackRow, domainId: string): Promise<AppStackDomainDto[]> {
     const row = await this.#row(stack, domainId);
@@ -170,7 +170,7 @@ export class AppStackDomainsService {
         }
         const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
         const last = await lastOperation(t, stack.id);
-        if (appStackOptionsApply(locked, last) === null) throw notNow(locked, last, "This web address cannot be withdrawn");
+        if (!appStackAddressRemovable(locked, last)) throw notNow(locked, last, "This web address cannot be withdrawn");
         await ctx.audit(t, {
           action: APP_AUDIT_ACTIONS.domainRemove,
           targetType: "app_stack",

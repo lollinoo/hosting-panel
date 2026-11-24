@@ -516,6 +516,47 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
       expect(await h.counts()).toEqual(before);
     });
 
+    it("an address is not removed while the panel's own refresh is queued or a first install runs: either may publish the freed name", async () => {
+      const remove = (stackId: string, id: string) => h.call(h.a.token, "DELETE", `${base(h.a, stackId)}/${id}`);
+      // The refresh may have read the addresses already; nothing would withdraw the name after it.
+      const refreshing = await installed("running", true);
+      await enqueueAppStackOperationTransactional(h.dbClient.db, {
+        organizationId: h.a.orgId,
+        stackId: refreshing.stackId,
+        kind: "stack.deploy",
+        requestedByUserId: null,
+        idempotencyKey: `sys_routes_${randomUUID().replace(/-/g, "")}`,
+        requestHash: "0".repeat(64),
+        revision: null,
+        routesOnly: true,
+        destroyData: false,
+      });
+      expect((await stackRow(refreshing.stackId)).status).toBe("updating");
+      // A first install: its deploy publishes the addresses it reads before it settles.
+      const { stackId: installing, ids } = await withAddresses(["first"] as const);
+      expect((await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${installing}/secrets`, { parameterKey: "app_secret", value: "first-value" })).status).toBe(200);
+      expect((await verb(installing, "deploy")).status).toBe(202);
+      const installingStatus = (await stackRow(installing)).status;
+      expect((await stackRow(installing)).appliedRevisionId).toBeNull();
+
+      const before = await h.counts();
+      expectRefusal(await remove(refreshing.stackId, refreshing.id), 409, "RESOURCE_LOCKED", { field: "status", reason: "updating" });
+      expectRefusal(await remove(installing, ids.first), 409, "RESOURCE_LOCKED", { field: "status", reason: installingStatus });
+      expect(await h.counts()).toEqual(before);
+      expect((await rows(refreshing.stackId)).map((r) => r.id)).toEqual([refreshing.id]);
+      expect((await rows(installing)).map((r) => r.id)).toEqual([ids.first]);
+    });
+
+    it("with nothing published and no action open (never installed, stopped) an address is removed", async () => {
+      const remove = (stackId: string, id: string) => h.call(h.a.token, "DELETE", `${base(h.a, stackId)}/${id}`);
+      const { stackId, ids } = await withAddresses(["never"] as const);
+      expect((await remove(stackId, ids.never)).status).toBe(200);
+      const stopped = await installed("stopped", true);
+      expect((await remove(stopped.stackId, stopped.id)).status).toBe(200);
+      const running = await installed("running", true);
+      expect((await remove(running.stackId, running.id)).status).toBe(200);
+    });
+
     describe("a path points at a part of the revision that runs and of the one asked for", () => {
       const CACHE_PATH = { pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false };
 

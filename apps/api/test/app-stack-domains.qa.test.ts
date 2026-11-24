@@ -806,6 +806,8 @@ describe("B3: application web addresses touch only the application's own route f
     it("the audit rows share the 24 h throttle with sites: the same name on a site starts failed, not fresh", async () => {
       const host = "refused.example.test";
       const row = await rowOf(host);
+      // The addresses added above queued the panel's route refresh: a removal waits until it ran.
+      await drain();
       expect((await owner("DELETE", `${base()}/${row.id}`)).status).toBe(200);
       await pass(310);
       const added = await owner("POST", `/v1/organizations/${orgId}/managed-sites/${siteId}/domains`, { hostname: host, includeWww: false });

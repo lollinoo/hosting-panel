@@ -408,6 +408,20 @@ export function appStackOptionsApply(
   return null;
 }
 
+/**
+ * ADR-0037: removing an address frees its host name for anyone, so it is accepted only when the refresh queued with it
+ * withdraws the name now (the routes follow the addresses), or when nothing is published and no action is open. Not
+ * while the panel's own refresh runs (it may have read the address already) nor during a first install.
+ */
+export function appStackAddressRemovable(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId" | "appliedRoutesHash">,
+  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+): boolean {
+  if (appStackRoutesFollowAddresses(stack, last)) return true;
+  const idle = last === undefined || isTerminalOperationStatus(last.status);
+  return idle && stack.appliedRoutesHash === null && (stack.appliedRevisionId === null || stack.status === "stopped");
+}
+
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */
 export function appStackDisplayStatus(input: {
   readonly stack: Pick<AppStackRow, "status" | "appliedRoutesHash">;
