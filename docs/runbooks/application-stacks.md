@@ -148,7 +148,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    - `DOCKER_ENGINE_UNAVAILABLE`, `OPERATION_INTERRUPTED`: the action was cut (Docker, the executor, an API restart or a
      restore); check procedure 2 step 3, then **Riavvia** or **Reinstalla**.
 
-   An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
+   An upgrade or a rollback that fails before its components are created (download, preparation, or a create the
+   executor refuses before it removes or creates anything) goes back to what its
    request replaced: the version, settings, components and quota asked for before that request (usually those of the
    version installed, but not after a change that failed past create, nor on an application never installed), the
    upgrade on offer again, and the failed attempt in the history. Not so when a web address or one of its paths was
