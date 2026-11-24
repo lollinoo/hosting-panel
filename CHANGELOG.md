@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### A webhook cannot name the server's own public address behind address translation (2026-11-24)
+*hosting-panel v0.17.4*
+
+**Bug Fixes & Stability**
+- **notifications**: A webhook cannot name the server's own public address behind address translation
+
+---
+
 ### An application call whose answer cannot be read has an unknown outcome (2026-11-24)
 *hosting-panel v0.17.3*
 
