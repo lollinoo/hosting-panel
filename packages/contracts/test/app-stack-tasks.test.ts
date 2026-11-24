@@ -37,6 +37,7 @@ import {
   appStackTaskSlotAtOrBefore,
   appStackLockKey,
   appStackTaskQueueKey,
+  appStackTaskPrintedButNotKept,
   boundAppStackTaskOutput,
   findForbiddenPublicDtoKeys,
   findPemValues,
@@ -305,6 +306,19 @@ describe("what a run printed", () => {
     expect(bound.truncated).toBe(true);
     expect(bound.output).toBe(`first\n${"x".repeat(1_999)}`);
     expect(AppStackTaskOutputSchema.safeParse(bound.output).success).toBe(true);
+  });
+
+  it("tells a run that printed something and kept none of it: an empty output that is flagged, and only that", () => {
+    const answer = (output: string, outputTruncated: boolean) => appStackTaskPrintedButNotKept({ output, outputTruncated });
+    expect(answer("", true)).toBe(true);
+    // nothing was printed
+    expect(answer("", false)).toBe(false);
+    // something was kept, whole or cut
+    expect(answer("a line", false)).toBe(false);
+    expect(answer("the last line", true)).toBe(false);
+    // the pair is one the executor and the schemas of a run answer and carry
+    const finished = { runId: "srun_0123456789abcdef01234567", outcome: "succeeded", problem: null, exitCode: 0, startedAt: "2026-11-23T01:00:00.000Z", endedAt: "2026-11-23T01:00:01.000Z" };
+    expect(AppStackTaskRunIpcResultSchema.safeParse({ ...finished, output: "", outputTruncated: true }).success).toBe(true);
   });
 
   it("whatever comes in, the result passes the schema", () => {

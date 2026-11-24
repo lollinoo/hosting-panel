@@ -111,6 +111,15 @@ export function boundAppStackTaskOutput(lines: readonly string[]): { output: str
   return { output: kept.reverse().join("\n"), truncated };
 }
 
+/**
+ * A run printed something and none of it was kept: an empty output that is flagged as cut. It is one answer for every
+ * cause: the cut left no whole line (one very long line), or the executor could not establish the private values to
+ * hide in the output and dropped it. An empty output that is not flagged is a run that printed nothing.
+ */
+export function appStackTaskPrintedButNotKept(run: { readonly output: string; readonly outputTruncated: boolean }): boolean {
+  return run.output === "" && run.outputTruncated;
+}
+
 // ---- schedule ----
 
 export const APP_STACK_TASK_FREQUENCIES = ["never", "hourly", "daily", "weekly"] as const;
