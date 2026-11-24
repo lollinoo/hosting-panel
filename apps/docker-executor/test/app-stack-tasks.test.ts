@@ -990,6 +990,41 @@ describe("runAppStackTask on the Docker Engine", () => {
       expect(warn).toHaveBeenCalledTimes(1);
     });
 
+    it("answers unknown for a broken output when no kill is confirmed and the engine no longer knows the exec: that is not a command that never started", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter, mockDaemon } = await setup({
+        command: (call) => {
+          command = call.execId;
+          // The engine forgot the exec once it ended (a restart of the engine does it): its inspect answers 404.
+          return { cut: true, forgotten: true, frames: [[1, `No such exec instance: ${"4f".repeat(32)}\r\n`]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      // What the stream held may be the engine's own text, with a Docker id: nothing of it is kept.
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "", outputTruncated: false });
+      expect(JSON.stringify(result)).not.toContain("4f4f");
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers failed, with no output, for a broken output when no kill is confirmed and the engine says no process ever ran", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, pid: 0, frames: [[1, "the engine's own text\n"]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "failed", problem: null, exitCode: null, output: "" });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
     it("answers unknown for a command whose start failed when no kill is confirmed", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       const { adapter, mockDaemon } = await setup({

@@ -437,9 +437,11 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     const started = state !== null && state?.pid !== 0;
     // A command that ended by itself keeps its outcome and exit code, whatever the kill of what it left behind. An end
     // of the output that comes with no exit code (a connection that broke ends it the same way) does not say that the
-    // command ended: with no confirmed kill either, it may still be going.
-    if (!stopped && exitCode === null && started) {
-      return this.finished(req, container.inspected, "unknown", null, startedAt, tail);
+    // command ended: with no confirmed kill either, it may still be going. Only an engine that says no process ever ran
+    // (pid 0) tells a command that never started; one that no longer knows the exec does not, so that run is not known
+    // (its output stays withheld, as the engine's own text can be all it holds).
+    if (!stopped && exitCode === null && state?.pid !== 0) {
+      return this.finished(req, container.inspected, "unknown", null, startedAt, tail, started);
     }
     return this.finished(req, container.inspected, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
   }
