@@ -218,7 +218,9 @@ The proxy keeps serving with the API and the database down, and `hp-update` neve
    destination not mounted, `8` local folder unsafe (only with `--local-repo`).
 6. Then sign in with the old administrator account, point the domains to the new server, and use **Ripristina** on each site.
    The panel copy is the one of the last night: later changes are lost. If the disk was lost together with the server, a
-   local-only copy is lost too, which is why an off-server copy is required.
+   local-only copy is lost too, which is why an off-server copy is required. `hp-restore-panel` points the recorded IPv4 at
+   the one this server's installer used, but the recorded IPv6 is the old server's: run `install.sh` again with the
+   release now installed and `--ipv6 <this server's IPv6>`, or `--ipv6 none` if it has none.
 
 ## 7. Restore a `partial` copy using only the destination that succeeded
 
