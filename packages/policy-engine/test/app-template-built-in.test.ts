@@ -140,7 +140,8 @@ describe("the built-in application templates", () => {
     expect(db?.volumes).toEqual([{ volumeKey: "data", containerPath: "/data", readOnly: false }]);
     expect(db?.expose).toEqual([6379]);
     expect(plan.ingress).toEqual([]);
-    expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "402653184" });
+    // The ceiling is 256 MB and the limit 512 MB: the process and its buffers need room above what it may hold.
+    expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "536870912" });
   });
 
   it.each(APP_BUILT_IN_TEMPLATES.filter((t) => isDatabase(t) && t.previousVersions !== undefined).map((t) => [t.slug, t] as const))(
@@ -167,6 +168,19 @@ describe("the built-in application templates", () => {
     expect({ ...component(after, "db")!, argv: null }).toEqual({ ...component(before, "db")!, argv: null });
     expect(after.volumes).toEqual(before.volumes);
     expect(sumAppStackPlanResources(after)).toEqual(sumAppStackPlanResources(before));
+  });
+
+  it("valkey: version 1 compiles as it did, with 384 MB; version 2 differs from it in the memory limit only", () => {
+    const t = seed("valkey");
+    const [before, after] = [planOf(earlierVersion(t)), planOf(t)];
+    expect(sumAppStackPlanResources(before)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "402653184" });
+    expect(sumAppStackPlanResources(after)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "536870912" });
+    expect(component(after, "db")?.argv).toEqual(component(before, "db")?.argv);
+    expect(component(after, "db")?.argv).toContain("256mb");
+    const rest = (plan: ApprovedStackPlan) => ({ ...component(plan, "db")!, resources: null });
+    expect(rest(after)).toEqual(rest(before));
+    expect(component(after, "db")?.resources.cpuMilli).toBe(component(before, "db")?.resources.cpuMilli);
+    expect(after.volumes).toEqual(before.volumes);
   });
 
   it.each(["mariadb", "postgresql"])("%s does not compile until the customer has set its passwords", (slug) => {

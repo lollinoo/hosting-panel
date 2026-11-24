@@ -731,6 +731,9 @@ approval.
    «Database MariaDB» has a second version (`atv_mariadb_2`) that keeps the database's temporary files on its data volume
    instead of the 64 MB `/tmp`: a database installed before it stays on version 1 until its customer accepts the
    upgrade (a short stop, the data stays), and the real-Docker check of procedure 9 proves the move.
+   «Archivio Valkey» has a second version (`atv_valkey_2`): the same 256 MB ceiling under a 512 MB limit instead of
+   384 MB, and a description that says a full store refuses new writes; its upgrade asks the customer 128 MiB more of
+   the memory maximum and is refused, the store untouched, when the customer is already at it.
 2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
    presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
    applications of the same customer; an application has at most 4 databases and a database at most 8 applications.

@@ -297,8 +297,12 @@ const MARIADB_DESCRIPTION =
 const POSTGRESQL_DESCRIPTION =
   "Un database PostgreSQL con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Database e utente si chiamano app.";
 
-const VALKEY_DESCRIPTION =
+/** The description of version 1, as it shipped: it says nothing of how much the store holds. */
+const VALKEY_DESCRIPTION_1 =
   "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Non ha password.";
+
+const VALKEY_DESCRIPTION =
+  "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco. Può tenere fino a 256 MB di dati: quando è pieno rifiuta le nuove scritture e tiene quello che ha. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Non ha password.";
 
 const DATABASE_LIMITS = ["    deploy:", "      resources:", "        limits:", '          cpus: "1.0"', "          memory: 512M"];
 const tcpHealth = (port: number) => ["    healthcheck:", "      kind: tcp", `      port: ${port}`, "      intervalSeconds: 10", "      timeoutSeconds: 3"];
@@ -408,21 +412,14 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
   ].join("\n"),
 });
 
-const valkey: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_valkey",
-  versionId: "atv_valkey_1",
-  slug: "valkey",
-  name: "Archivio Valkey",
-  category: "database",
-  description: VALKEY_DESCRIPTION,
-  descriptionEn:
-    "A Valkey key-value store, compatible with Redis, that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
-  source: [
+/** The Valkey source; `description` is the one the version shipped with and `memory` its limit (version 2 raises it). */
+function valkeySource(description: string, memory: string): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Archivio Valkey"',
     "  category: database",
-    `  description: "${VALKEY_DESCRIPTION}"`,
+    `  description: "${description}"`,
     "services:",
     "  db:",
     "    image: valkey/valkey:9.2.0-alpine3.24@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882",
@@ -436,11 +433,27 @@ const valkey: AppBuiltInTemplate = Object.freeze({
     "      resources:",
     "        limits:",
     '          cpus: "0.5"',
-    "          memory: 384M",
+    `          memory: ${memory}`,
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const valkey: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_valkey",
+  versionId: "atv_valkey_2",
+  slug: "valkey",
+  name: "Archivio Valkey",
+  category: "database",
+  description: VALKEY_DESCRIPTION,
+  descriptionEn:
+    "A Valkey key-value store, compatible with Redis, that keeps its data on disk. It holds up to 256 MB: when it is full it refuses new writes and keeps what it holds. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
+  // The ceiling (256 MB) is unchanged and now told to the customer; the limit is twice it, so the process, its buffers and
+  // the copy of a snapshot or of an append-only rewrite fit above what the store may hold (swap is off: memory is all).
+  source: valkeySource(VALKEY_DESCRIPTION, "512M"),
+  // Version 1 as it shipped: the stores installed on it are offered version 2.
+  previousVersions: Object.freeze([Object.freeze({ versionId: "atv_valkey_1", source: valkeySource(VALKEY_DESCRIPTION_1, "384M") })]),
 });
 
 /** The two seeds of the first format (ADR-0035), the WordPress one of the extended format (ADR-0036), then the three

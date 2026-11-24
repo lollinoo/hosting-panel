@@ -44,7 +44,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
       },
       { templateId: "atpl_mariadb", versionId: "atv_mariadb_2", slug: "mariadb", category: "database", name: "Database MariaDB" },
       { templateId: "atpl_postgresql", versionId: "atv_postgresql_1", slug: "postgresql", category: "database", name: "Database PostgreSQL" },
-      { templateId: "atpl_valkey", versionId: "atv_valkey_1", slug: "valkey", category: "database", name: "Archivio Valkey" },
+      { templateId: "atpl_valkey", versionId: "atv_valkey_2", slug: "valkey", category: "database", name: "Archivio Valkey" },
     ]);
     expect(FIRST_FORMAT.map((t) => t.slug)).toEqual(["http-cache", "worker-storage", "mariadb", "postgresql", "valkey"]);
     expect(EXTENDED.map((t) => t.slug)).toEqual(["wordpress-mariadb"]);
@@ -155,7 +155,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
     expect(first.source).not.toContain("command:");
     expect(first.source).not.toContain("WORDPRESS_CONFIG_EXTRA");
     // The seeds with an earlier version.
-    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb", "mariadb"]);
+    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb", "mariadb", "valkey"]);
   });
 
   it("wordpress-mariadb version 2: the site follows the address it is asked by, and takes uploads of up to 64 MB", () => {
@@ -194,6 +194,42 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
     expect(t.source).toContain("      - data:/var/lib/mysql\n");
     // Everything else of version 1 is unchanged: the description, the parameters, the environment, the limits.
     const strip = (source: string) => source.replace(/^ {4}command: .*\n/m, "");
+    expect(strip(t.source)).toBe(strip(first.source));
+    expect(t.source.includes(`description: "${t.description}"`)).toBe(true);
+  });
+
+  it("valkey: version 2 says how much it holds and leaves room above its ceiling; version 1 is kept byte for byte as the earlier version", () => {
+    const t = databaseSeed("valkey");
+    expect(t.versionId).toBe("atv_valkey_2");
+    expect(t.templateId).toBe("atpl_valkey");
+    expect(Object.isFrozen(t.previousVersions)).toBe(true);
+    expect(t.previousVersions?.map((v) => v.versionId)).toEqual(["atv_valkey_1"]);
+    const first = t.previousVersions![0]!;
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.source.length).toBe(909);
+    expect(sha256(first.source)).toBe("311ac911841030abf3a0f7f1ef19294bcb92f9602b7f23c2d97f7558cf5711a7");
+    const commandOf = (source: string) => [...source.matchAll(/^ {4}command: (.*)$/gm)].map((m) => m[1]);
+    const ceilingMb = (source: string) => Number(/"--maxmemory", "(\d+)mb"/.exec(commandOf(source)[0]!)![1]);
+    const limitMb = (source: string) => Number(/^ {10}memory: (\d+)M$/m.exec(source)![1]);
+    // The ceiling and every other argument are the same on both versions; the limit leaves room for the process and its buffers.
+    expect(commandOf(t.source)).toEqual(commandOf(first.source));
+    expect(commandOf(first.source)).toEqual([
+      '["valkey-server", "--appendonly", "yes", "--dir", "/data", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--protected-mode", "no"]',
+    ]);
+    expect([ceilingMb(first.source), limitMb(first.source)]).toEqual([256, 384]);
+    expect([ceilingMb(t.source), limitMb(t.source)]).toEqual([256, 512]);
+    expect(limitMb(t.source)).toBeGreaterThanOrEqual(2 * ceilingMb(t.source));
+    expect(t.source).toContain('          cpus: "0.5"\n          memory: 512M\n');
+    // What the store does at its ceiling is told to the customer, in both languages; version 1 said nothing of it.
+    expect(t.description).toContain("256 MB");
+    expect(t.description).toContain("quando è pieno rifiuta le nuove scritture e tiene quello che ha");
+    expect(t.descriptionEn).toContain("256 MB");
+    expect(t.descriptionEn).toContain("when it is full it refuses new writes and keeps what it holds");
+    expect(first.source).not.toContain("256 MB");
+    expect(first.source).toContain('  description: "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco.');
+    expect(first.source).toContain('da fuori del server non è raggiungibile. Non ha password."\n');
+    // Everything else of version 1 is unchanged: the description and the memory limit are the two differences.
+    const strip = (source: string) => source.replace(/^ {2}description: ".*"$/m, "").replace(/^ {10}memory: \d+M$/m, "");
     expect(strip(t.source)).toBe(strip(first.source));
     expect(t.source.includes(`description: "${t.description}"`)).toBe(true);
   });

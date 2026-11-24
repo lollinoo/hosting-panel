@@ -15,7 +15,7 @@
  * held and starts; the newest version also starts on an empty volume (the steps that deploy it).
  *
  * Machine safety (this machine may run a live panel):
- *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x|u, so every container, network
+ *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x|u|w, so every container, network
  *    and volume name the engine derives contains swarmtest_<hex>; the script's own names and paths use
  *    hp_swarmtest_stk_<hex>; the names of the links contain swarmtest-<hex>.
  *  - The adapter talks only to a gate socket in the temp dir. Its default-deny judge() forwards a request to
@@ -39,7 +39,7 @@
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-databases.mjs
  * Steps: gate-self-test, preflight, snapshot-before, plans-compile-from-seeds, applications-deploy,
  * mariadb-starts-hardened, postgresql-starts-hardened, valkey-starts-hardened, data-survives-restart,
- * mariadb-earlier-version-upgrades, unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
+ * mariadb-earlier-version-upgrades, valkey-earlier-version-upgrades, unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
  * link-follows-a-replaced-database, application-stop-start-keeps-links,
  * application-removal-detaches-running-database,
  * stopped-database-survives-application-removal, stale-attachment-repaired, refuses-foreign-targets,
@@ -87,11 +87,11 @@ const secretsRoot = `/dev/shm/${runPrefix}-secrets`;
 const ORG = `org_swarmtest_${hex}`;
 const OTHER_ORG = `org_swarmtest_${hex}_other`;
 /** a, b: applications · v, m, p: the Valkey, MariaDB and PostgreSQL databases · n: an application that is only
- *  prepared (a private network and a volume, no container) · x: the same, of another customer · u: a MariaDB that is
- *  created on its version 1 and moved to the newest version. */
-const [A, B, V, M, P, N, X, UM] = ["a", "b", "v", "m", "p", "n", "x", "u"].map((s) => `stk_swarmtest_${hex}_${s}`);
+ *  prepared (a private network and a volume, no container) · x: the same, of another customer · u, w: a MariaDB and a
+ *  Valkey that are created on their version 1 and moved to the newest version. */
+const [A, B, V, M, P, N, X, UM, UV] = ["a", "b", "v", "m", "p", "n", "x", "u", "w"].map((s) => `stk_swarmtest_${hex}_${s}`);
 /** Removal order of the cleanup: the databases first. */
-const STACKS = [[UM, ORG], [M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
+const STACKS = [[UM, ORG], [UV, ORG], [M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
 // hex: can never form an hp_ token
 const PASSWORDS = { mariadbApp: randomBytes(16).toString("hex"), mariadbAdmin: randomBytes(16).toString("hex"), postgresApp: randomBytes(16).toString("hex") };
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
@@ -146,6 +146,9 @@ const compiled = {
   // The same MariaDB application as it is on version 1, and as it is after the move to the newest version.
   um1: compile("mariadb", UM, { secretKeys: ["database_password", "admin_password"], earlier: true }),
   um2: compile("mariadb", UM, { secretKeys: ["database_password", "admin_password"], n: 2 }),
+  // The same Valkey application as it is on version 1, and as it is after the move to the newest version.
+  uv1: compile("valkey", UV, { earlier: true }),
+  uv2: compile("valkey", UV, { n: 2 }),
 };
 /** The only images the gate inspects and accepts in a create body. */
 const IMAGES = new Set(Object.values(compiled).flatMap((c) => (c.ok ? c.plan.components.map((x) => x.image) : [])));
@@ -546,6 +549,8 @@ async function main() {
       PGPASSWORD: value,
     });
   const valkey = async (from, host, ...command) => (await docker(["exec", from, "valkey-cli", "-h", host, ...command], 60_000)).trim();
+  /** What the store answers to CONFIG GET maxmemory: the number of bytes, as text. */
+  const valkeyCeiling = async (from) => (await valkey(from, "db", "CONFIG", "GET", "maxmemory")).split("\n").map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
   const SQL_WRITE_MARIADB = "CREATE TABLE IF NOT EXISTS probe (id INT PRIMARY KEY, note VARCHAR(32)); REPLACE INTO probe VALUES (1, 'kept')";
   const SQL_WRITE_POSTGRES =
     "CREATE TABLE IF NOT EXISTS probe (id int PRIMARY KEY, note text); INSERT INTO probe VALUES (1, 'kept') ON CONFLICT (id) DO UPDATE SET note = EXCLUDED.note";
@@ -805,6 +810,22 @@ async function main() {
         "the two versions differ by the command only: same image, same volume and mount",
         JSON.stringify({ i: [oldM.image, newM.image], v: [oldM.volumes, newM.volumes] }),
       );
+      const [oldV, newV] = [plans.uv1.components[0], plans.uv2.components[0]];
+      assert(
+        plans.uv1.templateVersionId === "atv_valkey_1" && plans.uv2.templateVersionId === "atv_valkey_2" && plans.v.templateVersionId === "atv_valkey_2",
+        "the Valkey plans are of version 1 and of version 2 (newest)",
+        [plans.uv1, plans.uv2, plans.v].map((x) => x.templateVersionId).join(","),
+      );
+      assert(
+        oldV.resources.memoryBytes === "402653184" && newV.resources.memoryBytes === "536870912" && oldV.resources.cpuMilli === 500 && newV.resources.cpuMilli === 500,
+        "Valkey version 2 raises the memory limit from 384 to 512 MiB and keeps half a processor",
+        JSON.stringify([oldV.resources, newV.resources]),
+      );
+      assert(
+        same(oldV.argv, newV.argv) && oldV.argv.includes("256mb") && plans.uv1.planHash !== plans.uv2.planHash && same(oldV.image, newV.image) && same(oldV.volumes, newV.volumes) && same(plans.uv1.volumes, plans.uv2.volumes),
+        "the two versions differ by the memory limit only: same ceiling, same command, image and volume",
+        JSON.stringify({ a: [oldV.argv, newV.argv], i: [oldV.image, newV.image], v: [oldV.volumes, newV.volumes] }),
+      );
       assert(plans.x.organizationId === OTHER_ORG, "the foreign application belongs to another customer", plans.x.organizationId);
       for (const stackId of [V, M, P]) {
         assert(aliasOf(stackId) === stackId.replaceAll("_", "-") && aliasOf(stackId).includes(aliasMarker), `the name of ${stackId} for its links`, String(aliasOf(stackId)));
@@ -866,6 +887,10 @@ async function main() {
       await hardening(plans.v);
       assert((await valkey(DB(V), "db", "SET", "probe", "kept")) === "OK", "a key is written", "no OK");
       assert((await valkey(DB(V), "db", "GET", "probe")) === "kept", "and read back", "another value");
+      // Version 2 on an empty volume: the limit is 512 MiB and the store holds up to 256 MB.
+      const limits = (await inspectOf(DB(V))).HostConfig;
+      assert(limits.Memory === 536870912 && limits.MemorySwap === 536870912, "the container may use 512 MiB of memory, swap included", `${String(limits.Memory)} ${String(limits.MemorySwap)}`);
+      assert(await valkeyCeiling(DB(V)) === "268435456", "and the store answers a ceiling of 256 MB (268435456 bytes)", await valkeyCeiling(DB(V)));
       for (const stackId of [M, P, V]) await shape(stackId);
     });
     if (!mariadbOk || !postgresOk || !valkeyOk) return;
@@ -938,6 +963,27 @@ async function main() {
       assert(seconds < 120, "in under 2 minutes", `${seconds.toFixed(1)}s`);
       assert((await view(SQL_READ)).trim() === "kept", "and the row is still there", "another value");
       await dropWithData(newest, "MariaDB upgraded from version 1");
+    });
+
+    await step("valkey-earlier-version-upgrades", async () => {
+      const [earlier, newest] = [plans.uv1, plans.uv2];
+      const out = await deploy(earlier);
+      assert(out.pulls.every((p) => p.pulled === false) && same(out.prepare.networks, [{ role: "app_internal", created: true }]), "local image, private network only", JSON.stringify(out));
+      await hardening(earlier);
+      const view = (...command) => valkey(DB(UV), "db", ...command);
+      const limitOf = async () => (await inspectOf(DB(UV))).HostConfig;
+      assert((await view("SET", "probe", "kept")) === "OK", "version 1 holds a key", "no OK");
+      assert((await view("GET", "probe")) === "kept", "and reads it back", "another value");
+      assert((await limitOf()).Memory === 402653184, "version 1 may use 384 MiB of memory", String((await limitOf()).Memory));
+      assert((await valkeyCeiling(DB(UV))) === "268435456", "and its ceiling is already 256 MB", await valkeyCeiling(DB(UV)));
+      await upgradeInPlace(newest, []);
+      await hardening(newest);
+      const limits = await limitOf();
+      assert(limits.Memory === 536870912 && limits.MemorySwap === 536870912, "version 2 may use 512 MiB of memory, swap included", `${String(limits.Memory)} ${String(limits.MemorySwap)}`);
+      assert((await view("GET", "probe")) === "kept", "the key written on version 1 is still there", "another value");
+      assert((await valkeyCeiling(DB(UV))) === "268435456", "the store answers a ceiling of 256 MB (268435456 bytes), as before", await valkeyCeiling(DB(UV)));
+      assert((await view("SET", "probe2", "more")) === "OK" && (await view("GET", "probe2")) === "more", "and takes a new key", "refused");
+      await dropWithData(newest, "Valkey upgraded from version 1");
     });
 
     const worker = cName(A, "worker");

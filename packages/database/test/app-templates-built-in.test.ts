@@ -47,7 +47,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       ["atpl_wordpress_mariadb", "atv_wordpress_mariadb_2", "wordpress-mariadb", "content"],
       ["atpl_mariadb", "atv_mariadb_2", "mariadb", "database"],
       ["atpl_postgresql", "atv_postgresql_1", "postgresql", "database"],
-      ["atpl_valkey", "atv_valkey_1", "valkey", "database"],
+      ["atpl_valkey", "atv_valkey_2", "valkey", "database"],
     ]);
     expect(items.map((i) => i.version.specVersion)).toEqual([1, 1, 2, 1, 1, 1]);
     items.forEach((item, index) => {
@@ -62,7 +62,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
 
   it("carries the earlier WordPress version, validated and hashed, before the newest one", () => {
     const items = builtInAppTemplateItems();
-    expect(items.filter((i) => i.previousVersions !== undefined).map((i) => i.slug)).toEqual(["wordpress-mariadb", "mariadb"]);
+    expect(items.filter((i) => i.previousVersions !== undefined).map((i) => i.slug)).toEqual(["wordpress-mariadb", "mariadb", "valkey"]);
     const item = items.find((i) => i.slug === "wordpress-mariadb")!;
     const t = APP_BUILT_IN_TEMPLATES.find((s) => s.slug === "wordpress-mariadb")!;
     expect(item.previousVersions).toHaveLength(1);
@@ -80,7 +80,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
 
   it("carries the earlier version of each database that has one, validated and hashed, byte for byte as the seed gives it", () => {
     const items = databasesWithVersion2();
-    expect(items.map((i) => i.slug)).toEqual(["mariadb"]);
+    expect(items.map((i) => i.slug)).toEqual(["mariadb", "valkey"]);
     for (const item of items) {
       const t = APP_BUILT_IN_TEMPLATES.find((s) => s.slug === item.slug)!;
       expect(item.previousVersions).toHaveLength(1);
@@ -131,7 +131,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
         ["atpl_http_cache", true, false, "atv_http_cache_1"],
         ["atpl_mariadb", true, false, "atv_mariadb_2"],
         ["atpl_postgresql", true, false, "atv_postgresql_1"],
-        ["atpl_valkey", true, false, "atv_valkey_1"],
+        ["atpl_valkey", true, false, "atv_valkey_2"],
         ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_2"],
         ["atpl_worker_storage", true, false, "atv_worker_storage_1"],
       ]);
@@ -145,6 +145,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
         atv_mariadb_2: 1,
         atv_postgresql_1: 1,
         atv_valkey_1: 1,
+        atv_valkey_2: 1,
       });
       expect(await getAppTemplate(db(), "atpl_http_cache")).toMatchObject({ name: "Il mio sito" });
       expect(await getAppTemplate(db(), "atpl_worker_storage")).toMatchObject({ name: "Lavoro periodico con archivio" });
@@ -161,7 +162,12 @@ describe("@hosting-panel/database - built-in app templates", () => {
                   ["atv_mariadb_1", 1],
                   ["atv_mariadb_2", 2],
                 ]
-              : [[t.defaultVersionId, 1]],
+              : t.id === "atpl_valkey"
+                ? [
+                    ["atv_valkey_1", 1],
+                    ["atv_valkey_2", 2],
+                  ]
+                : [[t.defaultVersionId, 1]],
         );
       }
       expect(await getAppTemplate(db(), "atpl_wordpress_mariadb")).toMatchObject({ description: WORDPRESS.description });
