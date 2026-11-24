@@ -28,6 +28,10 @@ import type {
   AppStackRestoreStatus,
   AppStackRetentionPolicy,
   AppStackStatus,
+  AppStackTaskRunProblem,
+  AppStackTaskRunStatus,
+  AppStackTaskSkipReason,
+  AppStackTaskTrigger,
   AppStackVolumeStatus,
   AppTemplateParameterEntry,
   AuditActorType,
@@ -645,6 +649,58 @@ export const appStackDeployments = pgTable(
       name: "fk_app_stack_deployments_replaced_revision",
     }),
     index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
+  ],
+);
+
+// Tasks of applications (0031, ADR-0042). No schedule row = the task never runs by itself.
+export const appStackTaskSchedules = pgTable(
+  "app_stack_task_schedules",
+  {
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    taskKey: text("task_key").notNull(),
+    frequency: text("frequency").$type<"hourly" | "daily" | "weekly">().notNull(),
+    hourUtc: integer("hour_utc"),
+    weekday: integer("weekday"),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+    changedBy: text("changed_by").references(() => users.id, { onDelete: "set null" }),
+    servedSlotAt: timestamp("served_slot_at", { withTimezone: true }),
+    skippedSlotAt: timestamp("skipped_slot_at", { withTimezone: true }),
+    skipReason: text("skip_reason").$type<AppStackTaskSkipReason>(),
+  },
+  (t) => [
+    primaryKey({ name: "app_stack_task_schedules_pkey", columns: [t.stackId, t.taskKey] }),
+    stackOrg("fk_app_stack_task_schedules_stack_org", t),
+  ],
+);
+
+// What a run printed (masked and bounded by the executor) lives only in `output`.
+export const appStackTaskRuns = pgTable(
+  "app_stack_task_runs",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    taskKey: text("task_key").notNull(),
+    componentKey: text("component_key").notNull(),
+    trigger: text("run_trigger").$type<AppStackTaskTrigger>().notNull(),
+    requestedBy: text("requested_by").references(() => users.id, { onDelete: "set null" }),
+    slotAt: timestamp("slot_at", { withTimezone: true }),
+    operationId: text("operation_id").notNull(),
+    status: text("status").$type<AppStackTaskRunStatus>().notNull().default("queued"),
+    problem: text("problem").$type<AppStackTaskRunProblem>(),
+    exitCode: integer("exit_code"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    output: text("output").notNull().default(""),
+    outputTruncated: boolean("output_truncated").notNull().default(false),
+  },
+  (t) => [
+    unique("uq_app_stack_task_runs_operation").on(t.operationId),
+    stackOrg("fk_app_stack_task_runs_stack_org", t),
+    index("idx_app_stack_task_runs_task").on(t.stackId, t.taskKey, t.requestedAt),
+    uniqueIndex("uq_app_stack_task_runs_slot").on(t.stackId, t.taskKey, t.slotAt).where(sql`${t.slotAt} IS NOT NULL`),
   ],
 );
 

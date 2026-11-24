@@ -140,6 +140,8 @@ export async function startAppStackHarness(options?: {
     outboxPollIntervalMs: null,
     driftReconcileIntervalMs: null,
     ...(options?.terminalSweepIntervalMs !== undefined ? { terminalSweepIntervalMs: options.terminalSweepIntervalMs } : {}),
+    // A test calls the pass itself, with the time it wants.
+    appTaskScheduleIntervalMs: null,
     recoverUnknownOnStart: false,
     appFeatures: options?.appFeatures ?? { applicationTemplatesAvailable: true, applicationStacksAvailable: true },
     appTemplateValidation: { allowlist: options?.allowlist ?? APP_TEST_ALLOWLIST },

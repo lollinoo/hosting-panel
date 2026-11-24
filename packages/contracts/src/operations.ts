@@ -70,6 +70,7 @@ export const OPERATION_KINDS = [
   "stack.backup",
   "stack.restore",
   "stack.prune",
+  "stack.task",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);

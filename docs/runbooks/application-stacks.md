@@ -211,6 +211,79 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    attached only until its container is replaced, nothing attaches it again, and an application cannot be deleted
    while a running database is still attached to its private network (`STACK_NAMESPACE_CONFLICT`).
 
+## 4a. Tasks of an application (ADR-0042)
+
+A template may declare up to eight **tasks** under `x-hp-tasks`: a command for one of its components. The customer
+sees each task by its name on the application's page (section «Attività programmate»), runs it now or chooses when it
+runs by itself (never, every hour, every day or every week at a whole hour, UTC). Nobody can send a command: a request
+names only the key of a task, and the command is read from the template version of the **installed** revision.
+
+1. **Declare a task** (server administrator, in the template source):
+   ```yaml
+   x-hp-tasks:
+     - key: tidy
+       label: Tidy up old notes
+       description: Removes the notes deleted more than 30 days ago.
+       service: app
+       command: ["/app/bin/tidy", "--older-than", "30d"]
+       timeoutSeconds: 120
+   ```
+   `command` is a list of arguments under the rules of a component's command: no argument may name a shell (`sh`,
+   `bash`, `busybox`, `env`, …), and there is no placeholder (`${...}` is refused; `$$` is a literal dollar). `timeoutSeconds` is 5 to 600 (default 60). The
+   component needs `/bin/sh`: the executor uses it only for its own clean-up, and a component without it answers
+   «cannot run tasks» at the first run.
+2. **What a run is.** The command is started directly in the component's running container, as the component's user,
+   with nothing added but the environment variable `HP_TASK_RUN`. At its time limit the executor kills it and
+   everything it started. One run of an application waits or runs at a time; its status does not change. The tasks of
+   the whole server run one after another, so a run may wait for its turn: while it waits it does not hold the
+   application (a stop, an update or a delete is accepted; its operation holds the lock `stack:<id>:task`). It takes
+   the application's lock `stack:<id>` when it begins, and from then until it ends the application cannot be changed
+   (`409 RESOURCE_LOCKED`); a new web address is still saved and published after the run (§10). A run that finds the application busy or stopped when its turn comes does not start
+   (`not_started`, problem `busy` or `component_not_running`); a scheduled one gives its time back instead (step 4).
+3. **See the runs of an application** (the last 20 per task are kept; the exit code is here and not on the page):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, task_key, run_trigger, status, problem, exit_code, requested_at, ended_at from app_stack_task_runs where stack_id = '<stack id>' order by requested_at desc limit 20"
+   ```
+   Do not select `output` into a ticket or a chat: it is what the command printed (secrets of the component are
+   masked, anything else is not).
+   A run that failed with `exit_code` 127 and no output: the program of the task is not in the component's image
+   (126: it is there but cannot be executed). Fix the template; the customer sees only «non riuscita».
+4. **See the schedules and the times that were skipped:**
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, task_key, frequency, hour_utc, weekday, served_slot_at, skipped_slot_at, skip_reason from app_stack_task_schedules order by stack_id, task_key"
+   ```
+   `busy` = the application was being changed or another run of it was waiting or running, `not_running` = it was
+   stopped or failed, `missed` = nothing tried the time within 30 minutes (the panel was off, or the executor has no
+   task calls: then the panel queues nothing). While `served_slot_at`
+   is older than `skipped_slot_at` (or empty), the time is still owed and tried every minute; a scheduled run that
+   could not begin leaves no row in `app_stack_task_runs` and makes its time owed again this way. After 30 minutes
+   the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
+   at the same hour run one after another; one that cannot start within 30 minutes is skipped as `busy`.
+5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
+   the run (it restarted). The panel never starts it again by itself: check the application, then press «Esegui ora»
+   if running it twice is safe. While the executor still knows the run, the application stays held and the panel asks
+   again at every recovery pass.
+6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
+   (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
+   a code only when that clean-up could not finish; restart the application to be sure nothing is left).
+   `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
+   environment (their image, or a container created before the rule against it). The clean-up kills nothing there and
+   no task of such a component can run (its runs end not started, `unavailable`). Find the variable in the
+   environment of the application's containers, then fix the image or recreate the component.
+   The start-up clean-up works in four components at once and stops after 60 seconds, before the executor takes calls.
+   `app_task_reap_unfinished` with a `count`: that many components were not cleaned by then; each is cleaned by the
+   probe of its next run, and while a clean-up of it is still going no task of that application starts.
+7. **Downgrade.** `hp-update --allow-downgrade` exits with **code 8** when the target release does not list the feature
+   `app-tasks` and a template version that declares tasks exists: an older release refuses the source of such a version
+   and cannot show the applications that use it. Template versions are never deleted, so the only way back is
+   `--allow-feature-loss`. See them:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select v.id, t.slug, v.version_number from app_template_versions v join app_templates t on t.id = v.template_id where jsonb_array_length(coalesce(v.compiled_schema -> 'tasks', '[]'::jsonb)) > 0"
+   ```
+   The automatic rollback of a failed update stays ungated: migration `0031` is additive. A run queued at that moment
+   is closed as failed by the older release and its row is repaired at the next upgrade.
+8. The real-Docker check is `infra/linux/accept-app-tasks.mjs` (procedure 9: build first, run it alone).
+
 ## 5. Restore the panel on a new server
 
 1. After `hp-restore-panel` (README, «Il server è perso»), the new server has no stack container, network, volume or
@@ -417,6 +490,13 @@ administrator's console has no such action, and nobody writes proxy configuratio
    `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
    reads «In attesa» until a published file holds it.
 
+   While a run of a task executes (§4a, at most its time limit) it holds the application's lock, so no refresh can
+   be queued: a new address is saved, nothing is queued, `routesPending` is true, and the observer's first pass after
+   the run publishes it. A change of the options or a removal that has to reach the live file is refused with
+   `409 RESOURCE_LOCKED`, retryable, reason `task_running` (the page says to try again in a few minutes), and nothing
+   is saved. The panel tells this case from the others by the kind (`stack.task`) of the operation that holds
+   `stack:<id>`.
+
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
    what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
    next to every address that shows an option, never the option as active. The next successful start, restart or
@@ -525,10 +605,10 @@ approval.
    step 3), and while one is under way the section still names the backup. The data are half written **now** only
    while the newest operation of the application that decides is a restore whose safety backup (the row with the same
    `operation_id`) has `left_incomplete`: a restore decides unless it was cancelled, failed or not; any other action
-   decides only once it succeeded; a backup or a clean-up never. `incomplete_data` marks a copy of half written data,
-   of either kind. To see both:
+   decides only once it succeeded; a backup, a clean-up or the run of a task (§4a) never. `incomplete_data` marks a
+   copy of half written data, of either kind. To see both:
    ```bash
-   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, status, submitted_at from operations where lock_key = 'stack:<stackId>' and kind not in ('stack.backup', 'stack.prune') and ((kind = 'stack.restore' and status <> 'cancelled') or status = 'succeeded') order by submitted_at desc, id desc limit 1"
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, status, submitted_at from operations where lock_key = 'stack:<stackId>' and kind not in ('stack.backup', 'stack.prune', 'stack.task') and ((kind = 'stack.restore' and status <> 'cancelled') or status = 'succeeded') order by submitted_at desc, id desc limit 1"
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, operation_id, status, started_at, incomplete_data, left_incomplete from app_stack_backups where stack_id = '<stackId>' order by started_at desc"
    ```
 7. **What is kept.** For each application the three newest good backups made by hand and the three newest good safety

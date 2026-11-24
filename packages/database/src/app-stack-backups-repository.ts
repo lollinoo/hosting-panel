@@ -460,9 +460,9 @@ export async function settleAppStackRestore(
  * that restore is the newest operation of the application that decides, and its safety backup says it left them so.
  * A restore decides unless it was cancelled (it never ran), also when it failed: its safety backup says whether it left
  * them so. Any other action, a start above all, decides once it succeeded: it took the data as they are. One under way
- * or one that failed (a start the executor refuses) leaves them as they were; backups and clean-ups never decide. Null
- * while the data are whole. The one test of "the data are half written now": the mark on a new safety backup, the
- * retention rule and the page all ask it.
+ * or one that failed (a start the executor refuses) leaves them as they were; backups, clean-ups and the runs of tasks
+ * (ADR-0042: a run neither starts nor stops anything) never decide. Null while the data are whole. The one test of "the
+ * data are half written now": the mark on a new safety backup, the retention rule and the page all ask it.
  */
 export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackId: string): Promise<AppStackBackupRow | null> {
   const [last] = await db
@@ -471,7 +471,7 @@ export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackI
     .where(
       and(
         eq(operations.lockKey, appStackLockKey(stackId)),
-        notInArray(operations.kind, ["stack.backup", "stack.prune"]),
+        notInArray(operations.kind, ["stack.backup", "stack.prune", "stack.task"]),
         or(and(eq(operations.kind, "stack.restore"), ne(operations.status, "cancelled")), eq(operations.status, "succeeded")),
       ),
     )

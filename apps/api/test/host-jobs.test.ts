@@ -176,7 +176,7 @@ describe("enqueueHostJob", () => {
 });
 
 describe("SITE_WORK_KINDS", () => {
-  it("R206 A3: holds every heavy operation of every site type and every stack operation", () => {
+  it("R206 A3: holds every heavy operation of every site type, every stack operation and the run of a task", () => {
     for (const kind of Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds)) {
       expect(SITE_WORK_KINDS).toContain(kind);
     }
@@ -184,7 +184,7 @@ describe("SITE_WORK_KINDS", () => {
       "panel.backups.create", "site.backups.create", "site.backups.download", "site.backups.prune",
       "site.backups.restore", "site.wordpress.import", "site.wordpress.update",
       "stack.backup", "stack.delete", "stack.deploy", "stack.prune", "stack.restart", "stack.restore", "stack.rollback",
-      "stack.start", "stack.stop", "stack.upgrade",
+      "stack.start", "stack.stop", "stack.task", "stack.upgrade",
     ]);
   });
 });

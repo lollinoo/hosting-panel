@@ -280,6 +280,11 @@ describe("a v2 source is still refused what a stack must not have", () => {
     resources: web("deploy", "resources"),
     limits: web("deploy", "resources", "limits"),
     ingress: ["x-hp-ingress", 0],
+    task: ["x-hp-tasks", 0],
+  };
+  /** The source declares no task: the task level is checked on one added to it (ADR-0042). */
+  const SETUP: Partial<Record<string, Edit[]>> = {
+    task: [[["x-hp-tasks"], [{ key: "tidy", label: "Tidy up", service: "web", command: ["/usr/local/bin/tidy"] }]]],
   };
   const rows = Object.entries(APP_TEMPLATE_KEY_LEVELS_V2).flatMap(([level, { refusals }]) => {
     const at = LEVEL_PATHS[level as AppTemplateKeyLevelName];
@@ -287,8 +292,8 @@ describe("a v2 source is still refused what a stack must not have", () => {
     return [...refusedKeys, [level, "x-not-a-key", "KEY_UNKNOWN"] as const].map(([name, key, code]) => [name, key, code, at] as const);
   });
 
-  it("covers all eleven levels and every key the v1 table refuses", () => {
-    expect(new Set(rows.map(([level]) => level)).size).toBe(11);
+  it("covers all twelve levels and every key the v1 table refuses", () => {
+    expect(new Set(rows.map(([level]) => level)).size).toBe(12);
     const v1Refused = Object.values(APP_TEMPLATE_KEY_LEVELS).reduce(
       (total, row) => total + Object.values(row.refusals).reduce((sum, keys) => sum + keys.length, 0),
       0,
@@ -296,8 +301,8 @@ describe("a v2 source is still refused what a stack must not have", () => {
     expect(rows.filter(([, , code]) => code !== "KEY_UNKNOWN")).toHaveLength(v1Refused);
   });
 
-  it.each(rows)("%s: %s -> %s", (_level, key, code, at) => {
-    refused(build([[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
+  it.each(rows)("%s: %s -> %s", (level, key, code, at) => {
+    refused(build(...(SETUP[level] ?? []), [[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
   });
 
   it.each<Row>([

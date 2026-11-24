@@ -21,6 +21,7 @@ import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import type { AppStackRuntime } from "../src/app-stacks/app-stack-runtime.js";
+import type { AppStackTaskRuntime } from "../src/app-stacks/app-stack-task-runtime.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import type { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 import type { SiteDomainsApplier } from "../src/sites/site-domains-applier.js";
@@ -50,6 +51,7 @@ describe("outbox stack lane (RT5)", () => {
   let config: ControlPlaneRuntimeConfig;
   let worker: OutboxWorkerService;
   const runtime = { apply: vi.fn(), recover: vi.fn() };
+  const taskRuntime = { apply: vi.fn(), recover: vi.fn() };
   const siteDomains = { apply: vi.fn() };
   const org = DEMO_IDS.organizations.acme;
 
@@ -115,6 +117,7 @@ describe("outbox stack lane (RT5)", () => {
       undefined,
       undefined,
       runtime as unknown as AppStackRuntime,
+      taskRuntime as unknown as AppStackTaskRuntime,
     );
   });
 
@@ -191,6 +194,71 @@ describe("outbox stack lane (RT5)", () => {
     expect((await opRow(site.operation.id)).status).toBe("succeeded");
     runtime.apply.mockReset();
     siteDomains.apply.mockReset();
+  });
+
+  it("the run of a task has a lane of its own: a long stack deploy does not hold it and no other lane takes it (ADR-0042)", async () => {
+    const order: string[] = [];
+    let taskApplied!: () => void;
+    const taskDone = new Promise<void>((resolve) => (taskApplied = resolve));
+    runtime.apply.mockImplementationOnce(async (op: { id: string }) => {
+      const by = await Promise.race([
+        taskDone.then(() => "task"),
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 2_000)),
+      ]);
+      order.push(`stack released by ${String(by)}`);
+      await succeed(op);
+    });
+    taskRuntime.apply.mockImplementationOnce(async (op: { id: string }) => {
+      order.push("task applied");
+      taskApplied();
+      await succeed(op);
+    });
+    const stack = await enqueueStack();
+    const task = await enqueueStack("stack.task");
+    claims.length = 0;
+
+    const result = await worker.processPendingOnce();
+
+    expect(order).toEqual(["task applied", "stack released by task"]);
+    expect(result).toMatchObject({ claimed: 2, succeeded: 2, failed: 0 });
+    expect(claims.filter((c) => c.operationIds.includes(task.operation.id)).map((c) => c.filter)).toEqual([{ includeKinds: ["stack.task"] }]);
+    const main = claims.find((c) => (c.filter as { excludeKinds?: string[] }).excludeKinds !== undefined);
+    expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toContain("stack.task");
+    expect(APP_STACK_OPERATION_KINDS).not.toContain("stack.task");
+    expect(taskRuntime.apply).toHaveBeenCalledTimes(1);
+    expect(taskRuntime.apply.mock.calls[0]![0].id).toBe(task.operation.id);
+    expect(runtime.apply).toHaveBeenCalledTimes(1);
+    expect(runtime.apply.mock.calls[0]![0].id).toBe(stack.operation.id);
+    expect((await opRow(task.operation.id)).status).toBe("succeeded");
+    runtime.apply.mockReset();
+    taskRuntime.apply.mockReset();
+  });
+
+  it("recoverUnknownOperations hands an unknown run of a task to the task runtime, which only reads (ADR-0042)", async () => {
+    const task = await enqueueStack("stack.task");
+    await dbClient.db.update(operations).set({ status: "unknown", leaseExpiresAt: null }).where(eq(operations.id, task.operation.id));
+    await dbClient.db
+      .update(outboxEvents)
+      .set({ status: "processing" })
+      .where(sql`${outboxEvents.payload}->>'operationId' = ${task.operation.id}`);
+
+    taskRuntime.recover.mockResolvedValueOnce("pending");
+    await worker.recoverUnknownOperations();
+    expect((await opRow(task.operation.id)).status).toBe("unknown");
+
+    taskRuntime.recover.mockImplementationOnce(async (op: { id: string }) => {
+      await settleOperation(dbClient.db, op.id, { status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: FIXED_TEXT });
+      return "settled";
+    });
+    await worker.recoverUnknownOperations();
+    expect(taskRuntime.recover.mock.calls.map((c) => (c[0] as { id: string }).id)).toEqual([task.operation.id, task.operation.id]);
+    expect(await opRow(task.operation.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+    expect(await audits(task.operation.id, "operation.recovered.failed")).toBe(1);
+    // The run is never dispatched again, and the application runtime is not asked about it.
+    expect(taskRuntime.apply).not.toHaveBeenCalled();
+    expect(runtime.recover.mock.calls.map((c) => (c[0] as { id: string }).id)).not.toContain(task.operation.id);
+    taskRuntime.recover.mockReset();
+    runtime.recover.mockReset();
   });
 
   it("a failed stack step stores only the fixed customer text", async () => {
