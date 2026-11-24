@@ -392,6 +392,19 @@ export class AuthzContextService {
     return decision;
   }
 
+  /** requireOrgPermission's decision at organisation level, without its side effects: no audit row, no error. For filters, not refusals. */
+  public hasOrgPermission(
+    auth: AuthenticatedRequestContext,
+    input: { readonly organizationId: string; readonly permission: PermissionKey },
+  ): boolean {
+    return evaluatePolicy({
+      principal: auth.principal,
+      permission: input.permission,
+      organizationId: input.organizationId,
+      now: new Date(),
+    }).allowed;
+  }
+
   public async recordDeniedAudit(
     auth: AuthenticatedRequestContext,
     req: FastifyRequest,
