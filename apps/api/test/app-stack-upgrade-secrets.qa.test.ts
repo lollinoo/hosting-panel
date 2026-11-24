@@ -243,9 +243,9 @@ describe("an upgrade to a version that adds a required private value (issue #89)
       field: "secrets.api_token",
       reason: "secret_not_needed",
     });
-    // The environment limit of the extended format, with the reason the page explains.
+    // The environment limit of the extended format, with the reason the page explains and the bound it names.
     const long = await withValues([{ parameterKey: "mail_password", value: "x".repeat(APP_STACK_SECRET_ENV_LIMITS.secretBytes + 1) }]);
-    expectRefusal(long, 400, { field: "secrets.mail_password", reason: "value_too_long" });
+    expectRefusal(long, 400, { field: "secrets.mail_password", reason: "value_too_long", limit: "environment" });
     expect((await withValues([mail, mail])).status).toBe(400);
     expect((await withValues([{ parameterKey: "mail_password", value: "" }])).status).toBe(400);
     expect((await withValues([{ parameterKey: "mail_password", value: "a\u0000b" }])).status).toBe(400);
@@ -445,7 +445,8 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     // 12 289 characters, within the request's limit; 24 578 UTF-8 bytes, over the 24 576 the store keeps.
     const over = "é".repeat(12_289);
     const before = await h.counts();
-    expectRefusal(await withValue(over), 400, { field: "secrets.mail_password", reason: "value_too_long" });
+    // The detail says which bound, so the page does not name the number of characters of the other one.
+    expectRefusal(await withValue(over), 400, { field: "secrets.mail_password", reason: "value_too_long", limit: "store" });
     expect(await h.counts()).toEqual(before);
     expect(await versionsOf(stackId)).toEqual([]);
 
@@ -457,7 +458,7 @@ describe("an upgrade to a version that adds a required private value (issue #89)
 
     // The private values route answers the same reason, on the field of its body that holds the value.
     const replaced = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/secrets`, { parameterKey: "mail_password", value: over });
-    expectRefusal(replaced, 400, { field: "value", reason: "value_too_long" });
+    expectRefusal(replaced, 400, { field: "value", reason: "value_too_long", limit: "store" });
     expect(await versionsOf(stackId)).toEqual(["mail_password:1", "session_key:1"]);
   }, 120_000);
 

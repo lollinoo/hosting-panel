@@ -178,11 +178,12 @@ function assertCustomerSecret(spec: AppTemplateSpec, entry: TypedSecret, fields:
   }
   // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit;
   // any other value by what the store keeps, checked here so the refusal names the field instead of failing the write.
-  const maxBytes = appTemplateEnvironmentSecretKeys(spec).has(entry.parameterKey)
-    ? APP_STACK_SECRET_ENV_LIMITS.secretBytes
-    : APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES;
+  // The detail names the bound, so a page states a number of characters only for the first.
+  const limit = appTemplateEnvironmentSecretKeys(spec).has(entry.parameterKey) ? "environment" : "store";
+  const maxBytes = limit === "environment" ? APP_STACK_SECRET_ENV_LIMITS.secretBytes : APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES;
   if (Buffer.byteLength(entry.value, "utf8") > maxBytes) {
-    throw refusal(fields.value, "value_too_long", `This value is too long for this application: at most ${String(maxBytes)} bytes.`);
+    const message = `This value is too long for this application: at most ${String(maxBytes)} bytes.`;
+    throw appRefusal("VALIDATION_ERROR", message, { field: fields.value, message, reason: "value_too_long", limit });
   }
 }
 /** The private values a review of an upgrade asks for when the application has none: required, typed by the customer. */
