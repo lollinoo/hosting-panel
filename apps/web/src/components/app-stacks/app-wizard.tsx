@@ -10,6 +10,7 @@ import {
   SetAppStackSecretInputSchema,
   type AppTemplateParameter,
   type AppTemplateParameterEntry,
+  type CreateAppStackInput,
   type CustomerAppTemplateDto,
 } from "@hosting-panel/contracts";
 import { Button } from "@/components/ui/button";
@@ -85,8 +86,14 @@ export function wizardErrorView(
 
 type Envelope = { data?: { stackId?: unknown }; error?: { code?: string; details?: { field?: string; reason?: string }[] } } | null;
 
-/** keyedSend, but a refusal keeps every detail so the form can point at each field. */
-async function post(keys: Record<string, string>, csrfToken: string, name: string, url: string, body: unknown): Promise<{ ok: boolean; data: Envelope }> {
+/** keyedSend, but a refusal keeps every detail so the form can point at each field. `known` is false when the key is kept: whether the request took effect is unknown. */
+async function post(
+  keys: Record<string, string>,
+  csrfToken: string,
+  name: string,
+  url: string,
+  body: unknown,
+): Promise<{ ok: boolean; known: boolean; data: Envelope }> {
   const key = (keys[name] ??= crypto.randomUUID());
   try {
     const res = await fetch(url, {
@@ -95,10 +102,11 @@ async function post(keys: Record<string, string>, csrfToken: string, name: strin
       body: JSON.stringify(body),
     });
     const data = (await res.json().catch(() => null)) as Envelope;
-    if (res.ok || renewKeyAfter(res.status)) delete keys[name];
-    return { ok: res.ok, data };
+    const known = res.ok || renewKeyAfter(res.status);
+    if (known) delete keys[name];
+    return { ok: res.ok, known, data };
   } catch {
-    return { ok: false, data: null };
+    return { ok: false, known: false, data: null };
   }
 }
 
@@ -118,6 +126,8 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   const [busy, setBusy] = useState(false);
   const [createdStackId, setCreatedStackId] = useState<string | null>(null);
   const [saved, setSaved] = useState<string[]>([]);
+  // A create sent whose outcome is unknown: Retry sends this very body under the same key, so it replays instead of creating a second application.
+  const [unsure, setUnsure] = useState<CreateAppStackInput | null>(null);
   const secretValues = useRef(new Map<string, string>());
   const keys = useRef<Record<string, string>>({});
   // Typed again after the application exists; an empty field keeps the value typed before.
@@ -134,7 +144,8 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   const t = m.apps.wizard;
   // Once the application exists what was sent is final: the earlier steps are closed and only the private values left are open.
   const finishing = createdStackId !== null;
-  const view: WizardStep = finishing ? "install" : step;
+  // Until the create's outcome is known nothing may change: any change would go out under the same key.
+  const view: WizardStep = finishing || unsure ? "install" : step;
   const params = entry.parameters.filter((p) => p.customer);
   const secretKeys = params.filter((p) => p.type === "secret").map((p) => p.key);
   const entries = buildAppParameterEntries(params, inputs);
@@ -186,14 +197,22 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     const base = `/api/bff/orgs/${orgId}/app-stacks`;
     let id = createdStackId;
     if (id === null) {
-      const r = await post(keys.current, csrfToken, "create", base, {
+      const body: CreateAppStackInput = unsure ?? {
         templateVersionId: entry.versionId,
         name: name.trim(),
         parameters: entries,
         domains: domainEntries,
         deploy: typedSecrets.length === 0,
-      });
+      };
+      const r = await post(keys.current, csrfToken, "create", base, body);
       const created = r.ok ? r.data?.data?.stackId : undefined;
+      if (typeof created !== "string" && !r.known) {
+        setUnsure(body);
+        setError(t.createUnknown);
+        setBusy(false);
+        return;
+      }
+      setUnsure(null);
       if (typeof created !== "string") {
         const view = wizardErrorView(m, r.data?.error?.code ?? "", r.data?.error?.details ?? []);
         setError(view.error);
@@ -204,7 +223,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       }
       id = created;
       setCreatedStackId(id);
-      if (typedSecrets.length === 0) return router.push(detailHref(id));
+      if (body.deploy) return router.push(detailHref(id));
     }
     const at = `${base}/${encodeURIComponent(id)}`;
     let remaining = typedSecrets;
@@ -432,6 +451,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
             <p className="text-sm text-muted-foreground">{t.backupNote}</p>
           </>
         )}
+        {unsure && summary}
         {finishing && (
           <>
             <p className="text-sm">{t.created}</p>
@@ -453,7 +473,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           <Button asChild variant="outline">
             <Link href={detailHref(createdStackId)}>{t.openApp}</Link>
           </Button>
-        ) : view === "configure" ? (
+        ) : unsure ? null : view === "configure" ? (
           <Button asChild variant="outline">
             <Link href="/apps/new">{t.back}</Link>
           </Button>

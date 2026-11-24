@@ -3137,6 +3137,8 @@ x-hp-ingress:
       installing: "Installazione in corso…",
       secretFailed: "L'applicazione è stata creata ma un valore riservato non è stato salvato. Riprova o impostalo dalla pagina dell'applicazione.",
       created: "L'applicazione è stata creata ma non è ancora installata: puoi completarla qui o più tardi dalla sua pagina, tra le tue applicazioni.",
+      createUnknown:
+        "Il pannello non sa ancora se l'applicazione è stata creata. Riprovare è sicuro: vengono inviati di nuovo gli stessi dati e l'applicazione non viene mai creata due volte.",
       openApp: "Apri l'applicazione",
       domainInvalid: "Scrivi solo il nome dell'indirizzo, per esempio shop.example.com, senza http:// né percorsi.",
       domainRepeated: "Questo indirizzo è già nell'elenco.",

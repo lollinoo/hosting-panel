@@ -467,6 +467,8 @@ const planDialog = (m: Messages, plan: "upgrade" | "rollback", diffState: Record
 };
 const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppTemplateDto = ENTRY) =>
   withState(AppWizard, { orgId: ORG, csrfToken: "csrf", entry }, m, state);
+/** A create sent whose answer never came. */
+const SENT_CREATE = { templateVersionId: "atv_notes_2", name: "my-notes", parameters: [], domains: [], deploy: false };
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
 const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress, pathTargets: DETAIL.pathTargets, pending: false };
@@ -549,6 +551,11 @@ const SCENARIOS: Scenario[] = [
     alerts: 1,
     render: (m) =>
       wizard(m, { 0: "install", 1: "my-notes", 3: ["admin_password"], 5: { "param:admin_password": m.errors.generic }, 6: m.apps.wizard.secretFailed, 8: "stk_a1", 9: ["api_token"] }),
+  },
+  {
+    name: "wizard · a create whose outcome is unknown",
+    alerts: 1,
+    render: (m) => wizard(m, { 0: "install", 1: "my-notes", 3: ["admin_password"], 6: m.apps.wizard.createUnknown, 10: SENT_CREATE }),
   },
   ...WIZARD_STEPS.map((step) => ({ name: `wizard steps · ${step}`, render: (m: Messages) => withState(WizardSteps, { current: step }, m) })),
   // ---- detail page parts
@@ -891,6 +898,24 @@ describe("wizard", () => {
     expect(inner(h, "a")).toEqual([m.apps.wizard.openApp]);
     expect(h).toContain('href="/apps/stk_a1"');
     expect(inner(h, "button")).toEqual([m.apps.wizard.retry]);
+  });
+
+  it.each(LOCALES)("%s · a create whose outcome is unknown says so in the alert and offers Retry alone: no Back, no link, no field", (_l, m) => {
+    for (const step of WIZARD_STEPS) {
+      const h = wizard(m, { 0: step, 1: "my-notes", 3: ["admin_password"], 6: m.apps.wizard.createUnknown, 10: SENT_CREATE });
+      expect(withRole(h, "alert"), step).toEqual([m.apps.wizard.createUnknown]);
+      expect(inner(h, "h2"), step).toEqual([m.apps.wizard.step.install]);
+      expect(inner(h, "button"), step).toEqual([m.apps.wizard.retry]);
+      expect(inner(h, "a"), step).toEqual([]);
+      expect(controls(h), step).toEqual([]);
+    }
+  });
+
+  it.each(LOCALES)("%s · the text of an unknown create says the panel does not know yet and Retry is safe, never to reload or start again", (l, m) => {
+    const text = m.apps.wizard.createUnknown;
+    expect(text).toContain(l === "it" ? "non sa ancora" : "does not know yet");
+    expect(text).toContain(l === "it" ? "Riprovare è sicuro" : "Trying again is safe");
+    expect(text).not.toMatch(/reload|refresh|start again|start over|ricarica|aggiorna la pagina|ricomincia|da capo/i);
   });
 });
 
