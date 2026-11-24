@@ -7,7 +7,7 @@ import { AppTemplateParameterEntriesSchema, AppTemplateParameterValueSchema } fr
 import { AppStackPlanIngressSchema } from "./plan.js";
 import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
-import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
+import { APP_STACK_LOG_TAIL_MAX, APP_STACK_SECRET_MIN_LENGTH, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
@@ -99,7 +99,8 @@ export type DeleteAppStackInput = z.infer<typeof DeleteAppStackInputSchema>;
 export const SetAppStackSecretInputSchema = z
   .object({
     parameterKey: AppTemplateParameterKeySchema,
-    value: AppStackSecretFileContentSchema.shape.content, // the executor's rule
+    // The executor's rule, and a new value long enough for the log reader to mask (a stored shorter one still starts).
+    value: AppStackSecretFileContentSchema.shape.content.min(APP_STACK_SECRET_MIN_LENGTH),
   })
   .strict();
 export type SetAppStackSecretInput = z.infer<typeof SetAppStackSecretInputSchema>;

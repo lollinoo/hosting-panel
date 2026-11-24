@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import * as appTemplates from "../src/app-templates/index.js";
 import { APP_STACK_REASONS } from "../src/app-templates/issues.js";
-import { APP_STACK_PLAN_MAX_BYTES } from "../src/app-templates/limits.js";
+import { APP_STACK_PLAN_MAX_BYTES, APP_TEMPLATE_LIMITS } from "../src/app-templates/limits.js";
 import type { ApprovedStackPlan } from "../src/app-templates/plan.js";
 import {
   APP_STACK_EXECUTOR_REASON_CODES,
@@ -331,6 +331,13 @@ describe("application stack IPC wire", () => {
     expect([1, APP_STACK_LOG_TAIL_MAX].map(parse)).toEqual([true, true]);
     expect([0, APP_STACK_LOG_TAIL_MAX + 1, 1.5, "10"].map(parse)).toEqual([false, false, false, false]);
     expect(AppStackLogsIpcResultSchema.safeParse(Array.from({ length: APP_STACK_LOG_TAIL_MAX + 1 }, () => logsResult[0])).success).toBe(false);
+  });
+
+  it("takes, optionally, how many secret files the component's plan gives: a number of 0..8, never a key or a value", () => {
+    const parse = (secretFileCount: unknown) => AppStackLogsIpcRequestSchema.safeParse({ ...logs, secretFileCount }).success;
+    expect(AppStackLogsIpcRequestSchema.parse(logs)).toEqual(logs);
+    expect([0, 1, APP_TEMPLATE_LIMITS.secretParameters].map(parse)).toEqual([true, true, true]);
+    expect([-1, APP_TEMPLATE_LIMITS.secretParameters + 1, 1.5, "1", null, ["shared_key"]].map(parse)).toEqual([false, false, false, false, false, false]);
   });
 
   it("lists twelve executor reasons, each mapped to an error code by a total frozen map", () => {

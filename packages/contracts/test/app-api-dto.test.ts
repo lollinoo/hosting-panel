@@ -45,7 +45,8 @@ import {
   SetAppStackSecretInputSchema,
   UpgradeAppStackInputSchema,
 } from "../src/app-templates/stack-dto.js";
-import { AppStackSecretFileContentSchema } from "../src/app-templates/stack-ipc.js";
+import { APP_SECRET_GENERATE_BOUNDS } from "../src/app-templates/limits.js";
+import { APP_STACK_SECRET_MIN_LENGTH, AppStackSecretFileContentSchema } from "../src/app-templates/stack-ipc.js";
 import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys } from "../src/resources.js";
 
 const fixture = (name: string): unknown =>
@@ -231,7 +232,7 @@ const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["upgrade", UpgradeAppStackInputSchema, { templateVersionId: "atv_demo_2", planHash: HASH }, true],
   ["rollback", RollbackAppStackInputSchema, { revisionId: "astr_1", planHash: HASH }, true],
   ["delete", DeleteAppStackInputSchema, { confirmName: "My notes", destroyData: false }, true],
-  ["secret", SetAppStackSecretInputSchema, { parameterKey: "app_secret", value: "v" }, true],
+  ["secret", SetAppStackSecretInputSchema, { parameterKey: "app_secret", value: "v4lue6" }, true],
   ["add domain", AddAppStackDomainInputSchema, { hostname: "notes.example.com", componentKey: "app", port: 8080 }, true],
   ["stack list query", AppStackListQuerySchema, { limit: "10" }, false],
   ["logs query", AppStackLogsQuerySchema, { tail: "10" }, false],
@@ -355,15 +356,34 @@ describe("app API input schemas", () => {
   it("a secret value refuses C0 controls but tab and line breaks, and unpaired surrogates, with the executor's rule", () => {
     const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
     for (let unit = 0; unit < 0x20; unit += 1) {
-      expect(parse(`Zq9${String.fromCharCode(unit)}`).success, String(unit)).toBe([0x09, 0x0a, 0x0d].includes(unit));
+      expect(parse(`Zq9abc${String.fromCharCode(unit)}`).success, String(unit)).toBe([0x09, 0x0a, 0x0d].includes(unit));
     }
-    for (const value of ["Zq9\ud800", "\udfffZq9", "Zq9\udc00\ud800"]) {
+    for (const value of ["Zq9abc\ud800", "\udfffZq9abc", "Zq9abc\udc00\ud800"]) {
       const refused = parse(value);
       expect(refused.success).toBe(false);
       expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
     }
     expect(parse("line 1\r\nline 2\u007f\u0085 \u{1f511}").success).toBe(true);
-    expect(SetAppStackSecretInputSchema.shape.value).toBe(AppStackSecretFileContentSchema.shape.content);
+    for (const content of ["Zq9abc\u0000", "Zq9abc\ud800"]) {
+      expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "app_secret", version: 1, content }).success).toBe(false);
+    }
+  });
+
+  it("a new secret value has at least six characters, the shortest the log reader masks; a stored shorter one still starts", () => {
+    const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
+    expect(APP_STACK_SECRET_MIN_LENGTH).toBe(6);
+    expect(parse("Zq9abc").success).toBe(true);
+    for (const value of ["Zq9ab", "Zq9", ""]) {
+      const refused = parse(value);
+      expect(refused.success, value).toBe(false);
+      expect(refused.error?.issues[0]).toMatchObject({ path: ["value"], code: "too_small" });
+      if (value !== "") expect(JSON.stringify(refused.error?.issues)).not.toContain(value);
+    }
+    // The executor's schema of the values sent at a start is not held to it: a value stored before the minimum is read.
+    expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "app_secret", version: 1, content: "Z" }).success).toBe(true);
+    expect(SetAppStackSecretInputSchema.shape.value.maxLength).toBe(AppStackSecretFileContentSchema.shape.content.maxLength);
+    // A generated value is never shorter either.
+    for (const [kind, { min }] of Object.entries(APP_SECRET_GENERATE_BOUNDS)) expect(min, kind).toBeGreaterThanOrEqual(APP_STACK_SECRET_MIN_LENGTH);
   });
 
   it("a secret value never carries the mark of a platform process: an image may put the file's content in its environment", () => {

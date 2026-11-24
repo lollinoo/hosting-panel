@@ -18,6 +18,9 @@ import { APP_STACK_PROCESS_MARK_PATTERN } from "./text.js";
 
 /** Chars of one secret file (= setAppStackSecretTransactional bound). */
 export const APP_STACK_SECRET_CONTENT_MAX_CHARS = 16_384;
+/** Chars a new secret value needs: the log reader masks no shorter value, so it refuses the read of a component that
+ *  holds one (= the executor's APP_STACK_LOG_MASK_MIN_LENGTH). Stored values are not held to it: they still start. */
+export const APP_STACK_SECRET_MIN_LENGTH = 6;
 /** Lines per log read (= ServiceLogsIpcRequestSchema tail bound). */
 export const APP_STACK_LOG_TAIL_MAX = 500;
 /** Label io.hostingpanel.network_role of the stack networks. Never site_internal / site_edge. */
@@ -136,6 +139,9 @@ export type AppStackComponentsRemoveIpcRequest = z.infer<typeof AppStackComponen
 export const AppStackLogsIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
   componentKey: AppStackKeySchema,
   tail: z.number().int().min(1).max(APP_STACK_LOG_TAIL_MAX),
+  /** Secret values the plan the component runs from gives it as files: the executor refuses the read when it finds fewer
+   *  (a reboot emptied the tmpfs). A number, never a key or a value; absent from an API one release older. */
+  secretFileCount: z.number().int().min(0).max(APP_TEMPLATE_LIMITS.secretParameters).optional(),
 }).strict();
 export type AppStackLogsIpcRequest = z.infer<typeof AppStackLogsIpcRequestSchema>;
 /** Opens a terminal in one component (ADR-0041): no container name, no user and no command; the executor derives and checks them. */
