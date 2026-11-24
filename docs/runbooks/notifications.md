@@ -81,7 +81,7 @@ message is **Non consegnato** for good. A pass sends at most 20 messages; the re
 | `mail_not_configured` | Outbound mail is not set up on this server. | Procedure 4. |
 | `mail_refused` | The mail relay did not accept the message. | **Amministrazione › Email** and the log of `hp_mail_relay` in **Amministrazione › Log**. |
 | `address_not_allowed` | The name of the webhook now leads to an address the panel does not call: private, loopback, link-local, reserved, or one of this server's own addresses. | The DNS record of the receiver changed. Point it to a public address of another machine, or save a new address. |
-| `unreachable` | The name does not resolve, resolving the name and getting an answer take more than five seconds together, the port is closed, the certificate is not valid for the name, or the panel could not read the addresses it records for this server. | Check the receiver from another machine: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://<host>/`. If every webhook and Telegram fails: procedure 4. |
+| `unreachable` | The name does not resolve, resolving the name and getting an answer take more than five seconds together, the port is closed, the certificate is not valid for the name, or the panel could not read the addresses it records for this server, or one of them is not an address. | Check the receiver from another machine: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://<host>/`. If every webhook and Telegram fails: procedure 4. |
 | `redirect` | The receiver answered with a redirect (3xx). The panel follows none. | Save the final address. |
 | `rejected` | The receiver answered 4xx. | Webhook: the path or its key is wrong, or the receiver refuses the signature. Telegram: `401` or `404` is a wrong or revoked token, `400` or `403` a wrong chat or a bot that is not a member of it. |
 | `server_error` | The receiver answered 5xx. | The fault is on the receiver's side; the panel tries again by itself. |
@@ -162,8 +162,10 @@ next messages go unsigned.
   stored for the server, which the installer does not write today (issue #184). The recorded address is the one the
   last run of the installer recorded, read at every check: after the server's public address changes, run the
   installer again with `--ipv4 <new address>`, and it counts at the next send (issue #184 tracks that a rerun without
-  the flag does not keep it). If the recorded addresses cannot be read, nothing is sent and the attempt is
-  `unreachable`. Put the receiver on another machine with a public address.
+  the flag does not keep it). If the recorded addresses cannot be read, or one of them is not an address (the
+  installer takes `203.0.113.05`, with a leading zero), nothing is sent and the attempt is `unreachable`: run the
+  installer again with `--ipv4` and the address written without leading zeros. Put the receiver on another machine
+  with a public address.
 
 ## 5. A channel went quiet
 
