@@ -32,8 +32,9 @@ export class AppStackSecretError extends Error {
   }
 }
 
-/** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. */
-const VALUE_MAX_UTF8_BYTES = 24_576;
+/** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. Exported so the API refuses a
+ *  longer value next to its field before a transaction starts. */
+export const APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES = 24_576;
 const HOUR_MS = 3_600_000;
 const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 const metadataColumns = {
@@ -68,7 +69,7 @@ export async function setAppStackSecretTransactional(
     !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(input.parameterKey) ||
     input.value.length < 1 ||
     input.value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
-    Buffer.byteLength(input.value, "utf8") > VALUE_MAX_UTF8_BYTES
+    Buffer.byteLength(input.value, "utf8") > APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES
   ) {
     throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");
   }
@@ -119,10 +120,10 @@ export async function setAppStackSecretTransactional(
 }
 
 /**
- * Version 1 of secrets the platform generated (ADR-0036), in the caller's transaction: the one that creates the stack
- * or queues the revision that first needs them. A key that already has a version 1 keeps it. No hourly limit applies
- * (a key gets one such row in its life), but the rows count in the customer's rolling hour like any other version.
- * Returns the metadata of the rows it inserted.
+ * Version 1 of secrets the platform generated (ADR-0036), or of the values an upgrade request carries (issue #89), in
+ * the caller's transaction: the one that creates the stack or queues the revision that first needs them. A key that
+ * already has a version 1 keeps it. No hourly limit applies (a key gets one such row in its life), but the rows count
+ * in the customer's rolling hour like any other version. Returns the metadata of the rows it inserted.
  */
 export async function insertGeneratedAppStackSecrets(
   tx: DatabaseExecutor,
@@ -143,7 +144,7 @@ export async function insertGeneratedAppStackSecrets(
         !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(parameterKey) ||
         value.length < 1 ||
         value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
-        Buffer.byteLength(value, "utf8") > VALUE_MAX_UTF8_BYTES,
+        Buffer.byteLength(value, "utf8") > APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES,
     )
   ) {
     throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");
