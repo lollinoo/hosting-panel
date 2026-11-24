@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   NotificationSettingsDtoSchema,
   NotificationWebhookBodySchema,
+  notificationEventFromAlert,
   type AdminAlertDto,
   type NotificationEvent,
 } from "@hosting-panel/contracts";
@@ -258,6 +259,8 @@ describe("notifications (ADR-0040)", () => {
       seen.alerts = [disk()];
       await tick(at(0));
       expect(outbound.calls).toEqual([]);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(at(2));
       await tick(at(2));
       expect(outbound.calls).toHaveLength(1);
       const opened = NotificationWebhookBodySchema.parse(outbound.calls[0]!.body);
@@ -638,6 +641,29 @@ describe("notifications (ADR-0040)", () => {
       await tick(at(3));
       expect(outbound.calls).toHaveLength(25);
       expect(new Set((await deliveries()).map((d) => d.status))).toEqual(new Set(["sent"]));
+    });
+
+    it("signs each webhook message with the time it leaves, not the time its pass began", async () => {
+      await start();
+      await adminWebhook({ signingKey: SIGNING_KEY });
+      const [channel] = await dbClient.db.select({ id: notificationChannels.id }).from(notificationChannels);
+      const event = notificationEventFromAlert(disk(), "a".repeat(24), "opened");
+      for (let i = 0; i < 2; i += 1) {
+        await createNotificationDelivery(dbClient.db, { channelId: channel!.id, events: [event], omitted: 0, test: false, recipient: null, locale: "it", now: at(0) });
+      }
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(at(1));
+      // The first send of the pass takes ninety seconds.
+      outbound.duringSend = async () => {
+        vi.setSystemTime(at(1).getTime() + 90_000);
+      };
+      await tick(at(1));
+
+      expect(outbound.calls).toHaveLength(2);
+      const seconds = outbound.calls.map((c) => Number(/^t=(\d+),v1=[0-9a-f]{64}$/.exec(c.headers[NOTIFICATION_SIGNATURE_HEADER]!)![1]));
+      expect(seconds).toEqual([at(1).getTime() / 1000, at(1).getTime() / 1000 + 90]);
+      outbound.calls.forEach((c, i) => expect(c.headers[NOTIFICATION_SIGNATURE_HEADER]).toBe(notificationSignature(SIGNING_KEY, seconds[i]!, c.raw)));
+      expect(outbound.calls.map((c) => c.body["sentAt"])).toEqual([at(1).toISOString(), new Date(at(1).getTime() + 90_000).toISOString()]);
     });
 
     it("mails every address of the server and every owner of the customer, each in their language", async () => {

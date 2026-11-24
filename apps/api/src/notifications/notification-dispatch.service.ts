@@ -142,7 +142,7 @@ export class NotificationDispatchService {
         await recordNotificationDelivery(db, delivery.id, { status: "dropped", problem: "channel_changed" }, now);
         continue;
       }
-      const result = await this.sender.send(channel, delivery, now);
+      const result = await this.sender.send(channel, delivery);
       if (result.problem === null) {
         await recordNotificationDelivery(db, delivery.id, { status: "sent", httpStatus: result.httpStatus }, now);
         continue;
