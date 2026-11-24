@@ -387,7 +387,8 @@ function judge(method, rawUrl, bodyText) {
   const u = new URL(rawUrl, "http://docker");
   const p = decodeURIComponent(u.pathname).replace(/^\/v\d+(\.\d+)?(?=\/)/, "");
   const query = decodeURIComponent(u.search);
-  const foreign = [...`${p}?${query}\n${bodyText}`.matchAll(/hp_[A-Za-z0-9_.-]*/g)].map((t) => t[0]).filter((t) => !isOwn(t));
+  // A name begins with hp_: "php_value" in the WordPress command line of version 2 holds none.
+  const foreign = [...`${p}?${query}\n${bodyText}`.matchAll(/(?<![A-Za-z0-9])hp_[A-Za-z0-9_.-]*/g)].map((t) => t[0]).filter((t) => !isOwn(t));
   if (foreign.length > 0) return deny(`names ${foreign[0]}`);
   if (leaks(`${p}?${query}`)) return deny("secret in the address");
   const body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
