@@ -1583,7 +1583,19 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
 
   /** At start: ends what the tasks of a previous executor left running in the components of applications. */
   public async reapAppStackTasks(): Promise<void> {
-    await reapAppStackTasks(this.execTarget, this.appStackTaskLimits);
+    const reaped = await reapAppStackTasks(this.execTarget, this.appStackTaskLimits);
+    // A count only: no name and no id. Such a component can run no task until the mark leaves its environment.
+    if (reaped.ownMark > 0) {
+      console.warn(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_task_mark_in_component",
+          count: reaped.ownMark,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    }
+    if (reaped.failure) throw reaped.failure;
   }
 
   public async pingEngine(): Promise<boolean> {

@@ -36,6 +36,11 @@ export const APP_STACK_TASK_ENGINE_ERROR_PREFIX = "OCI runtime exec failed";
 
 /** Passes of the clean-up script: it ends with a failure when its last pass still finds a process it had not killed. */
 export const APP_STACK_TASK_KILL_PASSES = 5;
+/**
+ * The clean-up script's exit when pid 1 itself carries the mark: the mark comes from the component's own environment
+ * (its image or its settings), not from a run, so the script kills nothing there and no task can run there.
+ */
+export const APP_STACK_TASK_KILL_OWN_MARK_EXIT = 3;
 
 /**
  * Kills, in one container, every process whose environment carries the mark of a run ($1 = the run id; empty = any
@@ -43,10 +48,13 @@ export const APP_STACK_TASK_KILL_PASSES = 5;
  * in any image that has `/bin/sh`. It is tried before the command of a run: where it cannot run, no task starts.
  * A pass can miss a process forked while it ran, so passes repeat until one finds no process it had not killed yet
  * (one killed but not gone yet does not count); exit 1 when the last pass still found one: the clean-up did not finish.
+ * First of all, before any kill: when pid 1 carries the mark, the mark is the component's own and every process would
+ * carry it, so the script kills nothing and exits with APP_STACK_TASK_KILL_OWN_MARK_EXIT.
  */
 export const APP_STACK_TASK_KILL_SCRIPT =
-  `m="${APP_STACK_TASK_MARK}=\${1:-srun_}"; s=" "; k=" "; ` +
+  `m="${APP_STACK_TASK_MARK}=\${1:-srun_}"; ` +
   'marked() { while IFS= read -r x || [ -n "$x" ]; do case "$x" in *"$m"*) return 0;; esac; done 2>/dev/null <"$1/environ"; return 1; }; ' +
+  `marked /proc/1 && exit ${String(APP_STACK_TASK_KILL_OWN_MARK_EXIT)}; s=" "; k=" "; ` +
   'sid() { l=""; while IFS= read -r x || [ -n "$x" ]; do l=$x; done 2>/dev/null <"$1/stat"; l=${l##*) }; set -- $l; i=${4:-0}; }; ' +
   'hit() { [ "$1" -gt 1 ] || return 0; kill -KILL "$1" 2>/dev/null; case "$k" in *" $1 "*) ;; *) k="$k$1 "; f=1;; esac; }; ' +
   'pass() { f=0; for p in /proc/[0-9]*; do marked "$p" || continue; sid "$p"; ' +
@@ -80,7 +88,8 @@ interface TaskContainerInspect {
   readonly State?: { readonly Running?: boolean; readonly Restarting?: boolean };
 }
 
-type KillOutcome = "done" | "gone" | "no_shell" | "failed";
+/** `own_mark`: pid 1 carries the mark, so the script killed nothing: no task can run in that component. */
+type KillOutcome = "done" | "gone" | "no_shell" | "own_mark" | "failed";
 
 interface RememberedRun {
   readonly stackId: string;
@@ -134,6 +143,7 @@ async function killMarkedProcesses(
       { timeoutMs, maxOutputBytes: APP_STACK_TASK_ENGINE_ERROR_PREFIX.length },
     );
     if (done.exitCode === 0) return "done";
+    if (done.exitCode === APP_STACK_TASK_KILL_OWN_MARK_EXIT) return "own_mark";
     // The engine could not start the shell (126, 127, with its own message): this image has none. The script's own
     // exit never carries that message.
     const engine = [done.stdout, done.stderr].some((out) => out.toString("utf8").startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX));
@@ -310,6 +320,7 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
         outputTruncated: false,
       };
     }
+    // Not finished, or the component's own environment carries the mark (no run there could ever be cleaned up).
     if (probe !== "done") {
       throw new ExecutorCodedError("The clean-up of tasks could not run in the component", "DOCKER_ENGINE_UNAVAILABLE");
     }
@@ -418,13 +429,18 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
   private async cleanUp(containerId: string, runId: string): Promise<void> {
     const first = await killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs);
     if (first === "done" || first === "gone") return;
+    // The component's own environment carries the mark: the script would kill nothing again, so it is not retried.
+    if (first === "own_mark") {
+      this.deps.onCleanupFailed?.();
+      return;
+    }
     let attempt = 1;
     const again = (): void => {
       const timer = setTimeout(() => {
         void killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs).then((outcome) => {
           if (outcome === "done" || outcome === "gone") return;
           attempt += 1;
-          if (attempt < APP_STACK_TASK_CLEANUP_RETRIES) again();
+          if (outcome !== "own_mark" && attempt < APP_STACK_TASK_CLEANUP_RETRIES) again();
           else this.deps.onCleanupFailed?.();
         });
       }, this.retryDelayMs);
@@ -484,13 +500,23 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
   }
 }
 
+export interface AppStackTaskReapResult {
+  /** Components whose own environment carries the mark of a run: nothing was killed there. */
+  readonly ownMark: number;
+  /** The first failure of a component, once every other one was tried. */
+  readonly failure: ExecutorCodedError | null;
+}
+
 /**
  * At start-up: ends what the tasks of a previous executor left running. In every running container of an application
  * component (name and labels as the engine gives them), also one with no exec listed: the engine drops an exec once its
  * command ends, and what the command left in the background stays. One container that fails does not stop the pass.
- * A container with no shell never ran a task.
+ * A container with no shell never ran a task; nor did one whose own environment carries the mark (it is counted).
  */
-export async function reapAppStackTasks(target: DockerExecTarget, limits?: Pick<AppStackTaskLimits, "killTimeoutMs">): Promise<void> {
+export async function reapAppStackTasks(
+  target: DockerExecTarget,
+  limits?: Pick<AppStackTaskLimits, "killTimeoutMs">,
+): Promise<AppStackTaskReapResult> {
   const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_LABELS.role}=${APP_STACK_COMPONENT_ROLE}`] }));
   const res = await target.request("GET", `/containers/json?filters=${filters}`).catch(() => null);
   let list: Array<{ readonly Id?: unknown }> | null = null;
@@ -503,6 +529,7 @@ export async function reapAppStackTasks(target: DockerExecTarget, limits?: Pick<
     throw new ExecutorCodedError("Docker could not list the components of applications", "DOCKER_ENGINE_UNAVAILABLE");
   }
   let failure: ExecutorCodedError | null = null;
+  let ownMark = 0;
   for (const { Id } of list) {
     if (typeof Id !== "string" || Id.length === 0) continue;
     try {
@@ -521,10 +548,11 @@ export async function reapAppStackTasks(target: DockerExecTarget, limits?: Pick<
       }
       if (own === null) continue;
       const outcome = await killMarkedProcesses(target, Id, "", limits?.killTimeoutMs ?? APP_STACK_TASK_KILL_TIMEOUT_MS);
+      if (outcome === "own_mark") ownMark += 1;
       if (outcome === "failed") throw new ExecutorCodedError("The clean-up of tasks did not finish", "INTERNAL_ERROR");
     } catch (err) {
       failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The clean-up of tasks failed", "INTERNAL_ERROR");
     }
   }
-  if (failure) throw failure;
+  return { ownMark, failure };
 }

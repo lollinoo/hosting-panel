@@ -194,6 +194,10 @@ names only the key of a task, and the command is read from the template version 
 6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
    (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
    a code only when that clean-up could not finish; restart the application to be sure nothing is left).
+   `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
+   environment (their image, or a container created before the rule against it). The clean-up kills nothing there and
+   no task of such a component can run (its runs end not started, `unavailable`). Find the variable in the
+   environment of the application's containers, then fix the image or recreate the component.
 7. **Downgrade.** `hp-update --allow-downgrade` exits with **code 8** when the target release does not list the feature
    `app-tasks` and a template version that declares tasks exists: an older release refuses the source of such a version
    and cannot show the applications that use it. Template versions are never deleted, so the only way back is

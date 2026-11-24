@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_COMPONENT_ROLE,
   APP_STACK_LABELS,
+  APP_STACK_TASK_KILL_OWN_MARK_EXIT,
   APP_STACK_TASK_KILL_PASSES,
   APP_STACK_TASK_KILL_SCRIPT,
   APP_STACK_TASK_MARK,
@@ -168,6 +169,23 @@ describe("the clean-up script of tasks", () => {
     // The one exit 0 is a pass that found nothing new; at the bound the clean-up did not finish (the retry path).
     expect(APP_STACK_TASK_KILL_SCRIPT.match(/exit 0/g)).toHaveLength(1);
     expect(APP_STACK_TASK_KILL_SCRIPT.endsWith("exit 1")).toBe(true);
+  });
+
+  it("kills nothing where pid 1 itself carries the mark, and says so with a code of its own", () => {
+    const script = APP_STACK_TASK_KILL_SCRIPT;
+    const check = `marked /proc/1 && exit ${String(APP_STACK_TASK_KILL_OWN_MARK_EXIT)}; `;
+    // The environment of pid 1 is read as any other, first: before any kill and before the first pass.
+    expect(script).toContain(check);
+    expect(script.indexOf("marked() {")).toBeLessThan(script.indexOf(check));
+    for (const later of ["hit() {", "kill -KILL", "pass() {", "n=0; while"]) expect(script.indexOf(check), later).toBeLessThan(script.indexOf(later));
+    expect(script.match(/marked /g)).toHaveLength(2);
+    // A code no other end gives: 0 done, 1 not finished, 2 a shell's own error, 126 and 127 the engine's, 128 and up a
+    // signal (137: the script killed itself).
+    expect(Number.isInteger(APP_STACK_TASK_KILL_OWN_MARK_EXIT)).toBe(true);
+    expect(APP_STACK_TASK_KILL_OWN_MARK_EXIT).toBeGreaterThan(2);
+    expect(APP_STACK_TASK_KILL_OWN_MARK_EXIT).toBeLessThan(126);
+    expect(script.match(new RegExp(`exit ${String(APP_STACK_TASK_KILL_OWN_MARK_EXIT)}\\b`, "g"))).toHaveLength(1);
+    expect(script.match(/exit \d+/g)).toEqual([`exit ${String(APP_STACK_TASK_KILL_OWN_MARK_EXIT)}`, "exit 0", "exit 1"]);
   });
 });
 
@@ -456,6 +474,24 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect((await adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
   });
 
+  it("starts nothing in a component whose own environment carries the mark, and never retries a clean-up there", async () => {
+    // pid 1 carries the mark: the script killed nothing and said so. The probe refuses the run as not available.
+    const own: MockExecPlan = { exitCode: APP_STACK_TASK_KILL_OWN_MARK_EXIT };
+    const { adapter, mockDaemon } = await setup({ kill: () => own });
+    const err = await refusal(adapter.runAppStackTask(request(1)));
+    expect([err.code, err.reason]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", undefined]);
+    expect(cmds(mockDaemon).every((cmd) => cmd[2] === APP_STACK_TASK_KILL_SCRIPT)).toBe(true);
+    expect(await adapter.getAppStackTaskRun({ stackId: STACK, organizationId: ORG, runId: RUN(1) })).toEqual({ state: "unknown" });
+
+    // The same answer after a run: trying again would kill nothing again, so it is logged as not finished at once.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const after = await setup({ kill: (call) => (killOf(call) === RUN(1) ? own : undefined) });
+    expect((await after.adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(killRuns(after.mockDaemon)).toEqual(["", RUN(1)]);
+    expect(warn.mock.calls.map((call) => (JSON.parse(String(call[0])) as { event?: unknown }).event)).toEqual(["app_task_cleanup_failed"]);
+  });
+
   it("refuses when the component goes away between the clean-up and the command", async () => {
     const { adapter, mockDaemon } = await setup({
       kill: (_call, daemon) => {
@@ -687,6 +723,25 @@ describe("reapAppStackTasks at the start of the executor", () => {
     );
     outcomes.clear();
     await expect(adapter.reapAppStackTasks()).resolves.toBeUndefined();
+  });
+
+  it("leaves a component whose own environment carries the mark, logs a count once and goes on", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const own = new Set(["web", "cache"].map((key) => `${appStackContainerName(STACK, key)}_id`));
+    const { adapter, mockDaemon } = await setup({ kill: (call) => (own.has(call.container) ? { exitCode: APP_STACK_TASK_KILL_OWN_MARK_EXIT } : undefined) });
+    for (const key of ["web", "worker", "cache"]) {
+      const record = component(key);
+      mockDaemon.containers.set(record.id, record);
+    }
+    await expect(adapter.reapAppStackTasks()).resolves.toBeUndefined();
+    expect(mockDaemon.execCalls.map((c) => c.container).sort()).toEqual(
+      ["cache", "web", "worker"].map((key) => `${appStackContainerName(STACK, key)}_id`).sort(),
+    );
+    // One line for the pass, with a count only: no name and no id.
+    expect(warn).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(Object.keys(logged).sort()).toEqual(["component", "count", "event", "timestamp"]);
+    expect([logged.component, logged.event, logged.count]).toEqual(["hp-docker-executor", "app_task_mark_in_component", 2]);
   });
 
   it("says the engine is unavailable when the components cannot be listed", async () => {
