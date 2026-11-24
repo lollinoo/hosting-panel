@@ -118,7 +118,10 @@ describe("the built-in application templates", () => {
     expect(db?.image).toBe("docker.io/library/postgres@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1");
     expect(db?.runAsUser).toBe("999:999");
     expect(db?.argv).toEqual(["postgres"]);
+    // The data directory is written, not left to the image: it is the one the image already used. The plan lists the
+    // environment by name.
     expect(db?.environment).toEqual([
+      { name: "PGDATA", value: "/var/lib/postgresql/18/docker" },
       { name: "POSTGRES_DB", value: "app" },
       { name: "POSTGRES_USER", value: "app" },
     ]);
@@ -166,6 +169,19 @@ describe("the built-in application templates", () => {
     expect(component(before, "db")?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]);
     expect(component(after, "db")?.argv).toEqual([...component(before, "db")!.argv!, "--tmpdir=/var/lib/mysql"]);
     expect({ ...component(after, "db")!, argv: null }).toEqual({ ...component(before, "db")!, argv: null });
+    expect(after.volumes).toEqual(before.volumes);
+    expect(sumAppStackPlanResources(after)).toEqual(sumAppStackPlanResources(before));
+  });
+
+  it("postgresql: version 1 compiles as it did, with no data directory in its environment; version 2 differs from it in that entry only", () => {
+    const t = seed("postgresql");
+    const [before, after] = [planOf(earlierVersion(t)), planOf(t)];
+    expect(component(before, "db")?.environment).toEqual([
+      { name: "POSTGRES_DB", value: "app" },
+      { name: "POSTGRES_USER", value: "app" },
+    ]);
+    expect(component(after, "db")?.environment).toEqual([{ name: "PGDATA", value: "/var/lib/postgresql/18/docker" }, ...component(before, "db")!.environment]);
+    expect({ ...component(after, "db")!, environment: null }).toEqual({ ...component(before, "db")!, environment: null });
     expect(after.volumes).toEqual(before.volumes);
     expect(sumAppStackPlanResources(after)).toEqual(sumAppStackPlanResources(before));
   });

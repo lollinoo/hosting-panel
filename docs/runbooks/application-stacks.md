@@ -734,6 +734,9 @@ approval.
    «Archivio Valkey» has a second version (`atv_valkey_2`): the same 256 MB ceiling under a 512 MB limit instead of
    384 MB, and a description that says a full store refuses new writes; its upgrade asks the customer 128 MiB more of
    the memory maximum and is refused, the store untouched, when the customer is already at it.
+   «Database PostgreSQL» has a second version (`atv_postgresql_2`) that names the data directory (`PGDATA`,
+   `/var/lib/postgresql/18/docker`, the one version 1 already used), so an image of another major version cannot start an
+   empty database beside the data; its upgrade keeps the data.
 2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
    presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
    applications of the same customer; an application has at most 4 databases and a database at most 8 applications.

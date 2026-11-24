@@ -372,16 +372,9 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
   ]),
 });
 
-const postgresql: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_postgresql",
-  versionId: "atv_postgresql_1",
-  slug: "postgresql",
-  name: "Database PostgreSQL",
-  category: "database",
-  description: POSTGRESQL_DESCRIPTION,
-  descriptionEn:
-    "A PostgreSQL database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
-  source: [
+/** The PostgreSQL source; `dataDirectory` is the environment entry that names the data directory, or none (version 1). */
+function postgresqlSource(dataDirectory: readonly string[]): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Database PostgreSQL"',
@@ -398,6 +391,7 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
     "        value: app",
     "      - name: POSTGRES_USER",
     "        value: app",
+    ...dataDirectory,
     "      - name: POSTGRES_PASSWORD_FILE",
     "        secret: database_password",
     "    volumes:",
@@ -409,7 +403,25 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const postgresql: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_postgresql",
+  versionId: "atv_postgresql_2",
+  slug: "postgresql",
+  name: "Database PostgreSQL",
+  category: "database",
+  description: POSTGRESQL_DESCRIPTION,
+  descriptionEn:
+    "A PostgreSQL database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  // The data directory is written here, with the value this image (PostgreSQL 18) already uses by default, so the
+  // mount and the data stay where version 1 put them. Left to the image, a later image of another major version would
+  // take the directory of its own major version, and the database would start empty beside the data. With the line
+  // kept, PostgreSQL refuses to start on the data of another major version, and the data stay.
+  source: postgresqlSource(["      - name: PGDATA", "        value: /var/lib/postgresql/18/docker"]),
+  // Version 1 as it shipped: the databases installed on it are offered version 2.
+  previousVersions: Object.freeze([Object.freeze({ versionId: "atv_postgresql_1", source: postgresqlSource([]) })]),
 });
 
 /** The Valkey source; `description` is the one the version shipped with and `memory` its limit (version 2 raises it). */

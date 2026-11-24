@@ -15,7 +15,7 @@
  * held and starts; the newest version also starts on an empty volume (the steps that deploy it).
  *
  * Machine safety (this machine may run a live panel):
- *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x|u|w, so every container, network
+ *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a|b|v|m|p|n|x|u|w|y, so every container, network
  *    and volume name the engine derives contains swarmtest_<hex>; the script's own names and paths use
  *    hp_swarmtest_stk_<hex>; the names of the links contain swarmtest-<hex>.
  *  - The adapter talks only to a gate socket in the temp dir. Its default-deny judge() forwards a request to
@@ -39,7 +39,7 @@
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-databases.mjs
  * Steps: gate-self-test, preflight, snapshot-before, plans-compile-from-seeds, applications-deploy,
  * mariadb-starts-hardened, postgresql-starts-hardened, valkey-starts-hardened, data-survives-restart,
- * mariadb-earlier-version-upgrades, valkey-earlier-version-upgrades, unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
+ * mariadb-earlier-version-upgrades, valkey-earlier-version-upgrades, postgresql-earlier-version-upgrades, unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
  * link-follows-a-replaced-database, application-stop-start-keeps-links,
  * application-removal-detaches-running-database,
  * stopped-database-survives-application-removal, stale-attachment-repaired, refuses-foreign-targets,
@@ -87,11 +87,11 @@ const secretsRoot = `/dev/shm/${runPrefix}-secrets`;
 const ORG = `org_swarmtest_${hex}`;
 const OTHER_ORG = `org_swarmtest_${hex}_other`;
 /** a, b: applications · v, m, p: the Valkey, MariaDB and PostgreSQL databases · n: an application that is only
- *  prepared (a private network and a volume, no container) · x: the same, of another customer · u, w: a MariaDB and a
- *  Valkey that are created on their version 1 and moved to the newest version. */
-const [A, B, V, M, P, N, X, UM, UV] = ["a", "b", "v", "m", "p", "n", "x", "u", "w"].map((s) => `stk_swarmtest_${hex}_${s}`);
+ *  prepared (a private network and a volume, no container) · x: the same, of another customer · u, w, y: a MariaDB, a
+ *  Valkey and a PostgreSQL that are created on their version 1 and moved to the newest version. */
+const [A, B, V, M, P, N, X, UM, UV, UP] = ["a", "b", "v", "m", "p", "n", "x", "u", "w", "y"].map((s) => `stk_swarmtest_${hex}_${s}`);
 /** Removal order of the cleanup: the databases first. */
-const STACKS = [[UM, ORG], [UV, ORG], [M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
+const STACKS = [[UM, ORG], [UV, ORG], [UP, ORG], [M, ORG], [P, ORG], [V, ORG], [A, ORG], [B, ORG], [N, ORG], [X, OTHER_ORG]];
 // hex: can never form an hp_ token
 const PASSWORDS = { mariadbApp: randomBytes(16).toString("hex"), mariadbAdmin: randomBytes(16).toString("hex"), postgresApp: randomBytes(16).toString("hex") };
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
@@ -149,6 +149,9 @@ const compiled = {
   // The same Valkey application as it is on version 1, and as it is after the move to the newest version.
   uv1: compile("valkey", UV, { earlier: true }),
   uv2: compile("valkey", UV, { n: 2 }),
+  // The same PostgreSQL application as it is on version 1, and as it is after the move to the newest version.
+  up1: compile("postgresql", UP, { secretKeys: ["database_password"], earlier: true }),
+  up2: compile("postgresql", UP, { secretKeys: ["database_password"], n: 2 }),
 };
 /** The only images the gate inspects and accepts in a create body. */
 const IMAGES = new Set(Object.values(compiled).flatMap((c) => (c.ok ? c.plan.components.map((x) => x.image) : [])));
@@ -544,8 +547,8 @@ async function main() {
       MYSQL_PWD: PASSWORDS.mariadbAdmin,
     });
   // Always a host that is not the loopback: the image trusts the loopback without a password.
-  const psql = (host, sql, value = PASSWORDS.postgresApp) =>
-    docker(["exec", "-e", "PGPASSWORD", "-e", "PGCONNECT_TIMEOUT=5", DB(P), "psql", "-h", host, "-U", "app", "-d", "app", "-w", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql], 60_000, {
+  const psql = (host, sql, value = PASSWORDS.postgresApp, from = DB(P)) =>
+    docker(["exec", "-e", "PGPASSWORD", "-e", "PGCONNECT_TIMEOUT=5", from, "psql", "-h", host, "-U", "app", "-d", "app", "-w", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql], 60_000, {
       PGPASSWORD: value,
     });
   const valkey = async (from, host, ...command) => (await docker(["exec", from, "valkey-cli", "-h", host, ...command], 60_000)).trim();
@@ -555,6 +558,10 @@ async function main() {
   const SQL_WRITE_POSTGRES =
     "CREATE TABLE IF NOT EXISTS probe (id int PRIMARY KEY, note text); INSERT INTO probe VALUES (1, 'kept') ON CONFLICT (id) DO UPDATE SET note = EXCLUDED.note";
   const SQL_READ = "SELECT note FROM probe WHERE id = 1";
+  /** The directory the server keeps its data in: the one the PostgreSQL template writes (PGDATA) and its first version
+   *  already used by the default of the image. */
+  const PG_DATA_DIRECTORY = "/var/lib/postgresql/18/docker";
+  const SQL_DATA_DIRECTORY = "SHOW data_directory";
   // More temporary space than the 64 MB of /tmp in the strict profile. The Sequence engine makes 900000 rows and no table;
   // each is a 128-byte binary key (8 times the 16 bytes of an MD5). COUNT(DISTINCT) keeps the keys in a tree of at most
   // 16 MB (tmp_table_size) and writes the rest to temporary files in the server's tmpdir: about 900000 * 128 B = 115 MB,
@@ -826,6 +833,23 @@ async function main() {
         "the two versions differ by the memory limit only: same ceiling, same command, image and volume",
         JSON.stringify({ a: [oldV.argv, newV.argv], i: [oldV.image, newV.image], v: [oldV.volumes, newV.volumes] }),
       );
+      const [oldP, newP] = [plans.up1.components[0], plans.up2.components[0]];
+      assert(
+        plans.up1.templateVersionId === "atv_postgresql_1" && plans.up2.templateVersionId === "atv_postgresql_2" && plans.p.templateVersionId === "atv_postgresql_2",
+        "the PostgreSQL plans are of version 1 and of version 2 (newest)",
+        [plans.up1, plans.up2, plans.p].map((x) => x.templateVersionId).join(","),
+      );
+      assert(
+        !oldP.environment.some((e) => e.name === "PGDATA") && same(newP.environment.filter((e) => e.name === "PGDATA"), [{ name: "PGDATA", value: PG_DATA_DIRECTORY }]),
+        "PostgreSQL version 2 writes the data directory in its environment; version 1 left it to the image",
+        JSON.stringify([oldP.environment, newP.environment]),
+      );
+      assert(
+        same(newP.environment.filter((e) => e.name !== "PGDATA"), oldP.environment) && same(oldP.argv, newP.argv) && same(oldP.image, newP.image) && same(oldP.volumes, newP.volumes) && same(plans.up1.volumes, plans.up2.volumes) && plans.up1.planHash !== plans.up2.planHash,
+        "the two versions differ by that entry only: same image, command, password file, mount and volume",
+        JSON.stringify({ e: [oldP.environment, newP.environment], i: [oldP.image, newP.image], v: [oldP.volumes, newP.volumes] }),
+      );
+      assert(same(newP.volumes, [{ volumeKey: "data", containerPath: "/var/lib/postgresql", readOnly: false }]), "and the volume is still mounted at /var/lib/postgresql", JSON.stringify(newP.volumes));
       assert(plans.x.organizationId === OTHER_ORG, "the foreign application belongs to another customer", plans.x.organizationId);
       for (const stackId of [V, M, P]) {
         assert(aliasOf(stackId) === stackId.replaceAll("_", "-") && aliasOf(stackId).includes(aliasMarker), `the name of ${stackId} for its links`, String(aliasOf(stackId)));
@@ -879,6 +903,8 @@ async function main() {
       assert(wrong !== null && /password authentication failed/i.test(wrong.message), "a wrong password is refused", wrong ? wrong.message.slice(0, 160) : "accepted");
       await psql("db", SQL_WRITE_POSTGRES);
       assert((await psql("db", SQL_READ)).trim() === "kept", "a row is written and read back", "another value");
+      // Version 2 on an empty volume: the server keeps its data in the directory the template names.
+      assert((await psql("db", SQL_DATA_DIRECTORY)).trim() === PG_DATA_DIRECTORY, `the data directory is ${PG_DATA_DIRECTORY}`, (await psql("db", SQL_DATA_DIRECTORY)).trim());
     });
 
     const valkeyOk = await step("valkey-starts-hardened", async () => {
@@ -984,6 +1010,26 @@ async function main() {
       assert((await valkeyCeiling(DB(UV))) === "268435456", "the store answers a ceiling of 256 MB (268435456 bytes), as before", await valkeyCeiling(DB(UV)));
       assert((await view("SET", "probe2", "more")) === "OK" && (await view("GET", "probe2")) === "more", "and takes a new key", "refused");
       await dropWithData(newest, "Valkey upgraded from version 1");
+    });
+
+    await step("postgresql-earlier-version-upgrades", async () => {
+      const [earlier, newest] = [plans.up1, plans.up2];
+      const out = await deploy(earlier, postgresContents, 180_000);
+      assert(out.pulls.every((p) => p.pulled === false) && same(out.prepare.networks, [{ role: "app_internal", created: true }]), "local image, private network only", JSON.stringify(out));
+      await hardening(earlier, ["/run/postgresql", "/tmp"]);
+      await passwordFiles(earlier, postgresContents);
+      const view = (sql) => psql("db", sql, PASSWORDS.postgresApp, DB(UP));
+      await view(SQL_WRITE_POSTGRES);
+      assert((await view(SQL_READ)).trim() === "kept", "version 1 holds a row", "another value");
+      // The premise of version 2: the directory the image uses by default is the one it will name.
+      assert((await view(SQL_DATA_DIRECTORY)).trim() === PG_DATA_DIRECTORY, `version 1 keeps its data in ${PG_DATA_DIRECTORY}, by the default of the image`, (await view(SQL_DATA_DIRECTORY)).trim());
+      await upgradeInPlace(newest, postgresContents);
+      await hardening(newest, ["/run/postgresql", "/tmp"]);
+      await passwordFiles(newest, postgresContents);
+      assert((await view(SQL_READ)).trim() === "kept", "the row written on version 1 is still there", "another value");
+      assert((await view(SQL_DATA_DIRECTORY)).trim() === PG_DATA_DIRECTORY, "version 2 keeps its data in the same directory", (await view(SQL_DATA_DIRECTORY)).trim());
+      assert((await view("SELECT count(*) FROM probe")).trim() === "1", "and it did not start an empty database beside the data", (await view("SELECT count(*) FROM probe")).trim());
+      await dropWithData(newest, "PostgreSQL upgraded from version 1");
     });
 
     const worker = cName(A, "worker");

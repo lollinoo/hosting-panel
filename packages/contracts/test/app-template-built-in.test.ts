@@ -43,7 +43,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
         name: "WordPress in contenitore",
       },
       { templateId: "atpl_mariadb", versionId: "atv_mariadb_2", slug: "mariadb", category: "database", name: "Database MariaDB" },
-      { templateId: "atpl_postgresql", versionId: "atv_postgresql_1", slug: "postgresql", category: "database", name: "Database PostgreSQL" },
+      { templateId: "atpl_postgresql", versionId: "atv_postgresql_2", slug: "postgresql", category: "database", name: "Database PostgreSQL" },
       { templateId: "atpl_valkey", versionId: "atv_valkey_2", slug: "valkey", category: "database", name: "Archivio Valkey" },
     ]);
     expect(FIRST_FORMAT.map((t) => t.slug)).toEqual(["http-cache", "worker-storage", "mariadb", "postgresql", "valkey"]);
@@ -155,7 +155,7 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
     expect(first.source).not.toContain("command:");
     expect(first.source).not.toContain("WORDPRESS_CONFIG_EXTRA");
     // The seeds with an earlier version.
-    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb", "mariadb", "valkey"]);
+    expect(APP_BUILT_IN_TEMPLATES.filter((s) => s.previousVersions !== undefined).map((s) => s.slug)).toEqual(["wordpress-mariadb", "mariadb", "postgresql", "valkey"]);
   });
 
   it("wordpress-mariadb version 2: the site follows the address it is asked by, and takes uploads of up to 64 MB", () => {
@@ -196,6 +196,33 @@ describe("APP_BUILT_IN_TEMPLATES", () => {
     const strip = (source: string) => source.replace(/^ {4}command: .*\n/m, "");
     expect(strip(t.source)).toBe(strip(first.source));
     expect(t.source.includes(`description: "${t.description}"`)).toBe(true);
+  });
+
+  it("postgresql: version 2 writes the data directory of the image, which version 1 already used; version 1 is kept byte for byte as the earlier version", () => {
+    const t = databaseSeed("postgresql");
+    expect(t.versionId).toBe("atv_postgresql_2");
+    expect(t.templateId).toBe("atpl_postgresql");
+    expect(Object.isFrozen(t.previousVersions)).toBe(true);
+    expect(t.previousVersions?.map((v) => v.versionId)).toEqual(["atv_postgresql_1"]);
+    const first = t.previousVersions![0]!;
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.source.length).toBe(1101);
+    expect(sha256(first.source)).toBe("330c24fb54a8e12cb16e85ae29ead4b633714e8123190f1f7a636d20f468318e");
+    const environmentOf = (source: string) => [...source.matchAll(/^ {6}- name: ([A-Z_]+)\n {8}(value|secret): (.+)$/gm)].map((m) => `${m[1]}=${m[2]}:${m[3]}`);
+    expect(environmentOf(first.source)).toEqual(["POSTGRES_DB=value:app", "POSTGRES_USER=value:app", "POSTGRES_PASSWORD_FILE=secret:database_password"]);
+    // One literal entry more, and its value is the directory the pinned image already used by default: the mount stays where it was.
+    expect(environmentOf(t.source)).toEqual([
+      "POSTGRES_DB=value:app",
+      "POSTGRES_USER=value:app",
+      "PGDATA=value:/var/lib/postgresql/18/docker",
+      "POSTGRES_PASSWORD_FILE=secret:database_password",
+    ]);
+    expect(first.source).not.toContain("PGDATA");
+    for (const source of [first.source, t.source]) expect(source).toContain("    volumes:\n      - data:/var/lib/postgresql\n");
+    // The image, the command, the limits and the description are the same: the added entry is the one difference.
+    const strip = (source: string) => source.replace(/^ {6}- name: PGDATA\n {8}value: .+\n/m, "");
+    expect(strip(t.source)).toBe(first.source);
+    expect(t.description).toBe(first.source.match(/^ {2}description: "(.*)"$/m)![1]);
   });
 
   it("valkey: version 2 says how much it holds and leaves room above its ceiling; version 1 is kept byte for byte as the earlier version", () => {

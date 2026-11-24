@@ -145,7 +145,7 @@ async function expectBuiltInsOnly(db: DatabaseClient["db"]): Promise<void> {
   expect(templates.map((t) => [t.id, t.slug, t.builtIn, t.defaultVersionId])).toEqual([
     ["atpl_http_cache", "http-cache", true, "atv_http_cache_1"],
     ["atpl_mariadb", "mariadb", true, "atv_mariadb_2"],
-    ["atpl_postgresql", "postgresql", true, "atv_postgresql_1"],
+    ["atpl_postgresql", "postgresql", true, "atv_postgresql_2"],
     ["atpl_valkey", "valkey", true, "atv_valkey_2"],
     ["atpl_wordpress_mariadb", "wordpress-mariadb", true, "atv_wordpress_mariadb_2"],
     ["atpl_worker_storage", "worker-storage", true, "atv_worker_storage_1"],
@@ -157,7 +157,8 @@ async function expectBuiltInsOnly(db: DatabaseClient["db"]): Promise<void> {
     ["atv_http_cache_1", "atpl_http_cache", 1, source("http-cache")],
     ["atv_mariadb_1", "atpl_mariadb", 1, earlierSource("mariadb")],
     ["atv_mariadb_2", "atpl_mariadb", 2, source("mariadb")],
-    ["atv_postgresql_1", "atpl_postgresql", 1, source("postgresql")],
+    ["atv_postgresql_1", "atpl_postgresql", 1, earlierSource("postgresql")],
+    ["atv_postgresql_2", "atpl_postgresql", 2, source("postgresql")],
     ["atv_valkey_1", "atpl_valkey", 1, earlierSource("valkey")],
     ["atv_valkey_2", "atpl_valkey", 2, source("valkey")],
     ["atv_wordpress_mariadb_1", "atpl_wordpress_mariadb", 1, earlierSource("wordpress-mariadb")],
@@ -227,7 +228,7 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       await ensureBuiltInAppTemplates(db, builtInAppTemplateItems());
       const after = [await db.select().from(appTemplates).orderBy(appTemplates.id), await db.select().from(appTemplateVersions).orderBy(appTemplateVersions.id)];
       expect(after[0]).toHaveLength(6);
-      expect(after[1]).toHaveLength(9);
+      expect(after[1]).toHaveLength(10);
       expect(after).toEqual(before);
     });
 
