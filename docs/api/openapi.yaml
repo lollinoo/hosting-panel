@@ -14082,7 +14082,7 @@ components:
         skipped:
           type: object
           nullable: true
-          required: [at, reason]
+          required: [at, reason, pending]
           description: The latest scheduled time that was not run
           properties:
             at:
@@ -14091,6 +14091,9 @@ components:
             reason:
               type: string
               enum: [busy, not_running, missed]
+            pending:
+              type: boolean
+              description: True while the time is still tried (within 30 minutes of it); false once it was given up
         lastRun:
           nullable: true
           allOf:

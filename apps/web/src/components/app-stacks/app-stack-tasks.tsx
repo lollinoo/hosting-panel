@@ -162,7 +162,13 @@ export function AppStackTasks({
               </div>
               <p>{appStackTaskScheduleText(m, task.schedule, locale)}</p>
               {task.nextRunAt && <p className="text-muted-foreground">{format(t.next, { date: when(task.nextRunAt) })}</p>}
-              {task.skipped && <p className="text-muted-foreground">{format(t.skipped[task.skipped.reason], { date: when(task.skipped.at) })}</p>}
+              {task.skipped && (
+                <p className="text-muted-foreground">
+                  {format(task.skipped.pending && task.skipped.reason !== "missed" ? t.waiting[task.skipped.reason] : t.skipped[task.skipped.reason], {
+                    date: when(task.skipped.at),
+                  })}
+                </p>
+              )}
               {last === null ? (
                 <p className="text-muted-foreground">{t.never}</p>
               ) : (

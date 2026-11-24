@@ -581,7 +581,7 @@ describe("scheduled tasks", () => {
       componentKey: "cache",
       schedule: { frequency: "weekly", weekday: 7, hourUtc: 3 },
       nextRunAt: "2026-11-29T03:00:00.000Z",
-      skipped: { at: "2026-11-22T03:00:00.000Z", reason: "not_running" },
+      skipped: { at: "2026-11-22T03:00:00.000Z", reason: "not_running", pending: false },
       lastRun: { id: RUN_ID, taskKey: "save", trigger: "schedule", status: "failed", problem: null, requestedAt: NOW, startedAt: NOW, endedAt: NOW },
     },
     { key: "count", label: "Count the notes", description: "", componentKey: "web", schedule: { frequency: "never" }, nextRunAt: null, skipped: null, lastRun: null },
@@ -655,11 +655,34 @@ describe("scheduled tasks", () => {
     expect(h).toContain(en.apps.tasks.status.failed);
     expect(h).toContain(en.apps.tasks.trigger.schedule);
     expect(h).toContain(en.apps.tasks.never);
-    expect(h).toContain(en.apps.tasks.skipped.not_running.split("{date}")[0]!);
+    expect(h).toContain(en.apps.tasks.skipped.not_running.split("{date}")[1]!);
     expect(h).toContain(en.apps.tasks.next.split("{date}")[0]!);
     expect(buttons(callHooks(AppStackTasks, props).out, en.apps.tasks.runNow)).toHaveLength(2);
     // The component the task belongs to is not named to the customer.
     expect(h).not.toMatch(/cache|exit|srun_/);
+  });
+
+  it("tells a scheduled time still tried from one given up, in both languages", () => {
+    const at = "2026-11-22T03:00:00.000Z";
+    const shown = (skipped: AppStackTaskDto["skipped"], m: Messages = en) =>
+      html(callHooks(AppStackTasks, { ...props, initial: [{ ...TASKS[0]!, skipped }] }, m).out);
+    const tail = (text: string) => text.split("{date}")[1]!;
+    // A time given up after its 30 minutes is not "waiting" any more.
+    expect(shown({ at, reason: "busy", pending: false })).not.toMatch(/is waiting/);
+    expect(shown({ at, reason: "busy", pending: false }, itMsgs)).not.toMatch(/è in attesa/);
+    for (const m of [en, itMsgs]) {
+      const t = m.apps.tasks;
+      for (const reason of ["busy", "not_running"] as const) {
+        expect(t.waiting[reason]).not.toBe(t.skipped[reason]);
+        const waiting = shown({ at, reason, pending: true }, m);
+        expect(waiting).toContain(tail(t.waiting[reason]));
+        expect(waiting).not.toContain(tail(t.skipped[reason]));
+        const over = shown({ at, reason, pending: false }, m);
+        expect(over).toContain(tail(t.skipped[reason]));
+        expect(over).not.toContain(tail(t.waiting[reason]));
+      }
+      expect(shown({ at, reason: "missed", pending: false }, m)).toContain(tail(t.skipped.missed));
+    }
   });
 
   it("«Run now» sends an empty body to the run route of that task and says it started", async () => {

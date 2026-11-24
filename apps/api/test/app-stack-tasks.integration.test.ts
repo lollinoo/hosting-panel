@@ -447,7 +447,8 @@ describe("tasks of an application (ADR-0042)", () => {
     const restart = await h.call(h.a.token, "POST", `${base(stackId)}/restart`, {}, idem());
     expect(restart.status, restart.raw).toBe(202);
     expect(await scheduler.tick(at(0, 1))).toEqual({ queued: 0, refused: 1, skipped: 0 });
-    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 1).toISOString(), reason: "busy" });
+    // Still owed: the page says it is waiting, not that it was skipped.
+    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 1).toISOString(), reason: "busy", pending: true });
     for (let round = 0; round < 10 && (await stackRow(stackId)).status !== "running"; round += 1) await worker.processPendingOnce();
     expect(await scheduler.tick(at(5, 1))).toEqual({ queued: 1, refused: 0, skipped: 0 });
     await worker.processPendingOnce();
@@ -460,16 +461,18 @@ describe("tasks of an application (ADR-0042)", () => {
     for (let round = 0; round < 10 && (await stackRow(stackId)).status !== "stopped"; round += 1) await worker.processPendingOnce();
     expect(await scheduler.tick(at(0, 2))).toEqual({ queued: 0, refused: 1, skipped: 0 });
     expect(await scheduler.tick(at(29, 2))).toEqual({ queued: 0, refused: 1, skipped: 0 });
+    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 2).toISOString(), reason: "not_running", pending: true });
     expect(await scheduler.tick(at(31, 2))).toEqual({ queued: 0, refused: 0, skipped: 1 });
     expect(await scheduler.tick(at(32, 2))).toEqual({ queued: 0, refused: 0, skipped: 0 });
-    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 2).toISOString(), reason: "not_running" });
+    // Given up: the same reason, and the page tells it apart from a time still tried.
+    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 2).toISOString(), reason: "not_running", pending: false });
 
     const start = await h.call(h.a.token, "POST", `${base(stackId)}/start`, {}, idem());
     expect(start.status, start.raw).toBe(202);
     for (let round = 0; round < 10 && (await stackRow(stackId)).status !== "running"; round += 1) await worker.processPendingOnce();
     // The panel was off for hours: only the latest time counts, and it is too old to be queued.
     expect(await scheduler.tick(at(45, 6))).toEqual({ queued: 0, refused: 0, skipped: 1 });
-    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 6).toISOString(), reason: "missed" });
+    expect((await list(stackId)).body.data.tasks[0].skipped).toEqual({ at: at(0, 6).toISOString(), reason: "missed", pending: false });
     expect(await scheduler.tick(at(0, 7))).toEqual({ queued: 1, refused: 0, skipped: 0 });
     await worker.processPendingOnce();
     expect(await runRows(stackId)).toHaveLength(3);

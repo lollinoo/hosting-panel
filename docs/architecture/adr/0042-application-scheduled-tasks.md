@@ -190,7 +190,7 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 
 **Pagine (`apps/web`).**
 
-- La sezione «Attività programmate» compare, dopo i registri, solo se la versione installata ha attività. Mostra il nome, la descrizione, quando parte da sola (ora UTC e ora locale), l'orario saltato e il perché, l'esito dell'ultima esecuzione; «Esegui ora»; la scelta della programmazione; le ultime esecuzioni con ciò che hanno stampato. Non mostra il componente, il comando o il codice di uscita.
+- La sezione «Attività programmate» compare, dopo i registri, solo se la versione installata ha attività. Mostra il nome, la descrizione, quando parte da sola (ora UTC e ora locale), l'ultimo orario non eseguito e il perché, con parole diverse finché è ancora riprovato («in attesa») e dopo che è stato saltato, l'esito dell'ultima esecuzione; «Esegui ora»; la scelta della programmazione; le ultime esecuzioni con ciò che hanno stampato. Non mostra il componente, il comando o il codice di uscita.
 - Un'attività in coda o in corso compare nel riquadro di avanzamento della pagina con parole sue, e alla fine la pagina si aggiorna.
 
 **Aggiornamenti (`infra`).** La funzione di rilascio `app-tasks`: `hp-update` rifiuta di tornare a una release che non la conosce mentre esiste una versione di modello con attività. Le versioni dei modelli non si cancellano, quindi da lì si torna indietro solo con `--allow-feature-loss`.

@@ -3164,9 +3164,13 @@ x-hp-ingress:
       },
       weekdays: { d1: "Monday", d2: "Tuesday", d3: "Wednesday", d4: "Thursday", d5: "Friday", d6: "Saturday", d7: "Sunday" },
       next: "Next run: {date}.",
+      waiting: {
+        busy: "The run of {date} is waiting: the application is busy. It is tried again until 30 minutes after its time.",
+        not_running: "The run of {date} is waiting: the application is not running. It is tried again until 30 minutes after its time.",
+      },
       skipped: {
-        busy: "The run of {date} is waiting: the application was busy.",
-        not_running: "The run of {date} did not start: the application was not running.",
+        busy: "The run of {date} was skipped: the application stayed busy.",
+        not_running: "The run of {date} was skipped: the application was not running.",
         missed: "The run of {date} was skipped.",
       },
       last: "Last run: {status}, {date}.",

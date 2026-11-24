@@ -1,4 +1,5 @@
 import {
+  APP_STACK_TASK_LIMITS,
   appStackTaskSlotAfter,
   type AppStackTaskDto,
   type AppStackTaskRunDto,
@@ -120,6 +121,7 @@ export function appStackTaskDto(
   now: Date,
 ): AppStackTaskDto {
   const schedule = appStackTaskScheduleOf(scheduleRow);
+  const skippedAt = scheduleRow?.skipReason ? scheduleRow.skippedSlotAt : null;
   return {
     key: task.key,
     label: task.label,
@@ -128,8 +130,15 @@ export function appStackTaskDto(
     schedule,
     nextRunAt: iso(appStackTaskSlotAfter(schedule, now)),
     skipped:
-      scheduleRow?.skippedSlotAt && scheduleRow.skipReason
-        ? { at: scheduleRow.skippedSlotAt.toISOString(), reason: scheduleRow.skipReason }
+      skippedAt && scheduleRow?.skipReason
+        ? {
+            at: skippedAt.toISOString(),
+            reason: scheduleRow.skipReason,
+            // Owed until it is served (given up writes it as served), and only inside its retry window.
+            pending:
+              (scheduleRow.servedSlotAt === null || scheduleRow.servedSlotAt < skippedAt) &&
+              now.getTime() - skippedAt.getTime() < APP_STACK_TASK_LIMITS.retryWindowMs,
+          }
         : null,
     lastRun: lastRun ? appStackTaskRunSummaryDto(lastRun) : null,
   };

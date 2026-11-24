@@ -451,7 +451,7 @@ describe("what the customer's pages receive", () => {
     componentKey: "app",
     schedule: { frequency: "daily", hourUtc: 3 },
     nextRunAt: "2026-11-24T03:00:00.000Z",
-    skipped: { at: "2026-11-23T03:00:00.000Z", reason: "busy" },
+    skipped: { at: "2026-11-23T03:00:00.000Z", reason: "busy", pending: true },
     lastRun: summary,
   };
 
@@ -486,7 +486,9 @@ describe("what the customer's pages receive", () => {
     expect(AppStackTaskRunSummaryDtoSchema.safeParse({ ...summary, problem: "no_shell" }).success).toBe(false);
     expect(AppStackTaskRunSummaryDtoSchema.safeParse({ ...summary, trigger: "cron" }).success).toBe(false);
     expect(AppStackTaskRunSummaryDtoSchema.safeParse({ ...summary, id: "sdep_0123456789abcdef01234567" }).success).toBe(false);
-    expect(AppStackTaskDtoSchema.safeParse({ ...task, skipped: { at: task.skipped.at, reason: "stopped" } }).success).toBe(false);
+    expect(AppStackTaskDtoSchema.safeParse({ ...task, skipped: { ...task.skipped, reason: "stopped" } }).success).toBe(false);
+    // A skipped time always says whether it is still tried.
+    expect(AppStackTaskDtoSchema.safeParse({ ...task, skipped: { at: task.skipped.at, reason: "busy" } }).success).toBe(false);
     expect(AppStackTaskDtoSchema.safeParse({ ...task, label: "" }).success).toBe(false);
     expect(AppStackTaskDtoSchema.safeParse({ ...task, schedule: { frequency: "daily", hourUtc: 24 } }).success).toBe(false);
   });

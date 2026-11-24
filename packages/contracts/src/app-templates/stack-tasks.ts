@@ -286,8 +286,11 @@ export const AppStackTaskDtoSchema = z.object({
   schedule: AppStackTaskScheduleSchema,
   /** The next time the schedule asks for a run; null for "never". */
   nextRunAt: IsoDateTimeSchema.nullable(),
-  /** The latest scheduled time that was not run, when it is newer than the last scheduled run. */
-  skipped: z.object({ at: IsoDateTimeSchema, reason: AppStackTaskSkipReasonSchema }).nullable(),
+  /**
+   * The latest scheduled time that was not run, when it is newer than the last scheduled run. `pending`: it is still
+   * tried, inside its retry window; false once it was given up.
+   */
+  skipped: z.object({ at: IsoDateTimeSchema, reason: AppStackTaskSkipReasonSchema, pending: z.boolean() }).nullable(),
   lastRun: AppStackTaskRunSummaryDtoSchema.nullable(),
 });
 export type AppStackTaskDto = z.infer<typeof AppStackTaskDtoSchema>;

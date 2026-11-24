@@ -3192,9 +3192,13 @@ x-hp-ingress:
       },
       weekdays: { d1: "lunedì", d2: "martedì", d3: "mercoledì", d4: "giovedì", d5: "venerdì", d6: "sabato", d7: "domenica" },
       next: "Prossima esecuzione: {date}.",
+      waiting: {
+        busy: "L'esecuzione del {date} è in attesa: l'applicazione è occupata. Viene riprovata fino a 30 minuti dopo l'orario.",
+        not_running: "L'esecuzione del {date} è in attesa: l'applicazione non è in funzione. Viene riprovata fino a 30 minuti dopo l'orario.",
+      },
       skipped: {
-        busy: "L'esecuzione del {date} è in attesa: l'applicazione era occupata.",
-        not_running: "L'esecuzione del {date} non è partita: l'applicazione non era in funzione.",
+        busy: "L'esecuzione del {date} è stata saltata: l'applicazione è rimasta occupata.",
+        not_running: "L'esecuzione del {date} è stata saltata: l'applicazione non era in funzione.",
         missed: "L'esecuzione del {date} è stata saltata.",
       },
       last: "Ultima esecuzione: {status}, {date}.",
