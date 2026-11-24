@@ -237,7 +237,7 @@ export interface CreateControlPlaneAppOptions {
   readonly dnsLookup?: DnsLookup;
   /** Tests only: the certificate validator's clock and trust anchors. No environment variable widens them. */
   readonly tlsValidatorOptions?: TlsValidatorOptions;
-  /** Tests only: HCP-SPEC-005 feature switches; production passes nothing, so every flag is false. No environment variable sets them. */
+  /** Tests only: HCP-SPEC-005 feature switches; production passes nothing, so they are those of the runtime backend. No environment variable sets them. */
   readonly appFeatures?: Partial<AppFeatureFlags>;
   /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production passes nothing. No environment variable sets it. */
   readonly appTemplateValidation?: AppTemplateValidationOptions;

@@ -72,6 +72,12 @@ export function SiteTemplateDetail({ template, csrfToken }: { template: AdminSit
     if (await run("details", "PATCH", { name: name.trim(), description: description.trim() || null }, t.saved)) setEditing(false);
   }
 
+  function closeDetails() {
+    if (busyRef.current) return;
+    setEditing(false);
+    setNotice(null);
+  }
+
   async function archive() {
     await run("archive", "DELETE", undefined, t.archived);
     setArchiving(false);
@@ -111,7 +117,7 @@ export function SiteTemplateDetail({ template, csrfToken }: { template: AdminSit
           <div className="flex flex-wrap gap-2">
             {!archived && (
               <>
-                <Button type="button" variant="outline" disabled={busy !== null} onClick={() => { setName(template.name); setDescription(template.description ?? ""); setEditing(true); }}>
+                <Button type="button" variant="outline" disabled={busy !== null} onClick={() => { setName(template.name); setDescription(template.description ?? ""); setNotice(null); setEditing(true); }}>
                   {t.editDetails}
                 </Button>
                 <Button asChild variant="outline">
@@ -179,7 +185,7 @@ export function SiteTemplateDetail({ template, csrfToken }: { template: AdminSit
         </CardContent>
       </Card>
 
-      <Dialog open={editing} onOpenChange={(open) => { if (!open && !busyRef.current) setEditing(false); }}>
+      <Dialog open={editing} onOpenChange={(open) => { if (!open) closeDetails(); }}>
         <DialogContent aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>{t.editDetails}</DialogTitle>
@@ -194,8 +200,14 @@ export function SiteTemplateDetail({ template, csrfToken }: { template: AdminSit
               <Textarea id="template-description" rows={3} value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} />
             </div>
           </div>
+          {/* The page notice is behind the modal: a refused save is shown and announced here. */}
+          {notice && !notice.ok && (
+            <Alert variant="destructive" role="alert">
+              <AlertDescription>{notice.text}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setEditing(false)}>{t.cancel}</Button>
+            <Button type="button" variant="outline" disabled={busy !== null} onClick={closeDetails}>{t.cancel}</Button>
             <Button type="button" disabled={busy !== null || name.trim() === ""} onClick={() => void saveDetails()}>{t.save}</Button>
           </DialogFooter>
         </DialogContent>

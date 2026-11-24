@@ -355,6 +355,36 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     expect((secondTry.json.error as { code: string }).code).toBe("IDEMPOTENCY_CONFLICT");
   });
 
+  it("answers 400 VALIDATION_ERROR to a signed observed-state GET whose path segment is a malformed percent-escape", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const getObservedState = vi.spyOn(simulator, "getObservedState");
+    const socketPath = `/tmp/hp-exec-test-${randomBytes(5).toString("hex")}.sock`;
+    const server = new DockerExecutorIpcServer({
+      executor: simulator,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "uds",
+      socketPath,
+    });
+    cleanupTasks.push(() => server.stop());
+    await server.start();
+
+    for (const bad of ["%E0%A4%A", "%", "svc_1%zz"]) {
+      const pathWithQuery = `/v1/services/${bad}/observed-state`;
+      const headers = signIpcRequest({
+        method: "GET",
+        pathWithQuery,
+        key: HMAC_SIGNING_KEY,
+        nonce: randomBytes(8).toString("hex"),
+      });
+      const res = await rawUnixHttpRequest({ socketPath, method: "GET", pathWithQuery, headers: { ...headers } });
+      expect([res.statusCode, (res.json.error as { code: string } | undefined)?.code], bad).toEqual([
+        400,
+        "VALIDATION_ERROR",
+      ]);
+    }
+    expect(getObservedState).not.toHaveBeenCalled();
+  });
+
   it("AC-F2-03 & AC-F2-05: DockerEngineSocketAdapter enforces HostConfig hardening, per-site bridge networks, zero-sock Traefik ingress, and 0400 tmpfs secrets", async () => {
     const tmpBaseDir = await mkdtemp(path.join(os.tmpdir(), "hp-exec-dirs-"));
     cleanupTasks.push(() => rm(tmpBaseDir, { recursive: true, force: true }));

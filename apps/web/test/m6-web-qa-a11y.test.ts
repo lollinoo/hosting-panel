@@ -17,7 +17,6 @@ import {
   type AppStackDomainDto,
   type AppStackPlanDiffDto,
   type AppStackSummaryDto,
-  type AppTemplateParameter,
   type AppTemplateValidationDto,
   type CustomerAppTemplateDto,
   type CustomerAppTemplateSummaryDto,
@@ -70,6 +69,7 @@ import { TemplateCatalog } from "@/components/admin/template-catalog";
 import { AppCatalog } from "@/components/app-stacks/app-catalog";
 import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
+import { AppStackDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackList } from "@/components/app-stacks/app-stack-list";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
@@ -230,6 +230,11 @@ const DETAIL: AppStackDetailDto = {
     { componentKey: "web", port: 8080 },
     { componentKey: "admin", port: 9000 },
   ],
+  pathTargets: [
+    { componentKey: "web", port: 8080 },
+    { componentKey: "admin", port: 9000 },
+  ],
+  routesPending: false,
   cpuMilli: 750,
   memoryBytes: String(384 * MIB),
   upgrade: { templateVersionId: "atv_notes_3", versionNumber: 3 },
@@ -249,10 +254,15 @@ const DOMAIN: AppStackDomainDto = {
   certificateProblem: null,
   certificateExpiresAt: "2027-02-20T10:00:00.000Z",
   checkedAt: NOW,
+  redirectToDomainId: null,
+  compression: false,
+  protection: null,
+  pathRoutes: [],
 };
 const DOMAINS: AppStackDomainDto[] = [DOMAIN, { ...DOMAIN, id: "sdom_2", hostname: "wiki.example.test", status: "pending", certificateStatus: "requested", certificateExpiresAt: null }];
+const OPTION_PATH = { pathPrefix: "/notes", componentKey: "web", port: 8080, stripPrefix: true };
 
-const PARAMS: AppTemplateParameter[] = [
+const PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "title", label: "Board title", type: "string", default: "My notes", customer: true },
   { key: "port", label: "Listen port", type: "integer", min: 1024, max: 65535, default: 8080, customer: true },
   { key: "mode", label: "Mode", type: "enum", options: ["small", "large"], default: "small", customer: true },
@@ -416,7 +426,8 @@ const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppT
   withState(AppWizard, { orgId: ORG, csrfToken: "csrf", entry }, m, state);
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
-const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress };
+const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress, pathTargets: DETAIL.pathTargets, pending: false };
+const optionsProps = { domain: DOMAIN, rows: DOMAINS, ingress: DETAIL.ingress, busy: false, error: null as string | null, onSave: async () => undefined, onClose: () => undefined };
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);
 const adminDetail = (m: Messages, tpl: AdminAppTemplateDetailDto, usage: AdminAppTemplateUsageDto | null, state: Record<number, unknown> = {}) =>
@@ -506,6 +517,53 @@ const SCENARIOS: Scenario[] = [
   { name: "domains · remove dialog", render: (m) => withState(AppStackDomains, domainsProps, m, { 5: "sdom_1" }) },
   { name: "domains · none", ids: ["app-domain-hostname"], render: (m) => withState(AppStackDomains, { ...domainsProps, initial: [] }, m) },
   { name: "domains · unreadable", render: (m) => withState(AppStackDomains, { ...domainsProps, initial: null }, m) },
+  // ADR-0037: the options of one address. The dialog is a child with its own state, so it is also rendered on its own.
+  {
+    name: "domains · options dialog",
+    ids: ["app-domain-hostname", "app-domain-redirect", "app-domain-protect", "app-domain-compression"],
+    render: (m) => withState(AppStackDomains, domainsProps, m, { 6: "sdom_1" }),
+  },
+  { name: "domains · options refused", alerts: 1, render: (m) => withState(AppStackDomains, domainsProps, m, { 4: m.apps.reasons.redirect_chain, 6: "sdom_1" }) },
+  { name: "domains · options saved", alerts: 0, render: (m) => withState(AppStackDomains, domainsProps, m, { 7: m.apps.domains.options.saved }) },
+  {
+    name: "domains · options summary",
+    render: (m) => withState(AppStackDomains, { ...domainsProps, initial: [{ ...DOMAIN, protection: { username: "admin" }, pathRoutes: [OPTION_PATH] }, { ...DOMAINS[1]!, redirectToDomainId: "sdom_1" }] }, m),
+  },
+  {
+    name: "domain options · password and paths",
+    ids: ["app-domain-redirect", "app-domain-protect", "app-domain-username", "app-domain-password", "app-domain-compression", "app-domain-path-0", "app-domain-path-0-target", "app-domain-path-0-strip"],
+    render: (m) => withState(AppStackDomainOptions, { ...optionsProps, domain: { ...DOMAIN, compression: true, protection: { username: "admin" }, pathRoutes: [OPTION_PATH] } }, m),
+  },
+  {
+    name: "domain options · new password without a certificate",
+    ids: ["app-domain-username", "app-domain-password"],
+    render: (m) => withState(AppStackDomainOptions, { ...optionsProps, domain: DOMAINS[1]!, rows: [DOMAINS[1]!] }, m, { 2: true }),
+  },
+  {
+    name: "domain options · to correct",
+    ids: ["app-domain-username", "app-domain-password", "app-domain-path-0", "app-domain-path-1"],
+    alerts: 4,
+    render: (m) =>
+      withState(AppStackDomainOptions, { ...optionsProps, error: m.apps.reasons.unknown_ingress }, m, {
+        2: true,
+        3: "-",
+        4: [
+          { pathPrefix: "web", target: "web:8080", stripPrefix: false },
+          { pathPrefix: "/web", target: "cache:6379", stripPrefix: true },
+        ],
+        5: { username: "username", password: "passwordRequired", "path:0": "path" },
+      }),
+  },
+  {
+    name: "domain options · redirecting",
+    ids: ["app-domain-redirect"],
+    render: (m) => withState(AppStackDomainOptions, { ...optionsProps, domain: { ...DOMAINS[1]!, redirectToDomainId: "sdom_1" }, rows: [DOMAIN, { ...DOMAINS[1]!, redirectToDomainId: "sdom_1" }] }, m),
+  },
+  {
+    name: "domain options · a destination, saving",
+    ids: ["app-domain-protect", "app-domain-compression"],
+    render: (m) => withState(AppStackDomainOptions, { ...optionsProps, busy: true, rows: [DOMAIN, { ...DOMAINS[1]!, redirectToDomainId: "sdom_1" }] }, m),
+  },
   { name: "progress · running", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("processing") }) },
   { name: "progress · succeeded", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("succeeded"), 1: "done" }) },
   { name: "progress · failed", alerts: 1, render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("failed"), 1: "done" }) },

@@ -99,6 +99,7 @@ export const APP_AUDIT_ACTIONS = Object.freeze({
   secretRotate: "app.stack.secret.rotate",
   domainAssign: "app.stack.domain.assign",
   domainRemove: "app.stack.domain.remove",
+  domainUpdate: "app.stack.domain.update",
 } as const);
 export const APP_AUDIT_TARGET_TYPES = Object.freeze({ template: "app_template", stack: "app_stack", domain: "app_stack_domain" } as const);
 

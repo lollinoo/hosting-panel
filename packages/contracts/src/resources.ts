@@ -299,7 +299,10 @@ export function isEncryptedBackupExportAvailable(_runtimeBackend: RuntimeBackend
   return false;
 }
 
-/** HCP-SPEC-005 feature switches. Production: all false; only a test injects another value. */
+/**
+ * HCP-SPEC-005 feature switches. A server takes them from its runtime backend (`appFeaturesFor`); only a test injects
+ * another value.
+ */
 export interface AppFeatureFlags {
   readonly applicationTemplatesAvailable: boolean;
   readonly applicationStacksAvailable: boolean;
@@ -312,6 +315,19 @@ export const APP_FEATURES_OFF: AppFeatureFlags = Object.freeze({
   stackPublicPortsAvailable: false,
   gitBuildsAvailable: false,
 });
+const APP_FEATURES_LINUX_SYSTEMD: AppFeatureFlags = Object.freeze({
+  ...APP_FEATURES_OFF,
+  applicationTemplatesAvailable: true,
+  applicationStacksAvailable: true,
+});
+
+/**
+ * The application features of a runtime backend (ADR-0036 §2.10): the template catalog and the stacks run only on the
+ * Linux systemd backend; public ports and Git builds run nowhere.
+ */
+export function appFeaturesFor(runtimeBackend: RuntimeBackend): AppFeatureFlags {
+  return runtimeBackend === "linux-systemd" ? APP_FEATURES_LINUX_SYSTEMD : APP_FEATURES_OFF;
+}
 
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
@@ -360,6 +376,7 @@ export interface CreatePlatformCapabilitiesOptions {
   readonly runtimeBackend: RuntimeBackend;
   readonly dockerExecutorRuntimeAvailable?: boolean;
   readonly hostAgentRuntimeAvailable?: boolean;
+  /** Left out, the features are those of the runtime backend (`appFeaturesFor`). */
   readonly appFeatures?: AppFeatureFlags;
 }
 
@@ -367,6 +384,7 @@ export function createPlatformCapabilities(
   options: CreatePlatformCapabilitiesOptions,
 ): PlatformCapabilitiesDto {
   const isDisabled = options.runtimeBackend === "disabled";
+  const appFeatures = options.appFeatures ?? appFeaturesFor(options.runtimeBackend);
   return Object.freeze(
     PlatformCapabilitiesDtoSchema.parse({
       phase: isDisabled ? "phase-1" : "phase-2",
@@ -387,10 +405,10 @@ export function createPlatformCapabilities(
       manualTlsCertificatesAvailable: isManualTlsAvailable(options.runtimeBackend),
       localBackupTargetsAvailable: isLocalBackupTargetsAvailable(options.runtimeBackend),
       encryptedBackupExportAvailable: isEncryptedBackupExportAvailable(options.runtimeBackend),
-      applicationTemplatesAvailable: options.appFeatures?.applicationTemplatesAvailable === true,
-      applicationStacksAvailable: options.appFeatures?.applicationStacksAvailable === true,
-      stackPublicPortsAvailable: options.appFeatures?.stackPublicPortsAvailable === true,
-      gitBuildsAvailable: options.appFeatures?.gitBuildsAvailable === true,
+      applicationTemplatesAvailable: appFeatures.applicationTemplatesAvailable === true,
+      applicationStacksAvailable: appFeatures.applicationStacksAvailable === true,
+      stackPublicPortsAvailable: appFeatures.stackPublicPortsAvailable === true,
+      gitBuildsAvailable: appFeatures.gitBuildsAvailable === true,
     }),
   );
 }

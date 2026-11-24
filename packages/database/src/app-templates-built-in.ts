@@ -1,4 +1,4 @@
-import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, APP_TEMPLATE_SPEC_VERSION, type AppImageAllowlistEntry } from "@hosting-panel/contracts";
+import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, type AppImageAllowlistEntry } from "@hosting-panel/contracts";
 import { computeAppTemplateSpecHash } from "@hosting-panel/hosting-domain";
 import { validateAppTemplateSource } from "@hosting-panel/policy-engine";
 import type { ensureBuiltInAppTemplates } from "./app-templates-repository.js";
@@ -20,7 +20,7 @@ export function builtInAppTemplateItems(allowlist: readonly AppImageAllowlistEnt
       category: t.category,
       version: {
         source: t.source,
-        specVersion: APP_TEMPLATE_SPEC_VERSION,
+        specVersion: result.spec.schemaVersion,
         compiledSchema: result.spec,
         specHash: computeAppTemplateSpecHash(result.spec),
       },

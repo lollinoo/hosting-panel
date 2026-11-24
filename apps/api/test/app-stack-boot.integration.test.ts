@@ -61,9 +61,10 @@ describe("application stack boot tasks (RT8)", () => {
     const { templates, versions } = await builtIns();
     expect(templates.map((t) => [t.id, t.builtIn, t.enabled, t.defaultVersionId])).toEqual([
       ["atpl_http_cache", true, false, "atv_http_cache_1"],
+      ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_1"],
       ["atpl_worker_storage", true, false, "atv_worker_storage_1"],
     ]);
-    expect(versions.map((v) => v.id)).toEqual(["atv_http_cache_1", "atv_worker_storage_1"]);
+    expect(versions.map((v) => v.id)).toEqual(["atv_http_cache_1", "atv_wordpress_mariadb_1", "atv_worker_storage_1"]);
 
     await expect(app.close()).resolves.toBeUndefined();
     expect(stop).toHaveBeenCalledOnce();

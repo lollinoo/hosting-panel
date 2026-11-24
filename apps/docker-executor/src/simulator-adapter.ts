@@ -33,6 +33,8 @@ import {
   type AppImageAllowlistEntry,
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
+  type AppStackCreateIpcRequest,
+  type AppStackImageResolveIpcRequest,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPullIpcRequest,
@@ -1353,7 +1355,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
 
   public pullAppStackImage(req: AppStackPullIpcRequest) { return this.appStacks.pullAppStackImage(req); }
   public prepareAppStack(req: AppStackPlanIpcRequest) { return this.appStacks.prepareAppStack(req); }
-  public createAppStackComponents(req: AppStackPlanIpcRequest) { return this.appStacks.createAppStackComponents(req); }
+  public createAppStackComponents(req: AppStackCreateIpcRequest) { return this.appStacks.createAppStackComponents(req); }
+  public resolveAppStackImage(req: AppStackImageResolveIpcRequest) { return this.appStacks.resolveAppStackImage(req); }
   public startAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.startAppStackComponent(req); }
   public restartAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.restartAppStackComponent(req); }
   public stopAppStack(req: AppStackRefIpcRequest) { return this.appStacks.stopAppStack(req); }

@@ -1,15 +1,20 @@
 /**
- * Validator of an application template (`HCP-STACK/v1`): turns the parsed document into the typed, secret-free
- * `AppTemplateSpec`, or into every problem found, each with a code, a reason, a path and, when a locator is given, a
- * line and column. Every key is checked against APP_TEMPLATE_KEY_LEVELS, so a Compose feature that could reach the
- * host can never slip in by being forgotten.
+ * Validator of an application template (`HCP-STACK/v1` and `HCP-STACK/v2`): turns the parsed document into the typed,
+ * secret-free `AppTemplateSpec`, or into every problem found, each with a code, a reason, a path and, when a locator is
+ * given, a line and column. Every key is checked against the key table of the declared version
+ * (APP_TEMPLATE_KEY_LEVELS, APP_TEMPLATE_KEY_LEVELS_V2), so a Compose feature that could reach the host can never slip
+ * in by being forgotten. A v1 source is held to exactly the v1 rules: it never gains a v2 key.
  * Pure, synchronous and never throws; a message never echoes a value.
  */
 import {
   APP_IMAGE_ALLOWLIST,
+  APP_SECRET_GENERATE_BOUNDS,
+  APP_SECRET_GENERATE_KINDS,
   APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_RUN_PROFILES,
+  APP_STACK_SECRET_ENV_LIMITS,
   APP_TEMPLATE_CATEGORY_PATTERN,
   APP_TEMPLATE_ISSUE_REASON,
   APP_TEMPLATE_LIMITS as LIMITS,
@@ -17,6 +22,7 @@ import {
   APP_TEMPLATE_PARAMETER_KEY_PATTERN,
   APP_TEMPLATE_PARAMETER_TYPES,
   APP_TEMPLATE_SPEC_VERSION,
+  APP_TEMPLATE_SPEC_VERSION_2,
   AppTemplateSpecSchema,
   appStackArgvExecutableProblem,
   appStackArgvItemProblem,
@@ -30,19 +36,23 @@ import {
   parseTemplateYaml,
   sortAppTemplateIssues,
   type AppImageAllowlistEntry,
+  type AppSecretGenerate,
+  type AppSecretGenerateKind,
+  type AppStackRunProfile,
   type AppTemplateIssue,
   type AppTemplateIssueCode,
   type AppTemplateParameter,
   type AppTemplateService,
   type AppTemplateSpec,
+  type AppTemplateSpecVersion,
   type TemplateLocator,
   type TemplatePath,
 } from "@hosting-panel/contracts";
-import { APP_TEMPLATE_KEY_LEVELS, appTemplateKeyVerdict, type AppTemplateRefusalCode } from "./app-template-keys.js";
+import { appTemplateKeyVerdict, type AppTemplateKeyLevelName, type AppTemplateRefusalCode } from "./app-template-keys.js";
 import { orderAppTemplateServices } from "./app-template-graph.js";
 import { parseImageReference } from "./image-reference.js";
 import { envNameProblem, envValueProblem } from "./site-template-env.js";
-import { scanInterpolation } from "./site-template-interpolation.js";
+import { scanInterpolation, type InterpolationPiece } from "./site-template-interpolation.js";
 
 export interface AppTemplateValidationOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
@@ -91,7 +101,11 @@ const quoted = (path: TemplatePath): string => `'${clip(formatTemplatePath(path)
 class Issues {
   readonly list: AppTemplateIssue[] = [];
 
-  constructor(private readonly locate: TemplateLocator | undefined) {}
+  /** `version`: the format the document declares; it picks the key table and the rules. */
+  constructor(
+    private readonly locate: TemplateLocator | undefined,
+    readonly version: AppTemplateSpecVersion = APP_TEMPLATE_SPEC_VERSION,
+  ) {}
 
   add(code: AppTemplateIssueCode, path: TemplatePath, message: string, part: "key" | "value" = "value"): void {
     const formatted = clip(formatTemplatePath(path), ISSUE_PATH_MAX);
@@ -108,9 +122,9 @@ class Issues {
 }
 
 /** Reports every key of `mapping` that is not allowed at `level`: a named refusal, else KEY_UNKNOWN. */
-function checkKeys(issues: Issues, mapping: Mapping, path: TemplatePath, level: keyof typeof APP_TEMPLATE_KEY_LEVELS): void {
+function checkKeys(issues: Issues, mapping: Mapping, path: TemplatePath, level: AppTemplateKeyLevelName): void {
   for (const key of Object.keys(mapping)) {
-    const code = appTemplateKeyVerdict(level, key);
+    const code = appTemplateKeyVerdict(level, key, issues.version);
     if (code !== null) issues.add(code, [...path, key], `'${clip(key)}' ${REFUSAL_MESSAGES[code]}`, "key");
   }
 }
@@ -131,11 +145,18 @@ interface ParameterInfo {
 
 interface Context {
   readonly issues: Issues;
+  readonly version: AppTemplateSpecVersion;
   readonly allowlist: readonly AppImageAllowlistEntry[];
   readonly parameters: ReadonlyMap<string, ParameterInfo>;
   readonly volumes: ReadonlySet<string>;
   readonly mounted: Set<string>;
   readonly serviceKeys: readonly string[];
+}
+
+/** The format the document declares. Anything but 2 is checked as v1, and refused at the header when it is not 1. */
+function declaredVersion(root: unknown): AppTemplateSpecVersion {
+  const header = isMapping(root) ? own(root, "x-hp-stack") : undefined;
+  return isMapping(header) && own(header, "schemaVersion") === APP_TEMPLATE_SPEC_VERSION_2 ? APP_TEMPLATE_SPEC_VERSION_2 : APP_TEMPLATE_SPEC_VERSION;
 }
 
 function validateHeader(issues: Issues, root: Mapping): Pick<AppTemplateSpec, "name" | "category" | "description"> | null {
@@ -155,8 +176,12 @@ function validateHeader(issues: Issues, root: Mapping): Pick<AppTemplateSpec, "n
   const name = own(header, "name");
   const category = own(header, "category");
   const description = ownOr(header, "description", "");
-  if (version !== APP_TEMPLATE_SPEC_VERSION) {
-    issues.add("HEADER_VERSION_UNSUPPORTED", at("schemaVersion"), `Set 'schemaVersion: ${APP_TEMPLATE_SPEC_VERSION}': no other version is supported.`);
+  if (version !== APP_TEMPLATE_SPEC_VERSION && version !== APP_TEMPLATE_SPEC_VERSION_2) {
+    issues.add(
+      "HEADER_VERSION_UNSUPPORTED",
+      at("schemaVersion"),
+      `Set 'schemaVersion: ${APP_TEMPLATE_SPEC_VERSION}' or 'schemaVersion: ${APP_TEMPLATE_SPEC_VERSION_2}': no other version is supported.`,
+    );
   }
   if (!isText(name, LIMITS.stackName, 1)) {
     issues.add("HEADER_NAME_INVALID", at("name"), `The name is 1 to ${LIMITS.stackName} characters of plain text.`);
@@ -211,6 +236,27 @@ function validateParameters(issues: Issues, root: Mapping): ParametersResult {
     issues.add("PARAM_SECRET_TOO_MANY", path, `At most ${LIMITS.secretParameters} secret parameters are allowed; found ${secrets}.`);
   }
   return { parameters, infos };
+}
+
+/** v2: how the platform makes a secret nobody types. Null (with an issue) when it is not a valid rule. */
+function validateGenerate(issues: Issues, raw: unknown, path: TemplatePath): AppSecretGenerate | null {
+  const invalid = (at: TemplatePath, message: string): null => {
+    issues.add("PARAM_GENERATE_INVALID", at, message);
+    return null;
+  };
+  if (!isMapping(raw)) return invalid(path, "'generate' is a mapping with 'kind' and 'length'.");
+  checkKeys(issues, raw, path, "generate");
+  const kind = own(raw, "kind");
+  const length = own(raw, "length");
+  const kinds: readonly string[] = APP_SECRET_GENERATE_KINDS;
+  if (typeof kind !== "string" || !kinds.includes(kind)) {
+    return invalid(kind === undefined ? path : [...path, "kind"], `kind must be one of ${kinds.join(", ")}.`);
+  }
+  const bounds = APP_SECRET_GENERATE_BOUNDS[kind as AppSecretGenerateKind];
+  if (!isSafeInt(length) || length < bounds.min || length > bounds.max) {
+    return invalid(length === undefined ? path : [...path, "length"], `length is a whole number from ${bounds.min} to ${bounds.max} for kind '${kind}'.`);
+  }
+  return { kind: kind as AppSecretGenerateKind, length };
 }
 
 /** The typed parameter when the item has no issue; its key is declared either way (no cascade into the interpolation checks). */
@@ -288,13 +334,28 @@ function validateParameter(issues: Issues, item: unknown, path: TemplatePath, in
 
   const value = field("default");
   const required = field("required");
+  // In v1 the key 'generate' is already refused as unknown.
+  const generateRaw = issues.version === APP_TEMPLATE_SPEC_VERSION_2 ? field("generate") : undefined;
+  let generate: AppSecretGenerate | null = null;
   if (type === "secret") {
     if (value !== undefined) issues.add("PARAM_DEFAULT_NOT_ALLOWED", at("default"), "A secret parameter has no default: the customer sets it.");
     if (typeof required !== "boolean") {
       issues.add("PARAM_REQUIRED_INVALID", required === undefined ? path : at("required"), "A secret parameter needs 'required: true' or 'required: false'.");
     }
-    if (customer === false) issues.add("PARAM_SECRET_NOT_CUSTOMER", at("customer"), "A secret parameter must be 'customer: true': only the customer can set it.");
+    if (generateRaw !== undefined) {
+      generate = validateGenerate(issues, generateRaw, at("generate"));
+      if (required === false) issues.add("PARAM_REQUIRED_INVALID", at("required"), "A generated secret is always set: write 'required: true'.");
+    } else if (customer === false) {
+      issues.add(
+        "PARAM_SECRET_NOT_CUSTOMER",
+        at("customer"),
+        issues.version === APP_TEMPLATE_SPEC_VERSION_2
+          ? "A secret parameter is 'customer: true' unless the platform generates it: add 'generate'."
+          : "A secret parameter must be 'customer: true': only the customer can set it.",
+      );
+    }
   } else {
+    if (generateRaw !== undefined) issues.add("PARAM_GENERATE_INVALID", at("generate"), "Only a secret parameter can be generated.");
     if (required !== undefined) issues.add("PARAM_REQUIRED_INVALID", at("required"), "Only a secret parameter has 'required'.");
     if (value === undefined) issues.add("PARAM_DEFAULT_MISSING", path, "Every parameter that is not a secret needs a default.");
   }
@@ -304,7 +365,10 @@ function validateParameter(issues: Issues, item: unknown, path: TemplatePath, in
   let parameter: AppTemplateParameter;
   switch (type) {
     case "secret":
-      parameter = { ...head, type, required: required as boolean, customer: true };
+      parameter =
+        issues.version === APP_TEMPLATE_SPEC_VERSION_2
+          ? { ...head, type, required: required as boolean, customer, generate }
+          : { ...head, type, required: required as boolean, customer: true };
       break;
     case "enum":
       parameter = { ...head, type, options: [...(options as string[])], default: value as string, customer };
@@ -383,8 +447,24 @@ function validateService(ctx: Context, key: string, raw: unknown): ServiceResult
   const dependsOn = validateDependsOn(ctx, key, own(raw, "depends_on"), [...path, "depends_on"]);
   const healthcheck = validateHealthcheck(issues, own(raw, "healthcheck"), [...path, "healthcheck"], expose);
   const limits = validateLimits(issues, own(raw, "deploy"), path);
-  const service = image && limits ? { key, image, command, environment, volumes, expose, dependsOn, healthcheck, limits } : null;
+  const base = image && limits ? { key, image, command, environment, volumes, expose, dependsOn, healthcheck, limits } : null;
+  let service: AppTemplateService | null = base;
+  if (ctx.version === APP_TEMPLATE_SPEC_VERSION_2) {
+    const profile = validateProfile(issues, own(raw, "x-hp-profile"), [...path, "x-hp-profile"]);
+    service = base && profile ? { ...base, profile } : null;
+  }
   return { expose, dependsOn, hasHealthcheck: own(raw, "healthcheck") !== undefined, service };
+}
+
+/** v2: the closed run profile of a service. Absent = "strict"; a template never names a capability or a user itself. */
+function validateProfile(issues: Issues, raw: unknown, path: TemplatePath): AppStackRunProfile | null {
+  if (raw === undefined) return "strict";
+  const profile = APP_STACK_RUN_PROFILES.find((name) => name === raw);
+  if (profile === undefined) {
+    issues.add("SERVICE_PROFILE_INVALID", path, `x-hp-profile is one of ${APP_STACK_RUN_PROFILES.join(", ")}.`);
+    return null;
+  }
+  return profile;
 }
 
 function validateImage(ctx: Context, raw: unknown, servicePath: TemplatePath): AppTemplateService["image"] | null {
@@ -403,18 +483,25 @@ function validateImage(ctx: Context, raw: unknown, servicePath: TemplatePath): A
   const name = registry === null ? repository : `${registry}/${repository}`;
   if (digest === null) issues.add("IMAGE_DIGEST_REQUIRED", path, "Pin the image by digest: add '@sha256:<64 hex digits>'.");
   if (tag === "latest") issues.add("IMAGE_TAG_LATEST", path, "The tag 'latest' is refused: write the version tag or none.");
-  if (findAppImageAllowlistEntry(name, ctx.allowlist) === null) {
+  // v2 (ADR-0036): any repository, always pinned by digest; the allowlist only gives the user of the images it lists.
+  if (ctx.version === APP_TEMPLATE_SPEC_VERSION && findAppImageAllowlistEntry(name, ctx.allowlist) === null) {
     issues.add("IMAGE_NOT_ALLOWLISTED", path, "This image repository is not on the platform's allowlist.");
   }
   return digest !== null && tag !== "latest" ? { name, tag, digest } : null;
 }
 
-/** Every `${NAME}` must be a declared parameter that is not a secret. */
+/** Every `${NAME}` must be a declared parameter that is not a secret (v2: a secret is allowed in an environment value only). */
 function checkVariable(ctx: Context, name: string, path: TemplatePath): ParameterInfo | null {
   const info = ctx.parameters.get(name);
   if (info === undefined) ctx.issues.add("INTERP_UNKNOWN_VARIABLE", path, "A '${...}' must name a parameter declared under 'x-hp-parameters'.");
   else if (info.secret) {
-    ctx.issues.add("INTERP_SECRET_PARAMETER", path, "A secret parameter cannot be interpolated: pass it as a file with an environment entry 'secret: <key>'.");
+    ctx.issues.add(
+      "INTERP_SECRET_PARAMETER",
+      path,
+      ctx.version === APP_TEMPLATE_SPEC_VERSION_2
+        ? "A secret parameter cannot be interpolated here: only an environment value can carry it."
+        : "A secret parameter cannot be interpolated: pass it as a file with an environment entry 'secret: <key>'.",
+    );
   } else return info;
   return null;
 }
@@ -494,7 +581,12 @@ function validateEnvironment(ctx: Context, raw: unknown, path: TemplatePath): Ap
       const typed = validateEnvValue(ctx, name, value, entryPath);
       if (typed !== null) environment.push({ name, value: typed });
     } else if (secret !== undefined && value === undefined) {
-      if (appStackSecretEnvNameProblem(name) !== null) {
+      if (ctx.version === APP_TEMPLATE_SPEC_VERSION_2 && !name.endsWith("_FILE")) {
+        // v2: the secret itself is the variable's value. Its name may look like a secret; it is never a reserved one.
+        if (secretEnvNameProblem(name) !== null) {
+          issues.add("ENV_SECRET_NAME_INVALID", namePath, "A secret entry's name is not reserved by the platform (HP_, LD_, DOCKER_, PATH...).");
+        }
+      } else if (appStackSecretEnvNameProblem(name) !== null) {
         issues.add("ENV_SECRET_NAME_INVALID", namePath, "A secret entry's name ends in '_FILE' after a non-reserved name (it receives the file path).");
       }
       if (typeof secret !== "string" || ctx.parameters.get(secret)?.secret !== true) {
@@ -505,31 +597,67 @@ function validateEnvironment(ctx: Context, raw: unknown, path: TemplatePath): Ap
   return environment;
 }
 
+/** The name rule of an entry that carries a secret as its value (v2): never a reserved name; it may look like a secret. */
+function secretEnvNameProblem(name: string): "ENV_NAME_INVALID" | "ENV_NAME_RESERVED" | null {
+  const problem = name === "PORT" ? null : envNameProblem(name);
+  return problem === "ENV_NAME_SECRET_LIKE" ? null : problem;
+}
+
+/**
+ * The text around the secret references of a value, one string per stretch: literals, with the placeholders of the
+ * other parameters left as written. A value without a secret reference is one stretch, the whole value.
+ */
+function textAroundSecrets(pieces: readonly InterpolationPiece[], isSecret: (variable: string) => boolean): string[] {
+  const stretches = [""];
+  for (const piece of pieces) {
+    if ("variable" in piece && isSecret(piece.variable)) stretches.push("");
+    else stretches[stretches.length - 1] += "literal" in piece ? piece.literal : `\${${piece.variable}}`;
+  }
+  return stretches;
+}
+
 function validateEnvValue(ctx: Context, name: string, value: unknown, entryPath: TemplatePath): string | null {
   const { issues } = ctx;
   const namePath = [...entryPath, "name"];
   const path = [...entryPath, "value"];
-  const nameProblem = name === "PORT" ? null : envNameProblem(name);
+  const scan = typeof value === "string" ? scanInterpolation(value) : null;
+  const isSecret = (variable: string): boolean => ctx.parameters.get(variable)?.secret === true;
+  // v2 (ADR-0036 §2.5): a value that names a secret parameter is an environment secret, held to its own rules.
+  const secretReferences =
+    ctx.version === APP_TEMPLATE_SPEC_VERSION_2 && scan?.ok === true
+      ? scan.pieces.filter((piece) => "variable" in piece && isSecret(piece.variable)).length
+      : 0;
+  const nameProblem = secretReferences > 0 ? secretEnvNameProblem(name) : name === "PORT" ? null : envNameProblem(name);
   if (nameProblem !== null) issues.add(nameProblem, namePath, NAME_PROBLEM_MESSAGES[nameProblem]);
-  if (typeof value !== "string") {
+  if (typeof value !== "string" || scan === null) {
     issues.add("ENV_VALUE_NOT_STRING", path, "The value must be a string: quote it.");
     return null;
   }
   const tooLong = (): void => issues.add("ENV_VALUE_TOO_LONG", path, `The value could exceed ${LIMITS.envValueLength} characters once filled in.`);
   if (value.length > LIMITS.envValueLength) tooLong();
-  const valueProblem = envValueProblem(value);
+  // Without a secret reference the whole value is checked as written; with one, each stretch of text around them is.
+  const checked = secretReferences > 0 && scan.ok ? textAroundSecrets(scan.pieces, isSecret) : [value];
+  const valueProblem = checked.map((text) => envValueProblem(text)).find((problem) => problem !== null) ?? null;
   if (valueProblem !== null) issues.add(valueProblem, path, VALUE_PROBLEM_MESSAGES[valueProblem]);
-  else if (appStackTextProblem(value) === "metadata_endpoint") {
+  else if (checked.some((text) => appStackTextProblem(text) === "metadata_endpoint")) {
     issues.add("ENV_VALUE_METADATA_ENDPOINT", path, "The value names a cloud metadata endpoint, which is never reachable from a stack.");
   }
-  const scan = scanInterpolation(value);
   if (!scan.ok) {
     issues.add(scan.code, path, scan.message);
     return value;
   }
+  if (secretReferences > APP_STACK_SECRET_ENV_LIMITS.referencesPerValue) {
+    issues.add(
+      "ENV_SECRET_REFERENCES_TOO_MANY",
+      path,
+      `A value can name at most ${APP_STACK_SECRET_ENV_LIMITS.referencesPerValue} secret parameters.`,
+    );
+  }
   let worstCase = 0;
   for (const piece of scan.pieces) {
-    worstCase += "literal" in piece ? piece.literal.length : (checkVariable(ctx, piece.variable, path)?.maxLength ?? 0);
+    if ("literal" in piece) worstCase += piece.literal.length;
+    // A secret counts as nothing here: its own size is bounded where it is set.
+    else if (secretReferences === 0 || !isSecret(piece.variable)) worstCase += checkVariable(ctx, piece.variable, path)?.maxLength ?? 0;
   }
   if (worstCase > LIMITS.envValueLength) tooLong();
   return value;
@@ -760,7 +888,8 @@ export function validateAppTemplate(
   options: AppTemplateValidationOptions = {},
 ): AppTemplateValidationResult {
   try {
-    const issues = new Issues(locate);
+    const version = declaredVersion(value);
+    const issues = new Issues(locate, version);
     if (!isMapping(value)) {
       issues.add("DOCUMENT_NOT_MAPPING", [], "The template must be a mapping of keys (x-hp-stack, services, ...).");
       return fail(issues.list);
@@ -782,6 +911,7 @@ export function validateAppTemplate(
 
     const ctx: Context = {
       issues,
+      version,
       allowlist: options.allowlist ?? APP_IMAGE_ALLOWLIST,
       parameters: infos,
       volumes: new Set(volumes),
@@ -811,7 +941,7 @@ export function validateAppTemplate(
     if (issues.list.length > 0) return fail(issues.list);
 
     const parsed = AppTemplateSpecSchema.safeParse({
-      schemaVersion: APP_TEMPLATE_SPEC_VERSION,
+      schemaVersion: version,
       ...header,
       parameters,
       services: [...results.values()].flatMap((result) => (result.service ? [result.service] : [])).sort((a, b) => compare(a.key, b.key)),
