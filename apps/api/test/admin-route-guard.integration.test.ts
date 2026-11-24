@@ -256,6 +256,13 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/backup-targets/:targetId/initialize"],
       ["GET", "/v1/admin/backup-policies/:scope"],
       ["PATCH", "/v1/admin/backup-policies/:scope"],
+      ["GET", "/v1/admin/backups"],
+      ["PATCH", "/v1/admin/backups"],
+      ["DELETE", "/v1/admin/backups"],
+      ["POST", "/v1/admin/backups/test"],
+      ["GET", "/v1/admin/backups/sites"],
+      ["POST", "/v1/admin/backups/sites/:siteId/run"],
+      ["POST", "/v1/admin/backups/sites/:siteId/restore"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }
@@ -280,6 +287,20 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/app-templates/:templateId/archive"],
       ["GET", "/v1/admin/app-templates/:templateId/usage"],
       ["GET", "/v1/admin/app-stacks"],
+      ["GET", "/v1/admin/app-stacks/:stackId"],
+      ["GET", "/v1/admin/app-stacks/:stackId/components/:componentKey/logs"],
+      ["POST", "/v1/admin/app-stacks/:stackId/components/:componentKey/terminal"],
+      ["PATCH", "/v1/admin/organizations/:orgId/app-stack-limit"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/notifications"],
+      ["PUT", "/v1/admin/notifications/channels/:channel"],
+      ["DELETE", "/v1/admin/notifications/channels/:channel"],
+      ["POST", "/v1/admin/notifications/channels/:channel/test"],
+      ["GET", "/v1/admin/sites/:siteId/logs"],
+      ["GET", "/v1/admin/logs/:component"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }
