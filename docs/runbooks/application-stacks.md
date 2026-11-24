@@ -121,6 +121,19 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    does the start that follows a backup or a restore, which then ends `failed`: the panel stopped it, not the customer);
    the history names the reason.
 
+   **A version that adds a required private value** the customer types (issue #89): the update dialog asks for it under
+   the template's label, and the update request carries it. It is stored as version 1 of an ordinary private value in
+   the transaction that queues the update, and never shown again; **Valori riservati** lists it as set from then on and
+   replaces it as usual. An update without it is refused at the request, next to its field (`STACK_SECRET_MISSING`,
+   field `secrets.<key>`); a value the update does not need (one the stack has, or an optional one, which is set among
+   the private values after the update) is refused with `secret_not_needed`. An update taken back before create keeps
+   the value, and the next attempt does not ask for it. Such values are not held to the limit of 10 new versions an
+   hour when they are stored (one per key, ever), and count in that hour afterwards like any value the customer sets.
+   The audit names each key and its version (`app.stack.secret.rotate`). The keys a stack has, never the values:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select parameter_key, version, created_at from app_stack_secrets where stack_id = '<stackId>' order by parameter_key, version"
+   ```
+
    **Reinstalla** (`stack.deploy`) recreates what differs from the plan; **Avvia** only starts components that exist.
    At API start, a stack left busy without an active operation becomes `failed` (`delete_failed` when it was deleting,
    `unknown` when it was stopping).

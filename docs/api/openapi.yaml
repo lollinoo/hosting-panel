@@ -5725,7 +5725,9 @@ paths:
         revision (both together are refused, and a rollback takes no `parameters`), otherwise a deploy with the given
         or the stored settings. Nothing is written and nothing is audited; no Idempotency-Key. The answer names the
         changed components, volumes, parameters (secrets by name only) and entry points, and carries the `planHash`
-        an upgrade or rollback must send back. The same refusals as the verb it previews (`planHash` aside).
+        an upgrade or rollback must send back. For an upgrade, `newSecrets` names (key and label, never a value) the
+        required private values the customer types that the new version brings and the application has none of: the
+        upgrade must carry them. The same refusals as the verb it previews (`planHash` aside).
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -5947,7 +5949,16 @@ paths:
         Send the `planHash` of the preview (`POST .../plan` with the same `templateVersionId` and `parameters`); a
         plan that changed since is refused (`VALIDATION_ERROR`, `details[0].field: planHash`,
         `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
-        are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
+        are carried over. `secrets` carries exactly the private values the preview names in `newSecrets`; each is
+        stored as version 1 of an ordinary private value in the transaction that queues the upgrade (a refused request
+        stores nothing; an upgrade taken back keeps it, and the next preview no longer asks for it). Refusals, with
+        `details[].field: secrets.<key>`: one that is missing (`STACK_SECRET_MISSING`, one detail per value), a key
+        that is not a private value of the new version or that the customer may not set (`STACK_PARAMETER_INVALID`),
+        one the upgrade does not need, because the application has it or it is optional (`secret_not_needed`), and a
+        value over 4096 UTF-8 bytes that the new version puts in an environment variable (`value_too_long`). The
+        values are never returned, logged or audited (the audit names each key and its version as
+        `app.stack.secret.rotate`), and the request hash of the Idempotency-Key covers their keys only: the same key
+        with other values replays the first request. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
         `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
@@ -14151,6 +14162,24 @@ components:
           type: string
           pattern: "^[a-f0-9]{64}$"
           description: The `planHash` of the preview the customer confirmed
+        secrets:
+          type: array
+          maxItems: 8
+          description: >-
+            The private values the preview names in `newSecrets`, each key once. Write-only, like
+            `SetAppStackSecretInput`
+          items:
+            type: object
+            additionalProperties: false
+            required: [parameterKey, value]
+            properties:
+              parameterKey:
+                $ref: "#/components/schemas/AppTemplateParameterKey"
+              value:
+                type: string
+                minLength: 1
+                maxLength: 16384
+                writeOnly: true
 
     RollbackAppStackInput:
       type: object
@@ -14793,7 +14822,7 @@ components:
 
     AppStackPlanDiffDto:
       type: object
-      required: [planHash, fromRevisionId, fromVersionNumber, toTemplateVersionId, toVersionNumber, newRevision, components, volumes, parameters, ingress, downtime, dataRisk]
+      required: [planHash, fromRevisionId, fromVersionNumber, toTemplateVersionId, toVersionNumber, newRevision, components, volumes, parameters, newSecrets, ingress, downtime, dataRisk]
       properties:
         planHash:
           type: string
@@ -14849,6 +14878,19 @@ components:
                 $ref: "#/components/schemas/AppTemplateParameterKey"
               change:
                 $ref: "#/components/schemas/AppStackDiffChange"
+        newSecrets:
+          type: array
+          description: >-
+            Upgrade only: the required private values the customer types that the new version brings and the
+            application has none of; the upgrade must carry them in `secrets`. Empty for a deploy and a rollback
+          items:
+            type: object
+            required: [key, label]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppTemplateParameterKey"
+              label:
+                type: string
         ingress:
           type: array
           items:
