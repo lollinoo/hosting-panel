@@ -45,6 +45,9 @@ const codeOf = (err: unknown): unknown => (err as { code?: unknown } | null)?.co
  * The outgoing mail relay: settings, an asynchronous apply, and a test email. Applies and test sends share
  * one promise chain; reads never wait on it, because an apply can take minutes (an image pull).
  */
+/** A panel mail as the API asks for it, of either kind: the sender's address is added here. */
+export type PanelMailWithoutSender = PanelMailRequest extends infer M ? (M extends unknown ? Omit<M, "from"> : never) : never;
+
 @Injectable()
 export class MailRelayService {
   /** In memory on purpose: a restarted API applies once at boot, which also repairs a lost relay. */
@@ -145,7 +148,7 @@ export class MailRelayService {
   }
 
   /** Hands one panel mail to the relay; never throws and writes no audit row of its own. */
-  public async sendPanelMail(req: Omit<PanelMailRequest, "from">): Promise<"queued" | "failed" | "not_sent"> {
+  public async sendPanelMail(req: PanelMailWithoutSender): Promise<"queued" | "failed" | "not_sent"> {
     try {
       const row = await getMailRelaySettingsPublic(this.dbClient.db);
       if (row === null || fingerprint(row) !== this.#appliedFingerprint) return "not_sent";

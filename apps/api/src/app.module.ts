@@ -10,6 +10,8 @@ import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine"
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
 import { AppStackBackupsService } from "./app-stacks/app-stack-backups.service.js";
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
+import { AppStackLinksApplier } from "./app-stacks/app-stack-links-applier.js";
+import { AppStackLinksService } from "./app-stacks/app-stack-links.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
 import { AdminAppStacksService } from "./app-stacks/admin-app-stacks.service.js";
@@ -34,12 +36,15 @@ import { AdminAppStacksController } from "./controllers/admin-app-stacks.control
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
+import { AppStackLinksController } from "./controllers/app-stack-links.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
 import { AdminBackupTargetsController } from "./controllers/admin-backup-targets.controller.js";
 import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
+import { AdminNotificationsController } from "./controllers/admin-notifications.controller.js";
+import { NotificationsController } from "./controllers/notifications.controller.js";
 import { AdminDnsProviderController } from "./controllers/admin-dns-provider.controller.js";
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
@@ -97,12 +102,17 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   DNS_LOOKUP_TOKEN,
   HOST_AGENT_TOKEN,
+  NOTIFICATION_OUTBOUND_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "./tokens.js";
 import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteDomainsService } from "./sites/site-domains.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { NotificationDispatchService } from "./notifications/notification-dispatch.service.js";
+import { NotificationSenderService } from "./notifications/notification-sender.service.js";
+import { NotificationSettingsService } from "./notifications/notification-settings.service.js";
+import { createOutboundHttp, type OutboundHttpPort } from "./notifications/outbound-http.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
 import { TlsCertificatesService } from "./certificates/tls-certificates.service.js";
 import { SiteTlsApplier } from "./certificates/site-tls-applier.js";
@@ -126,6 +136,8 @@ export interface AppModuleOptions {
   readonly appFeatures?: Partial<AppFeatureFlags>;
   /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production registers `{}` (the code allowlist). */
   readonly appTemplateValidation?: AppTemplateValidationOptions;
+  /** Tests only: what stands in for the calls to the outside; production builds the real module on the DNS lookup. */
+  readonly notificationOutbound?: OutboundHttpPort;
 }
 
 @Module({})
@@ -178,6 +190,9 @@ export class AppModule {
         AppTemplatesController,
         AppStacksController,
         AppStackDomainsController,
+        AppStackLinksController,
+        AdminNotificationsController,
+        NotificationsController,
       ],
       providers: [
         {
@@ -199,6 +214,11 @@ export class AppModule {
         {
           provide: DNS_LOOKUP_TOKEN,
           useValue: options.dnsLookup ?? createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
+        },
+        {
+          provide: NOTIFICATION_OUTBOUND_TOKEN,
+          useFactory: (dns: DnsLookup): OutboundHttpPort => options.notificationOutbound ?? createOutboundHttp(dns),
+          inject: [DNS_LOOKUP_TOKEN],
         },
         {
           provide: TLS_VALIDATOR_OPTIONS,
@@ -255,8 +275,13 @@ export class AppModule {
         AppStackBackupsService,
         AdminAppStacksService,
         AppStackDomainsService,
+        AppStackLinksApplier,
+        AppStackLinksService,
         AppStackRuntime,
         AppStackObserverService,
+        NotificationSenderService,
+        NotificationDispatchService,
+        NotificationSettingsService,
         // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).
         { provide: LogReadGate, useValue: new LogReadGate() },
         {

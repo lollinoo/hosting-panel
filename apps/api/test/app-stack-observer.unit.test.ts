@@ -5,6 +5,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackLinks,
   appStackRevisions,
   appStacks,
   appTemplates,
@@ -23,6 +24,7 @@ import {
 } from "@hosting-panel/database";
 import { APP_STACK_EXECUTOR_METHODS, type CertificateStatusReport, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { APP_STACK_LINK_RETRY_BATCH, AppStackLinksApplier } from "../src/app-stacks/app-stack-links-applier.js";
 import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.service.js";
 import {
   APP_STACK_OBSERVE_BATCH,
@@ -60,7 +62,8 @@ describe("AppStackObserverService (PGlite)", () => {
   let counter = 0;
   let calls: { method: string; stackId?: string }[];
   let failing: Set<string>;
-  let onStatusRead: () => void;
+  /** A promise it returns holds the read until it settles. */
+  let onStatusRead: () => void | Promise<void>;
   let cache: "running" | "stopped" | "missing";
   let appHealth: "healthy" | "unhealthy";
   let report: CertificateStatusReport;
@@ -98,8 +101,16 @@ describe("AppStackObserverService (PGlite)", () => {
       ),
       getAppStackStatus: (req: { stackId: string }) => {
         calls.push({ method: "getAppStackStatus", stackId: req.stackId });
-        onStatusRead();
-        return failing.has(req.stackId) ? Promise.reject(new Error("engine down")) : Promise.resolve(observation(req.stackId));
+        const held = onStatusRead();
+        const read = () => (failing.has(req.stackId) ? Promise.reject(new Error("engine down")) : Promise.resolve(observation(req.stackId)));
+        return held ? held.then(read) : read();
+      },
+      isRuntimeAvailable: true,
+      // Only an applier given to the test asks it: every link is attached.
+      syncAppStackLinks: (req: { stackId: string; consumerStackIds: string[] }) => {
+        calls.push({ method: "syncAppStackLinks", stackId: req.stackId });
+        const links = req.consumerStackIds.map((consumerStackId) => ({ consumerStackId, outcome: "connected" }));
+        return Promise.resolve({ container: true, links, disconnected: [] });
       },
       getCertificateStatus: () => {
         calls.push({ method: "getCertificateStatus" });
@@ -134,30 +145,31 @@ describe("AppStackObserverService (PGlite)", () => {
     routesHash?: string | null;
     domains?: readonly Partial<typeof appStackDomains.$inferInsert>[];
     ingress?: ApprovedStackPlan["ingress"];
+    /** Keeps only this component of the fixture plan, with no volume and no address: a database that can be linked. */
+    only?: string;
   }): Promise<Seeded> {
     counter += 1;
     const id = `stk_obs_${String(counter).padStart(3, "0")}`;
     const revisionId = `astr_obs_${String(counter)}`;
-    const plan: ApprovedStackPlan = {
-      ...PLAN,
-      stackId: id,
-      organizationId: ORG,
-      hostAllocationId: ALLOC,
-      templateVersionId: "atv_obs1",
-      revisionId,
-      // Another entry point: its component gets the health check every ingress target has.
-      ...(input.ingress
-        ? {
-            ingress: input.ingress,
-            components: PLAN.components.map((c) => {
-              const port = input.ingress!.find((i) => i.componentKey === c.key)?.port;
-              return c.healthcheck === null && port !== undefined
-                ? { ...c, healthcheck: { kind: "tcp" as const, port, intervalSeconds: 15, timeoutSeconds: 3 } }
-                : c;
-            }),
-          }
-        : {}),
-    };
+    const full = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
+    const plan: ApprovedStackPlan =
+      input.only !== undefined
+        ? { ...full, components: full.components.filter((c) => c.key === input.only), volumes: [], ingress: [] }
+        : {
+            ...full,
+            // Another entry point: its component gets the health check every ingress target has.
+            ...(input.ingress
+              ? {
+                  ingress: input.ingress,
+                  components: PLAN.components.map((c) => {
+                    const port = input.ingress!.find((i) => i.componentKey === c.key)?.port;
+                    return c.healthcheck === null && port !== undefined
+                      ? { ...c, healthcheck: { kind: "tcp" as const, port, intervalSeconds: 15, timeoutSeconds: 3 } }
+                      : c;
+                  }),
+                }
+              : {}),
+          };
     await db()
       .insert(appStacks)
       .values({
@@ -359,6 +371,26 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(statusReads()).toEqual(stacks.map((s) => s.id));
     });
 
+    it("queues no full pass while another one waits: a pass that runs long is followed by one pass, not one per tick", async () => {
+      const stack = await seedStack({ status: "running", observedAt: at(-1) });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      onStatusRead = () => held;
+      const o = observer();
+      const running = o.reconcileOnce(NOW);
+      await vi.waitFor(() => expect(statusReads()).toHaveLength(1));
+      const ticks = [o.reconcileOnce(at(1)), o.reconcileOnce(at(2)), o.reconcileOnce(at(3))];
+      onStatusRead = () => undefined;
+      release();
+      await Promise.all([running, ...ticks]);
+
+      expect(statusReads()).toEqual([stack.id, stack.id]);
+      // The pass that waited is the first one queued after the running one.
+      expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([at(1), at(1)]);
+    });
+
     it("a failed read records every component unknown at the current time", async () => {
       const stack = await seedStack({ status: "running", observedAt: NOW });
       failing.add(stack.id);
@@ -411,6 +443,54 @@ describe("AppStackObserverService (PGlite)", () => {
       expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([null, null]);
       expect((await domainRow("off.example.com")).dnsStatus).toBe("unchecked");
       expect(await db().select().from(operations)).toEqual([]);
+    });
+  });
+
+  describe("links pass", () => {
+    it("a database whose version cannot be linked moves behind the others, so a full batch of them never hides one that can", async () => {
+      const application = await seedStack({ status: "running" });
+      // The fixture plan has two components: nothing can be attached, the executor is not asked.
+      const unusable: string[] = [];
+      for (let i = 0; i < APP_STACK_LINK_RETRY_BATCH; i += 1) unusable.push((await seedStack({ status: "running" })).id);
+      const linkable = await seedStack({ status: "running", only: "cache" });
+      // The two-component databases waited longest, and fill the batch; one of them is also shown as connected elsewhere.
+      const link = (i: number, consumerStackId: string, providerStackId: string, state: "pending" | "active") =>
+        db()
+          .insert(appStackLinks)
+          .values({ id: `slnk_obs_${String(i)}`, organizationId: ORG, consumerStackId, providerStackId, state, updatedAt: at(-60 + i) });
+      for (const [i, providerStackId] of [...unusable, linkable.id].entries()) await link(i, application.id, providerStackId, "pending");
+      await link(99, (await seedStack({ status: "running" })).id, unusable[0]!, "active");
+      const links = new AppStackLinksApplier(client, executor(), { runtimeBackend: "local-simulator" } as ControlPlaneRuntimeConfig);
+
+      await links.retry();
+      await links.retry();
+
+      expect(calls.filter((c) => c.method === "syncAppStackLinks").map((c) => c.stackId)).toEqual([linkable.id]);
+      const rows = await db().select().from(appStackLinks);
+      expect(rows.filter((row) => row.providerStackId === linkable.id).map((row) => row.state)).toEqual(["active"]);
+      // Their rows are touched, not changed: nothing was detached, so a connected link stays connected.
+      const kept = rows.filter((row) => unusable.includes(row.providerStackId)).map((row) => [row.id, row.state]);
+      expect(Object.fromEntries(kept)).toEqual({
+        ...Object.fromEntries(unusable.map((_, i) => [`slnk_obs_${String(i)}`, "pending"])),
+        slnk_obs_99: "active",
+      });
+    });
+
+    it("an active link of a database whose version cannot be linked stays active when its links are applied", async () => {
+      const application = await seedStack({ status: "running" });
+      const database = await seedStack({ status: "running" });
+      await db()
+        .insert(appStackLinks)
+        .values({ id: "slnk_obs_kept", organizationId: ORG, consumerStackId: application.id, providerStackId: database.id, state: "active", updatedAt: at(-60) });
+      const links = new AppStackLinksApplier(client, executor(), { runtimeBackend: "local-simulator" } as ControlPlaneRuntimeConfig);
+
+      await links.apply(database.id);
+
+      expect(calls.filter((c) => c.method === "syncAppStackLinks")).toEqual([]);
+      const [row] = await db().select().from(appStackLinks).where(eq(appStackLinks.id, "slnk_obs_kept"));
+      expect(row!.state).toBe("active");
+      // Touched: it goes behind the databases that waited longer.
+      expect(row!.updatedAt.getTime()).toBeGreaterThan(at(-60).getTime());
     });
   });
 

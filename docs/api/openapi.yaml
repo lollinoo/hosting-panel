@@ -68,6 +68,8 @@ tags:
     description: Ports of the safe list and blocked addresses on the server's firewall (server administrator only)
   - name: Admin Updates
     description: Panel release, panel containers, site images and system packages (server administrator only)
+  - name: Notifications
+    description: Email, webhook and Telegram messages when an alert opens and closes, for the server and for a customer (ADR-0040)
   - name: Services
     description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
@@ -5837,7 +5839,9 @@ paths:
       description: >-
         Volumes are kept unless `destroyData` is true. A name that does not match exactly is refused
         (`VALIDATION_ERROR`, `details[0].field: confirmName`, `details[0].reason: confirmation_mismatch`) and nothing
-        is written. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        is written. A database that an application still uses is refused (`VALIDATION_ERROR`,
+        `details[0].field: links`, `details[0].reason: database_in_use`): disconnect it from every application first.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6110,7 +6114,9 @@ paths:
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
-        `path_target_removed` (`details[0].field: domains`). Volumes are never removed by an upgrade. Returns 422
+        `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
+        `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
+        Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
         false.
       parameters:
@@ -6160,7 +6166,9 @@ paths:
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
         refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
-        `path_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        `path_target_removed`. A database that an application still uses is refused with `database_in_use`
+        (`details[0].field: links`) when that revision is not one component with one port. Volume data is never
+        touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6746,6 +6754,130 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/links:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackLinks
+      summary: List the private links between a database and applications, seen from one of them (app.read)
+      description: >-
+        For a database (an application whose template has category `database`): where a connected application
+        reaches it, and the applications connected to it. For any other application: the databases it is connected
+        to, and the customer's databases it can still be connected to. Nothing here is reserved: the address works
+        only from a connected application, and no password is ever part of a link. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The links of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [App Stacks]
+      operationId: createAppStackLink
+      summary: Connect an application to a database of the same customer (app.update; audited as app.stack.link.create)
+      description: >-
+        `stackId` is the application. The link starts `pending` and becomes `active` once the database is attached to
+        the private network of the application; nothing is restarted, and a link that cannot be applied yet stays
+        `pending` and is retried. A database of another customer does not exist (404). Refused with `VALIDATION_ERROR`
+        when `stackId` is itself a database (`details[0].reason: database_as_application`), when the other application
+        is not a database (`not_a_database`) or is a database with more than one component or port
+        (`database_not_linkable`), and past 4 databases for an application or 8 applications for a database
+        (`details[0].field: links`, `details[0].reason: STACK_QUOTA_EXCEEDED`). No Idempotency-Key. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppStackLinkInput"
+      responses:
+        "201":
+          description: The links of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "The two are already connected (`ALREADY_EXISTS`, `details[0].reason: link_exists`), or one of them is being changed or deleted (`RESOURCE_LOCKED`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/links/{linkId}:
+    delete:
+      tags: [App Stacks]
+      operationId: removeAppStackLink
+      summary: Disconnect an application from a database (app.update; audited as app.stack.link.remove)
+      description: >-
+        `stackId` is either side of the link. The link is listed as `removing` until the database is detached from the
+        private network of the application, then it is gone; nothing is restarted. No Idempotency-Key. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackLinkIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "200":
+          description: The links left
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
         "400":
           $ref: "#/components/responses/ErrorResponse"
         "401":
@@ -9473,6 +9605,274 @@ paths:
           description: File operations temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/notifications:
+    get:
+      tags: [Notifications]
+      operationId: adminGetNotifications
+      summary: Notification channels of the server and the outcome of the last messages (server administrator only; never returns the address of a webhook, its signing key or a bot token)
+      description: >-
+        The channels tell every kind of alert of the server when an alert opens and when it closes (ADR-0040).
+        `deliveries` holds the last twenty messages of the last thirty days, newest first.
+      responses:
+        "200":
+          description: Notification settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/notifications/channels/{channel}:
+    put:
+      tags: [Notifications]
+      operationId: adminSaveNotificationChannel
+      summary: Create or change the channel of one kind (server administrator only)
+      description: >-
+        The body depends on `:channel`. A secret left out keeps the stored one: `url` and `signingKey` of a webhook
+        (`signingKey: null` removes the key), `botToken` of Telegram; the first save needs `url` or `botToken`.
+        A new webhook address is checked before it is stored. Turning a channel off forgets what it was told and
+        cancels the messages that wait; nothing is sent. Writes an audit row without the address, the key or the token.
+      parameters:
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerNotificationChannelInput"
+      responses:
+        "200":
+          description: Notification settings after the save
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "400":
+          description: >-
+            The body does not fit the channel, or (`VALIDATION_ERROR`, `details[0].message`) `address_required`,
+            `address_not_allowed` (the address resolves to one the panel never calls), `address_unreachable` (the name
+            does not resolve), `bot_token_required` or `group_not_available`
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: "`:channel` is not `email`, `webhook` or `telegram` (`NOT_FOUND`)"
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Notifications]
+      operationId: adminDeleteNotificationChannel
+      summary: Remove a channel with its stored secret, what it was told and the outcome of its messages (server administrator only)
+      parameters:
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      responses:
+        "200":
+          description: Notification settings after the removal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: "`:channel` is not `email`, `webhook` or `telegram`, or the channel is not saved (`NOT_FOUND`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/notifications/channels/{channel}/test:
+    post:
+      tags: [Notifications]
+      operationId: adminTestNotificationChannel
+      summary: Send a test message now on the channel as it is saved, also when it is off, and say whether it went (server administrator only)
+      description: >-
+        A mail channel sends one message to each of its addresses; the answer reports the first that did not go.
+        The outcome is kept with the other messages; a test is never tried again.
+      parameters:
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      responses:
+        "200":
+          description: Outcome of the test message
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationTestResult"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: "`:channel` is not `email`, `webhook` or `telegram`, or the channel is not saved (`NOT_FOUND`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The mail channel has nobody to write to (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: A test message was sent on this channel less than thirty seconds ago (`RATE_LIMITED`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/notifications:
+    get:
+      tags: [Notifications]
+      operationId: organizationGetNotifications
+      summary: Notification channels of a customer and the outcome of the last messages (notification.read; never returns the address of a webhook, its signing key or a bot token)
+      description: >-
+        The channels tell the alerts of the customer's own sites when an alert opens and when it closes (ADR-0040).
+        `deliveries` holds the last twenty messages of the last thirty days, newest first.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      responses:
+        "200":
+          description: Notification settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: The caller is a member of the organization without the permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: The organization is not the caller's (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/notifications/channels/{channel}:
+    put:
+      tags: [Notifications]
+      operationId: organizationSaveNotificationChannel
+      summary: Create or change the channel of one kind (notification.manage)
+      description: >-
+        The body depends on `:channel`. A secret left out keeps the stored one: `url` and `signingKey` of a webhook
+        (`signingKey: null` removes the key), `botToken` of Telegram; the first save needs `url` or `botToken`.
+        A new webhook address is checked before it is stored. Turning a channel off forgets what it was told and
+        cancels the messages that wait; nothing is sent. Writes an audit row without the address, the key or the token.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerNotificationChannelInput"
+      responses:
+        "200":
+          description: Notification settings after the save
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "400":
+          description: >-
+            The body does not fit the channel, or (`VALIDATION_ERROR`, `details[0].message`) `address_required`,
+            `address_not_allowed` (the address resolves to one the panel never calls), `address_unreachable` (the name
+            does not resolve), `bot_token_required` or `group_not_available`
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: The caller is a member of the organization without the permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: The organization is not the caller's, or `:channel` is not `email`, `webhook` or `telegram` (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Notifications]
+      operationId: organizationDeleteNotificationChannel
+      summary: Remove a channel with its stored secret, what it was told and the outcome of its messages (notification.manage)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      responses:
+        "200":
+          description: Notification settings after the removal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationSettingsDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: The caller is a member of the organization without the permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: The organization is not the caller's, or `:channel` is not `email`, `webhook` or `telegram`, or the channel is not saved (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/notifications/channels/{channel}/test:
+    post:
+      tags: [Notifications]
+      operationId: organizationTestNotificationChannel
+      summary: Send a test message now on the channel as it is saved, also when it is off, and say whether it went (notification.manage)
+      description: >-
+        A mail channel sends one message to each of its addresses; the answer reports the first that did not go.
+        The outcome is kept with the other messages; a test is never tried again.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/NotificationChannelParam"
+      responses:
+        "200":
+          description: Outcome of the test message
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/NotificationTestResult"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: The caller is a member of the organization without the permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: The organization is not the caller's, or `:channel` is not `email`, `webhook` or `telegram`, or the channel is not saved (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The mail channel has nobody to write to (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: A test message was sent on this channel less than thirty seconds ago (`RATE_LIMITED`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -9498,6 +9898,13 @@ components:
       required: true
       schema:
         type: string
+    NotificationChannelParam:
+      in: path
+      name: channel
+      required: true
+      schema:
+        type: string
+        enum: [email, webhook, telegram]
     HostIdParam:
       in: path
       name: hostId
@@ -9574,6 +9981,12 @@ components:
     AppStackIdParam:
       in: path
       name: stackId
+      required: true
+      schema:
+        type: string
+    AppStackLinkIdParam:
+      in: path
+      name: linkId
       required: true
       schema:
         type: string
@@ -14093,7 +14506,7 @@ components:
 
     AppStackSummaryDto:
       type: object
-      required: [id, name, status, templateId, templateName, templateVersionNumber, componentCount, unhealthyCount, primaryHostname, updatedAt]
+      required: [id, name, status, templateId, templateName, templateVersionNumber, installed, componentCount, unhealthyCount, primaryHostname, updatedAt]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -14108,6 +14521,24 @@ components:
         templateVersionNumber:
           type: integer
           minimum: 1
+        installed:
+          type: object
+          nullable: true
+          description: >-
+            The revision that runs (the applied one) whenever it is not the current one: while a change runs; after a
+            change that failed once its components were being created; after an upgrade or a rollback that failed before
+            that but was not taken back, because a web address now points at a part only the new version has; after a
+            deploy with new settings that failed before its components were created (a deploy is not taken back). The
+            `status` of the detail then follows the components of this revision. `null` when the current revision is the
+            one that runs, and when none ever ran
+          required: [revisionNumber, templateVersionNumber]
+          properties:
+            revisionNumber:
+              type: integer
+              minimum: 1
+            templateVersionNumber:
+              type: integer
+              minimum: 1
         componentCount:
           type: integer
           minimum: 0
@@ -14265,7 +14696,10 @@ components:
             rollback:
               type: object
               nullable: true
-              description: The revision before the current one, if any
+              description: >-
+                The way back: the newest earlier revision that ran (a deploy, an upgrade or a rollback of it succeeded,
+                or failed only at publishing its routes once its components were healthy) and whose plan is not the
+                current one; `null` if none
               required: [revisionId, revisionNumber, templateVersionNumber]
               properties:
                 revisionId:
@@ -14474,6 +14908,93 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppStackDomainPathRoute"
+
+    CreateAppStackLinkInput:
+      type: object
+      additionalProperties: false
+      required: [databaseStackId]
+      properties:
+        databaseStackId:
+          $ref: "#/components/schemas/AppEntityId"
+
+    AppStackLinkConnectionDto:
+      type: object
+      description: Where a connected application reaches the database. It works only from a connected application.
+      required: [host, port]
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+
+    AppStackLinkDto:
+      type: object
+      required: [id, state, createdAt, databaseStackId, databaseName, databaseKind, applicationStackId, applicationName, connection]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        state:
+          type: string
+          enum: [pending, active, removing]
+          description: "`pending`: not applied on the server yet. `removing`: a disconnection the server has not confirmed yet"
+        createdAt:
+          type: string
+          format: date-time
+        databaseStackId:
+          $ref: "#/components/schemas/AppEntityId"
+        databaseName:
+          type: string
+        databaseKind:
+          type: string
+          description: The name of the database's template
+        applicationStackId:
+          $ref: "#/components/schemas/AppEntityId"
+        applicationName:
+          type: string
+        connection:
+          nullable: true
+          description: "`null` when the database is no longer something to connect to"
+          allOf:
+            - $ref: "#/components/schemas/AppStackLinkConnectionDto"
+
+    AppStackLinksDto:
+      type: object
+      required: [stackId, role, connection, links, candidates, limit]
+      properties:
+        stackId:
+          $ref: "#/components/schemas/AppEntityId"
+        role:
+          type: string
+          enum: [database, application]
+        connection:
+          nullable: true
+          description: "A database's own address; `null` for an application"
+          allOf:
+            - $ref: "#/components/schemas/AppStackLinkConnectionDto"
+        links:
+          type: array
+          description: "For a database the applications that use it; for an application the databases it uses"
+          items:
+            $ref: "#/components/schemas/AppStackLinkDto"
+        candidates:
+          type: array
+          description: "For an application, the customer's databases it can still be connected to; always empty for a database"
+          items:
+            type: object
+            required: [stackId, name, kind]
+            properties:
+              stackId:
+                $ref: "#/components/schemas/AppEntityId"
+              name:
+                type: string
+              kind:
+                type: string
+        limit:
+          type: integer
+          minimum: 1
+          description: The most links this side can have (4 for an application, 8 for a database)
 
     AppStackPlanDiffDto:
       type: object
@@ -16238,3 +16759,284 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OperationTimelineStep"
+
+    NotificationGroup:
+      type: string
+      description: A group of alert kinds; `server` exists only in the server's settings
+      enum: [availability, backups, certificates, server]
+
+    NotificationProblem:
+      type: string
+      description: Why a message did not go; a closed list, never the other side's words
+      enum: [mail_not_configured, mail_refused, address_not_allowed, unreachable, redirect, rejected, server_error, expired, channel_changed]
+
+    ServerNotificationChannelInput:
+      description: The body that fits `:channel` in the server's settings
+      oneOf:
+        - $ref: "#/components/schemas/ServerEmailNotificationChannelInput"
+        - $ref: "#/components/schemas/WebhookNotificationChannelInput"
+        - $ref: "#/components/schemas/TelegramNotificationChannelInput"
+
+    CustomerNotificationChannelInput:
+      description: The body that fits `:channel` in a customer's settings
+      oneOf:
+        - $ref: "#/components/schemas/CustomerEmailNotificationChannelInput"
+        - $ref: "#/components/schemas/WebhookNotificationChannelInput"
+        - $ref: "#/components/schemas/TelegramNotificationChannelInput"
+
+    ServerEmailNotificationChannelInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, groups, recipients]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            type: string
+            format: email
+            maxLength: 254
+
+    CustomerEmailNotificationChannelInput:
+      type: object
+      description: The mail of a customer goes to the owners of the customer's account; there is no address to type
+      additionalProperties: false
+      required: [enabled, groups]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+
+    WebhookNotificationChannelInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, groups]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        url:
+          type: string
+          maxLength: 1024
+          description: >-
+            Write-only. An `https://` address with a DNS name, without user name or password; every address the name
+            resolves to must be public and not one of this server's own. Left out, the stored address stays.
+        signingKey:
+          type: string
+          nullable: true
+          pattern: "^[\\x21-\\x7e]{16,128}$"
+          description: >-
+            Write-only. With a key, every request carries `X-Hosting-Panel-Signature: t=<seconds>,v1=<hex HMAC-SHA256 of
+            "<seconds>.<body>">`. Left out, the stored key stays; `null` removes it.
+
+    TelegramNotificationChannelInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, groups, chat]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        botToken:
+          type: string
+          pattern: "^\\d{6,12}:[A-Za-z0-9_-]{30,50}$"
+          description: Write-only. Left out, the stored one stays.
+        chat:
+          type: string
+          pattern: "^(?:-?\\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$"
+          description: The numeric id of the chat, or the `@name` of a public channel
+
+    NotificationEmailChannelDto:
+      type: object
+      required: [enabled, groups, updatedAt, lastTestedAt, recipients]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        updatedAt:
+          type: string
+          format: date-time
+        lastTestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        recipients:
+          type: array
+          nullable: true
+          description: null in a customer's settings, where the mail goes to the owners of the account
+          items:
+            type: string
+
+    NotificationWebhookChannelDto:
+      type: object
+      required: [enabled, groups, updatedAt, lastTestedAt, host, signed]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        updatedAt:
+          type: string
+          format: date-time
+        lastTestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        host:
+          type: string
+          description: The host name of the address; the rest of the address is never returned
+        signed:
+          type: boolean
+          description: Whether a signing key is stored
+
+    NotificationTelegramChannelDto:
+      type: object
+      required: [enabled, groups, updatedAt, lastTestedAt, chat]
+      properties:
+        enabled:
+          type: boolean
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        updatedAt:
+          type: string
+          format: date-time
+        lastTestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        chat:
+          type: string
+
+    NotificationDeliveryDto:
+      type: object
+      required: [id, channel, createdAt, finishedAt, status, problem, httpStatus, attempts, test, opened, closed, recipient]
+      properties:
+        id:
+          type: string
+          description: The id a webhook receives in its body; the same at every try of the same message
+        channel:
+          type: string
+          enum: [email, webhook, telegram]
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          description: "`pending` is tried again after 2, 10 and 30 minutes; after that, or after one hour, it is `failed`"
+          enum: [pending, sent, failed]
+        problem:
+          allOf:
+            - $ref: "#/components/schemas/NotificationProblem"
+          nullable: true
+        httpStatus:
+          type: integer
+          minimum: 100
+          maximum: 599
+          nullable: true
+        attempts:
+          type: integer
+          minimum: 0
+        test:
+          type: boolean
+        opened:
+          type: integer
+          minimum: 0
+          description: How many alerts the message says open
+        closed:
+          type: integer
+          minimum: 0
+          description: How many alerts the message says no longer open
+        recipient:
+          type: string
+          nullable: true
+          description: The address a mail went to; null for the other channels
+
+    NotificationSettingsDto:
+      type: object
+      required: [audience, mailReady, groups, channels, deliveries]
+      properties:
+        audience:
+          type: string
+          enum: [server, customer]
+        mailReady:
+          type: boolean
+          description: Whether sending mail is set up; without it the email channel can be saved but nothing goes out
+        groups:
+          type: array
+          description: The groups this scope can turn on
+          items:
+            $ref: "#/components/schemas/NotificationGroup"
+        channels:
+          type: object
+          required: [email, webhook, telegram]
+          properties:
+            email:
+              allOf:
+                - $ref: "#/components/schemas/NotificationEmailChannelDto"
+              nullable: true
+            webhook:
+              allOf:
+                - $ref: "#/components/schemas/NotificationWebhookChannelDto"
+              nullable: true
+            telegram:
+              allOf:
+                - $ref: "#/components/schemas/NotificationTelegramChannelDto"
+              nullable: true
+        deliveries:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/NotificationDeliveryDto"
+
+    NotificationTestResult:
+      type: object
+      required: [outcome, problem, httpStatus]
+      properties:
+        outcome:
+          type: string
+          enum: [sent, failed]
+        problem:
+          allOf:
+            - $ref: "#/components/schemas/NotificationProblem"
+          nullable: true
+        httpStatus:
+          type: integer
+          minimum: 100
+          maximum: 599
+          nullable: true

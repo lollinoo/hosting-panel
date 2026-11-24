@@ -3,6 +3,7 @@ import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackBackups } from "@/components/app-stacks/app-stack-backups";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
+import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
@@ -18,6 +19,7 @@ import {
   fetchServerOrgAppStackBackups,
   fetchServerOrgAppStackDeployments,
   fetchServerOrgAppStackDomains,
+  fetchServerOrgAppStackLinks,
 } from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
@@ -48,14 +50,17 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains, backups] = await Promise.all([
+  const [deployments, domains, backups, links] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
     fetchServerOrgAppStackBackups(orgId, stackId),
+    fetchServerOrgAppStackLinks(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
   const ids = { orgId, stackId, csrfToken };
+  // The version that runs: after a change that failed once its components were being created, not the one asked for.
+  const shown = s.installed ?? { templateVersionNumber: s.templateVersionNumber, revisionNumber: s.revisionNumber };
 
   return (
     <div className="space-y-8">
@@ -66,8 +71,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
           </h1>
           <StackStatusBadge status={s.status} m={m} />
         </div>
-        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: s.templateVersionNumber })}</p>
-        {s.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: s.revisionNumber })}</p>}
+        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: shown.templateVersionNumber })}</p>
+        {shown.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: shown.revisionNumber })}</p>}
+        {s.installed && s.activeOperationId === null && s.revisionNumber !== null && (
+          <p className="text-sm">{format(d.notInstalledLine, { version: s.templateVersionNumber, release: s.revisionNumber })}</p>
+        )}
         {s.status === "unknown" && (
           <Alert variant="warning" role="status">
             <AlertTitle>{m.apps.status.unknown}</AlertTitle>
@@ -97,6 +105,9 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       <Section id="settings" title={d.section.settings}>
         <AppStackSettings parameters={s.parameters} m={m} />
         <AppStackSecrets {...ids} secrets={s.secretParameters} />
+      </Section>
+      <Section id="links" title={links?.role === "database" ? d.section.connection : d.section.links}>
+        <AppStackLinks {...ids} initial={links} />
       </Section>
       <Section id="domains" title={d.section.domains}>
         <AppStackDomains {...ids} initial={domains} ingress={s.ingress} pathTargets={s.pathTargets} pending={s.routesPending} />

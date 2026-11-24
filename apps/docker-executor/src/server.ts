@@ -8,6 +8,7 @@ import {
   AppStackComponentsRemoveIpcRequestSchema,
   AppStackCreateIpcRequestSchema,
   AppStackImageResolveIpcRequestSchema,
+  AppStackLinksIpcRequestSchema,
   AppStackLogsIpcRequestSchema,
   AppStackPlanIpcRequestSchema,
   AppStackPullIpcRequestSchema,
@@ -817,6 +818,8 @@ export class DockerExecutorIpcServer {
           return post(AppStackRemoveIpcRequestSchema, "remove", (s, req) => s.removeAppStack(req));
         case "/v1/app-stacks/remove-components":
           return post(AppStackComponentsRemoveIpcRequestSchema, "remove-components", (s, req) => s.removeAppStackComponents(req));
+        case "/v1/app-stacks/links":
+          return post(AppStackLinksIpcRequestSchema, "links", (s, req) => s.syncAppStackLinks(req));
         default:
           return null;
       }

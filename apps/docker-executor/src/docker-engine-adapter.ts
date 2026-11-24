@@ -58,6 +58,8 @@ import {
   type AppStackCreateIpcResult,
   type AppStackImageResolveIpcRequest,
   type AppStackImageResolveIpcResult,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackTerminalOpenIpcRequest,
@@ -1542,6 +1544,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
 
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
     return this.appStackEngine.removeAppStackComponents(req);
+  }
+
+  public syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    return this.appStackEngine.syncAppStackLinks(req);
   }
 
   public getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {

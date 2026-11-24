@@ -8,6 +8,8 @@ import {
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
+  type AppStackLinkDto,
+  type AppStackLinksDto,
 } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
@@ -62,6 +64,7 @@ import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
 import { APP_STACK_LOG_TAIL, AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
+import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 
 const NOW = "2026-11-22T10:00:00.000Z";
 const ORG = "org_a1";
@@ -95,6 +98,7 @@ const DETAIL: AppStackDetailDto = {
   activeOperationId: null,
   platformWork: null,
   revisionNumber: 3,
+  installed: null,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
     { key: "cache", health: "unhealthy", healthObservedAt: null, dependsOn: [], ingress: false, cpuMilli: 250, memoryBytes: String(128 * MIB) },
@@ -155,6 +159,29 @@ const BACKUPS: AppStackBackupsDto = {
   unavailableReason: null,
   goBackTo: null,
 };
+const LINK: AppStackLinkDto = {
+  id: "slnk_1",
+  state: "active",
+  createdAt: NOW,
+  databaseStackId: "stk_db1",
+  databaseName: "orders-db",
+  databaseKind: "Database MariaDB",
+  applicationStackId: "stk_a1",
+  applicationName: "team-notes",
+  connection: { host: "stk-db1-0123456789abcdef0123456789", port: 3306 },
+};
+const LINKS: AppStackLinksDto = {
+  stackId: "stk_a1",
+  role: "application",
+  connection: null,
+  links: [LINK],
+  candidates: [
+    { stackId: "stk_db2", name: "cache", kind: "Archivio Valkey" },
+    { stackId: "stk_db3", name: "reports-db", kind: "Database PostgreSQL" },
+  ],
+  limit: 4,
+};
+const DATABASE_LINKS: AppStackLinksDto = { stackId: "stk_db1", role: "database", connection: LINK.connection, links: [LINK], candidates: [], limit: 8 };
 
 const decode = (s: string) => s.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 const html = (node: ReactNode, m: Messages = en) =>
@@ -213,7 +240,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   loc.value = "en";
   mockData.getCustomerContext.mockResolvedValue(context());
-  answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]), [`${UP}/backups`]: ok(BACKUPS) });
+  answer({
+    [UP]: ok(DETAIL),
+    [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS),
+    [`${UP}/domains`]: ok([DOMAIN]),
+    [`${UP}/backups`]: ok(BACKUPS),
+    [`${UP}/links`]: ok(LINKS),
+  });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -263,15 +296,16 @@ describe("detail page", () => {
     expect(await page()).toMatch(open);
   });
 
-  it("reads the application, its history, its addresses and its backups and renders every section in order", async () => {
+  it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
     const h = await page();
-    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`]);
+    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`]);
     expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
     expect(h).toContain(en.apps.status.degraded);
     expect(h).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 2 }));
     expect(h).toContain(format(en.apps.detail.releaseLine, { n: 3 }));
     const s = en.apps.detail.section;
-    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.domains, s.data, s.backups, s.resources, s.history, s.danger]);
+    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.links, s.domains, s.data, s.backups, s.resources, s.history, s.danger]);
+    expect(h).toContain("orders-db");
     for (const id of [...h.matchAll(/aria-labelledby="([^"]+)"/g)].map((x) => x[1])) expect(h).toContain(`id="${id}"`);
     // the backups section: its explanation once, the button, one row with a restore button, no address of a route
     expect(h.split(en.apps.backups.intro)).toHaveLength(2);
@@ -309,10 +343,11 @@ describe("detail page", () => {
     expect(d).not.toContain(itMsgs.apps.detail.releaseLine.replace(" {n}", ""));
   });
 
-  it("a failed history, address or backup read shows the section error and the page still renders", async () => {
+  it("a failed history, address, backup or database read shows the section error and the page still renders", async () => {
     answer({ [UP]: ok(DETAIL) });
     const h = await page();
-    expect(h.split(en.apps.detail.sectionError)).toHaveLength(4);
+    expect(h.split(en.apps.detail.sectionError)).toHaveLength(5);
+    expect(h2s(h)).toContain(en.apps.detail.section.links);
     expect(h).not.toContain(en.apps.backups.create);
     expect(h).toContain(en.apps.detail.section.danger);
   });
@@ -325,6 +360,28 @@ describe("detail page", () => {
     const published = await page();
     expect(published).toContain(en.apps.domains.options.summary.protected);
     expect(published).not.toContain(en.apps.domains.options.summary.pending);
+  });
+
+  it("a change that failed once its components were created: the page names the version installed and the one that was not", async () => {
+    const failed: AppStackDetailDto = { ...DETAIL, status: "failed", installed: { revisionNumber: 1, templateVersionNumber: 1 } };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      answer({ [UP]: ok(failed), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]) });
+      const h = await page();
+      expect(h).toContain(format(m.apps.detail.versionLine, { name: "Notes", n: 1 }));
+      expect(h).toContain(format(m.apps.detail.releaseLine, { n: 1 }));
+      expect(h).toContain(format(m.apps.detail.notInstalledLine, { version: 2, release: 3 }));
+      expect(h).not.toContain(format(m.apps.detail.versionLine, { name: "Notes", n: 2 }));
+    }
+    // While a change runs, the page names what is installed and says nothing failed.
+    loc.value = "en";
+    answer({ [UP]: ok({ ...failed, status: "updating", activeOperationId: "op_8" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    const busy = await page();
+    expect(busy).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 1 }));
+    expect(busy).not.toContain(format(en.apps.detail.notInstalledLine, { version: 2, release: 3 }));
+    // With what is installed being the current version, there is nothing to say.
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).not.toContain(format(en.apps.detail.notInstalledLine, { version: 2, release: 3 }));
   });
 
   it("an operation in progress is followed on the page", async () => {
@@ -673,6 +730,159 @@ describe("web addresses", () => {
     expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "remove:sdom_1", "DELETE", `${BASE}/domains/sdom_1`, {});
     expect(sets).toContainEqual([0, []]);
     expect(sets).toContainEqual([5, null]);
+  });
+});
+
+describe("databases", () => {
+  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: LINKS, ...over });
+  // The button of a row; the destructive one is the confirmation inside the dialog.
+  const rowButtons = (tree: unknown) => buttons(tree, en.apps.links.disconnect).filter((b) => b.props.variant !== "destructive");
+  const quota = format(en.apps.links.limitReached, { databases: 4, applications: 8 });
+
+  it("an application lists the databases it uses, where each is reached and its state, and offers the others", () => {
+    const h = html(callHooks(AppStackLinks, props()).out);
+    for (const t of ["orders-db", "Database MariaDB", "stk-db1-0123456789abcdef0123456789", "3306", en.apps.links.state.active, en.apps.links.connectHint]) {
+      expect(h).toContain(t);
+    }
+    expect(h).toContain('href="/apps/stk_db1"');
+    expect(h).toMatch(/<label[^>]*for="app-link-database"/);
+    expect(h).toContain(format(en.apps.links.candidate, { name: "cache", kind: "Archivio Valkey" }));
+    expect(h).toContain(format(en.apps.links.candidate, { name: "reports-db", kind: "Database PostgreSQL" }));
+    expect(rowButtons(callHooks(AppStackLinks, props()).out)).toHaveLength(1);
+    for (const absent of [en.apps.links.addressTitle, en.apps.links.usedByTitle, en.apps.links.pendingHint, en.apps.links.limit.replace("{n}", "4")]) {
+      expect(h).not.toContain(absent);
+    }
+    expect(h).not.toMatch(/hp_app|hp_appnet|sha256|password/i);
+  });
+
+  it("a database shows where it is reached and the applications that use it, and has no connect form", () => {
+    const h = html(callHooks(AppStackLinks, props({ stackId: "stk_db1", initial: DATABASE_LINKS })).out);
+    for (const t of [en.apps.links.addressTitle, "stk-db1-0123456789abcdef0123456789", "3306", en.apps.links.addressHint, en.apps.links.usedByTitle, "team-notes", en.apps.links.usedByHint]) {
+      expect(h).toContain(t);
+    }
+    expect(h).toContain('href="/apps/stk_a1"');
+    expect(h).not.toContain("app-link-database");
+    expect(h).not.toContain(en.apps.links.connect);
+    expect(h).not.toContain("Database MariaDB");
+
+    const unused = html(callHooks(AppStackLinks, props({ initial: { ...DATABASE_LINKS, links: [] } })).out);
+    expect(unused).toContain(en.apps.links.usedByNone);
+    const closed = html(callHooks(AppStackLinks, props({ initial: { ...DATABASE_LINKS, connection: null, links: [] } })).out);
+    expect(closed).toContain(en.apps.links.notLinkable);
+    expect(closed).not.toContain(en.apps.links.addressHint);
+  });
+
+  it("null → section error; no link → the empty line; four links → the limit and no form; no other database → the catalog", () => {
+    expect(html(callHooks(AppStackLinks, props({ initial: null })).out)).toContain(en.apps.detail.sectionError);
+    expect(html(callHooks(AppStackLinks, props({ initial: { ...LINKS, links: [] } })).out)).toContain(en.apps.links.none);
+    const four = Array.from({ length: 4 }, (_, i) => ({ ...LINK, id: `slnk_${i}`, databaseStackId: `stk_db${i}` }));
+    const full = html(callHooks(AppStackLinks, props({ initial: { ...LINKS, links: four } })).out);
+    expect(full).toContain(format(en.apps.links.limit, { n: 4 }));
+    expect(full).not.toContain("app-link-database");
+    const alone = html(callHooks(AppStackLinks, props({ initial: { ...LINKS, candidates: [] } })).out);
+    expect(alone).toContain(en.apps.links.noCandidates);
+    expect(alone).toMatch(new RegExp(`<a[^>]*href="/apps/new"[^>]*>${en.apps.links.catalog}<`));
+    expect(alone).not.toContain("app-link-database");
+  });
+
+  it("a link that waits says it becomes active by itself; one being disconnected offers no button; no address reads as a dash", () => {
+    const waiting = { ...LINKS, links: [{ ...LINK, state: "pending" as const }] };
+    const w = html(callHooks(AppStackLinks, props({ initial: waiting })).out);
+    expect(w).toContain(en.apps.links.state.pending);
+    expect(w).toContain(en.apps.links.pendingHint);
+    const leaving = { ...LINKS, links: [{ ...LINK, state: "removing" as const, connection: null }] };
+    const { out } = callHooks(AppStackLinks, props({ initial: leaving }));
+    expect(html(out)).toContain(en.apps.links.state.removing);
+    expect(html(out)).toContain(`<p class="text-muted-foreground">${en.apps.links.noAddress}</p>`);
+    expect(rowButtons(out)).toEqual([]);
+    expect(html(callHooks(AppStackLinks, props({ initial: leaving }), itMsgs).out, itMsgs)).toContain("Scollegamento in corso");
+  });
+
+  it("connect sends the chosen database, the first one when none was chosen; the answer replaces the section", async () => {
+    const next = { ...LINKS, links: [LINK, { ...LINK, id: "slnk_2", databaseStackId: "stk_db3", databaseName: "reports-db", databaseKind: "Database PostgreSQL" }], candidates: [LINKS.candidates[0]!] };
+    keyedSend.mockResolvedValue({ ok: true, data: { data: next } });
+    const chosen = callHooks(AppStackLinks, props(), en, { 1: "stk_db3" });
+    await submit(chosen.out);
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "connect:stk_db3", "POST", `${BASE}/links`, { databaseStackId: "stk_db3" });
+    expect(chosen.sets).toContainEqual([0, next]);
+    expect(chosen.sets).toContainEqual([1, ""]);
+    expect(router.refresh).toHaveBeenCalledOnce();
+
+    keyedSend.mockClear();
+    // A choice that is no longer offered falls back to the first one, like no choice at all.
+    for (const state of [{}, { 1: "stk_gone" }]) await submit(callHooks(AppStackLinks, props(), en, state).out);
+    expect(keyedSend.mock.calls.map((c) => c[5])).toEqual([{ databaseStackId: "stk_db2" }, { databaseStackId: "stk_db2" }]);
+  });
+
+  it("an answer that is not the section is not shown, and nothing is sent while a call is running", async () => {
+    keyedSend.mockResolvedValue({ ok: true, data: { data: { ...LINKS, role: "proxy" } } });
+    const odd = callHooks(AppStackLinks, props());
+    await submit(odd.out);
+    expect(odd.sets.filter(([slot]) => slot === 0)).toEqual([]);
+    expect(router.refresh).toHaveBeenCalledOnce();
+
+    keyedSend.mockClear();
+    await submit(callHooks(AppStackLinks, props(), en, { 2: true }).out);
+    expect(keyedSend).not.toHaveBeenCalled();
+  });
+
+  it("the limit of links has its own sentence; the other refusals read as their reason", async () => {
+    for (const [refusal, text] of [
+      [{ code: "VALIDATION_ERROR", reason: "STACK_QUOTA_EXCEEDED" }, quota],
+      [{ code: "ALREADY_EXISTS", reason: "link_exists" }, en.apps.reasons.link_exists],
+      [{ code: "VALIDATION_ERROR", reason: "database_not_linkable" }, en.apps.reasons.database_not_linkable],
+      [{ code: "VALIDATION_ERROR", reason: "not_a_database" }, en.apps.reasons.not_a_database],
+      [{ code: "VALIDATION_ERROR", reason: "database_as_application" }, en.apps.reasons.database_as_application],
+      [{ code: "RESOURCE_LOCKED", reason: "deploying" }, format(en.apps.reasons.status, { status: en.apps.status.deploying })],
+    ] as const) {
+      keyedSend.mockResolvedValue({ ok: false, ...refusal });
+      const { out, sets } = callHooks(AppStackLinks, props());
+      await submit(out);
+      expect(sets, refusal.reason).toContainEqual([3, text]);
+      expect(sets.filter(([slot]) => slot === 0), refusal.reason).toEqual([]);
+    }
+    expect(quota).not.toBe(en.apps.reasons.STACK_QUOTA_EXCEEDED);
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it("disconnect asks first and names both sides, then deletes the link and shows the answer", async () => {
+    const closed = callHooks(AppStackLinks, props());
+    (rowButtons(closed.out)[0]!.props.onClick as () => void)();
+    expect(closed.sets).toEqual([[4, "slnk_1"]]);
+    expect(keyedSend).not.toHaveBeenCalled();
+
+    const { out, sets } = callHooks(AppStackLinks, props(), en, { 4: "slnk_1" });
+    const h = html(out);
+    expect(h).toContain(en.apps.links.disconnectTitle);
+    expect(h).toContain(format(en.apps.links.disconnectBody, { application: "team-notes", database: "orders-db" }));
+    const after = { ...LINKS, links: [], candidates: [{ stackId: "stk_db1", name: "orders-db", kind: "Database MariaDB" }, ...LINKS.candidates] };
+    keyedSend.mockResolvedValue({ ok: true, data: { data: after } });
+    const confirm = buttons(out, en.apps.links.disconnect).find((b) => b.props.variant === "destructive");
+    await (confirm!.props.onClick as () => Promise<void>)();
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "disconnect:slnk_1", "DELETE", `${BASE}/links/slnk_1`, {});
+    expect(sets).toContainEqual([0, after]);
+    expect(sets).toContainEqual([4, null]);
+    expect(html(callHooks(AppStackLinks, props()).out)).not.toContain(en.apps.links.disconnectTitle);
+  });
+
+  it("a refresh of the page brings the fresh answer; a failed read keeps what is shown", () => {
+    const fresh = { ...LINKS, links: [{ ...LINK, state: "active" as const }] };
+    const stale = { ...LINKS, links: [{ ...LINK, state: "pending" as const }] };
+    const { sets, effects } = callHooks(AppStackLinks, props({ initial: fresh }), en, { 0: stale });
+    for (const f of effects) f();
+    expect(sets).toContainEqual([0, fresh]);
+    const failed = callHooks(AppStackLinks, props({ initial: null }), en, { 0: stale });
+    for (const f of failed.effects) f();
+    expect(failed.sets).toEqual([]);
+  });
+
+  it("the page names the section by what the application is: «Databases» or «Connection»", async () => {
+    expect(h2s(await page())).toContain(en.apps.detail.section.links);
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/links`]: ok(DATABASE_LINKS) });
+    const h = await page();
+    expect(h2s(h)).toContain(en.apps.detail.section.connection);
+    expect(h2s(h)).not.toContain(en.apps.detail.section.links);
+    expect(h).toContain(en.apps.links.addressTitle);
   });
 });
 

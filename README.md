@@ -62,6 +62,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Applicazioni multi-servizio (clienti, voce «Applicazioni»)** | ✅ **Attivo su linux-systemd** | `applicationStacksAvailable: true`: installazione di uno stack da un modello pubblicato su un'allocazione Dedicated, solo HTTP, TLS solo Let's Encrypt (`ADR-0035`) |
 | **Porte TCP/UDP pubbliche degli stack** | ⛔ **Non disponibile** | `stackPublicPortsAvailable: false` (fase successiva, `ADR-0035` §8.2) |
 | **Build da Git** | ⛔ **Non disponibile** | `gitBuildsAvailable: false` (fase successiva, `ADR-0035` §8.2) |
+| **Notifiche degli Avvisi (Email, Webhook, Telegram)** | ✅ **Operativo** | Nessun flag: non parte nulla finché qualcuno non accende un canale nella pagina **Notifiche**, dell'amministratore o di un cliente; una consegna vera non è ancora stata provata su un server installato (`ADR-0040`) |
 
 ---
 
@@ -89,7 +90,7 @@ hosting-panel/
 │   ├── architecture/             # Specifica HCP-SPEC-003 Fase 2, audit Fase 1, diagrammi ER e confini di fiducia
 │   │   ├── adr/                  # Registro delle 32 Architectural Decision Records (ADR 0001..0032; ADR-011 OPEN)
 │   │   └── diagrams/             # Diagramma di flusso trust boundaries e schema ER
-│   ├── runbooks/                 # Procedure operative in inglese: certificati caricati a mano e destinazioni di backup
+│   ├── runbooks/                 # Procedure operative in inglese: certificati caricati a mano e destinazioni di backup, notifiche
 │   ├── security/                 # Matrice delle minacce, outage Control Plane (AC-F1-08), report di collaudo e di audit
 │   └── api/                      # Specifica contrattuale OpenAPI 3.1
 ├── infra/
@@ -149,7 +150,7 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.12.0
+V=0.12.1
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -227,7 +228,7 @@ I siti inviano email attraverso un relay Postfix del pannello che inoltra a un f
 - **Coda**: se il fornitore non risponde i messaggi restano in coda fino a 5 giorni. Dopo un riavvio del server con il pannello fermo i messaggi restano in coda e vengono consegnati (coda svuotata) quando il pannello torna e riapplica la password.
 - **Aggiornamento alla 0.5.0**: ogni sito in esecuzione viene **riavviato una volta** (pochi secondi ciascuno); i siti fermi sono aggiornati dopo il successivo avvio.
 - **Plugin SMTP del sito**: se un sito ha un proprio plugin SMTP, quello ha la precedenza.
-- **Email del pannello**: anche la mail di reimpostazione della password del cliente parte da `noreply@<dominio mittente>` attraverso questo relay. Il pannello sa solo che il relay l'ha presa in coda, non che è stata consegnata.
+- **Email del pannello**: anche la mail di reimpostazione della password del cliente parte da `noreply@<dominio mittente>` attraverso questo relay. Il pannello sa solo che il relay l'ha presa in coda, non che è stata consegnata. Lo stesso vale per le mail delle notifiche (più sotto, «Notifiche»), scritte dal pannello con testi fissi.
 
 Dettagli e limiti: [ADR 0018](docs/architecture/adr/0018-outgoing-mail-relay.md).
 
@@ -279,13 +280,14 @@ Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei 
 - **Stato.** I flag `applicationTemplatesAvailable` e `applicationStacksAvailable` valgono `true` sul backend `linux-systemd` e `false` sugli altri (`ADR-0036` §2.10): l'amministratore trova i modelli in **Amministrazione › Modelli**, e un cliente vede un modello solo dopo che l'amministratore lo ha pubblicato. Le porte pubbliche e le build da Git restano spente su ogni backend.
 - **Il primo rilascio.** Solo immagini già pronte (nessuna build), solo Dedicated, solo ingresso HTTP, TLS solo Let's Encrypt per i domini degli stack; nessuna porta TCP/UDP pubblica.
 - **Il formato esteso.** Un modello `HCP-STACK/v2` può usare un'immagine di qualunque registro pubblico, sempre fissata a digest; può far generare al pannello password e nomi utente, che il cliente non scrive e non legge; può passare un segreto a un componente come variabile d'ambiente. I modelli `HCP-STACK/v1` restano validi e si comportano come prima.
-- **Importa da Compose.** In **Amministrazione › Modelli** l'amministratore incolla un file Compose e riceve una bozza di modello con il rapporto di ciò che il pannello ha tolto o cambiato: porte pubblicate, cartelle del server, privilegi, password scritte nel file (sostituite da valori generati). Il pannello chiede al registro il digest di ogni immagine e non salva nulla finché l'amministratore non ha rivisto e salvato la bozza. Un cliente non importa mai un file Compose e non sceglie mai un'immagine.
+- **Importa da Compose.** In **Amministrazione › Modelli** l'amministratore incolla un file Compose e riceve una bozza di modello con il rapporto di ciò che il pannello ha tolto o cambiato: porte pubblicate, cartelle del server, privilegi, password scritte nel file (sostituite da valori generati). Il pannello chiede al registro il digest di ogni immagine e non salva nulla finché l'amministratore non ha rivisto e salvato la bozza. Un'immagine scritta per intero come una riga dell'elenco delle immagini ammesse (per esempio `docker.io/library/mariadb:…`) prende nella bozza l'utente di quella riga; scritta corta (`mariadb:…`) resta all'utente dell'immagine (`ADR-0039`). Un cliente non importa mai un file Compose e non sceglie mai un'immagine.
 - **I tre modelli iniziali.** «Sito HTTP con cache», «Lavoro periodico con archivio» e «WordPress in contenitore» (WordPress con il suo database MariaDB e le password generate dal pannello) arrivano con il pannello come bozze disabilitate: l'amministratore decide se pubblicarli. «WordPress in contenitore» è un'applicazione del catalogo, separata dai siti WordPress del pannello, che restano come sono.
+- **Database e collegamenti.** Tre modelli in più arrivano disabilitati allo stesso modo: «Database MariaDB», «Database PostgreSQL» e «Archivio Valkey». Un database è un'applicazione con un solo componente e nessun indirizzo web: non si raggiunge da fuori dal server, e nemmeno dalle altre applicazioni finché il cliente non lo collega dalla pagina dell'applicazione («Collega»). Un collegamento unisce due applicazioni dello stesso cliente (al più quattro database per applicazione e otto applicazioni per database) e non riavvia nulla. L'indirizzo e la porta da usare sono nella pagina del database; utente e password li scrive il cliente nell'applicazione (`ADR-0039`, stato `PROPOSTO`).
 - **I dati.** Alla cancellazione di uno stack i suoi volumi restano sul server, salvo una richiesta esplicita del cliente (il nome dello stack riscritto e una casella separata).
 - **Le opzioni di un indirizzo (`ADR-0037`).** Ogni indirizzo web di un'applicazione può reindirizzare a un altro indirizzo della stessa applicazione, chiedere nome utente e password, comprimere le risposte e mandare fino a quattro percorsi (per esempio `/api`) a un'altra parte dell'applicazione. Le sceglie il cliente dalla pagina dell'applicazione («Opzioni» accanto all'indirizzo) e valgono senza riavviare nulla. Della password il pannello conserva solo un verificatore: non può mostrarla di nuovo. Finché l'indirizzo non ha un certificato utilizzabile, la password viaggia in chiaro.
 - **Backup e ripristino.** Dalla pagina dell'applicazione il cliente crea un backup di tutti i dati dell'applicazione sulle destinazioni di backup del server (le stesse dei siti, al più due copie) e lo ripristina nella stessa applicazione dopo averne riscritto il nome; prima di ripristinare il pannello salva i dati così come sono. Per tutta la copia l'applicazione è ferma e i suoi indirizzi non rispondono. Nessun backup parte da solo, e i backup dei siti e del pannello continuano a non contenere gli stack (`ADR-0038`, stato `PROPOSTO`).
 
-Dettagli e limiti: [ADR 0035](docs/architecture/adr/0035-application-stacks.md), [ADR 0037](docs/architecture/adr/0037-application-routing-options.md) e, per i backup, [ADR 0038](docs/architecture/adr/0038-application-backups.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md).
+Dettagli e limiti: [ADR 0035](docs/architecture/adr/0035-application-stacks.md), [ADR 0037](docs/architecture/adr/0037-application-routing-options.md), per i backup, [ADR 0038](docs/architecture/adr/0038-application-backups.md) e, per i database e i collegamenti, [ADR 0039](docs/architecture/adr/0039-application-databases.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md).
 
 ### Backup dei Siti
 
@@ -357,7 +359,7 @@ Cosa sapere prima:
 
 ```bash
 sudo hp-update                    # ultima release
-sudo hp-update --version 0.12.0    # oppure --archive <file>
+sudo hp-update --version 0.12.1    # oppure --archive <file>
 ```
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--allow-feature-loss`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall (**il proxy non viene ricreato**: i certificati caricati a mano e le destinazioni di backup non richiedono nessuna interruzione). Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito, `8` downgrade rifiutato perché la release di destinazione perderebbe una funzione già in uso.
@@ -369,6 +371,10 @@ sudo hp-update --version 0.12.0    # oppure --archive <file>
 **Opzioni degli indirizzi nell'aggiornamento.** La migrazione `0026` (`ADR-0037`) è solo additiva. Un downgrade deciso dall'operatore esce con **codice 8** anche quando un indirizzo di un'applicazione reindirizza, è protetto da password o ha una regola di percorso e la release di destinazione non conosce `app-routing-options`; la sola compressione non blocca. Per rientrare senza forzare: togliere quelle opzioni dagli indirizzi. Con `--allow-feature-loss` la release precedente riscrive le route senza le opzioni: **un indirizzo protetto diventa pubblico**, un indirizzo che reindirizzava serve l'applicazione e le regole di percorso smettono di valere. I dati restano e tornano a valere dopo un nuovo aggiornamento.
 
 **Backup delle applicazioni nell'aggiornamento.** La migrazione `0027` è solo additiva. Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un backup di un'applicazione, in qualunque stato e anche se l'applicazione è stata cancellata, e la release di destinazione non conosce `app-stack-backups`. Nessun comando cancella un backup: lo toglie la pulizia notturna, per un'applicazione cancellata solo quando il periodo di conservazione è passato. Con `--allow-feature-loss` la release precedente non elenca, non ripristina e non rimuove questi backup: le righe restano nel database e le copie sulle destinazioni.
+
+**Collegamenti ai database nell'aggiornamento.** La migrazione `0028` è solo additiva. Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un collegamento fra un database e un'applicazione, in qualunque stato, e la release di destinazione non conosce `app-stack-links`. Per rientrare senza forzare: scollegare i database dalle applicazioni nel pannello. Con `--allow-feature-loss` la release precedente non conosce i collegamenti: un database resta attaccato solo finché il suo container non viene sostituito, e nulla lo riattacca.
+
+**Notifiche nell'aggiornamento.** La migrazione `0029` è solo additiva (tre tabelle nuove). Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un canale di notifica, acceso o spento, del server o di un cliente, e la release di destinazione non conosce `notifications`: una versione precedente non spedisce nulla, e nessuno saprebbe che gli avvisi sono diventati muti. Per rientrare senza forzare: rimuovere ogni canale con **Rimuovi** (quelli di un cliente li rimuove un proprietario del suo account). Con `--allow-feature-loss` le tabelle restano intatte e non parte nulla finché non torna una release con le notifiche.
 
 **Da una versione più vecchia** l'aggiornamento scompatta la nuova versione accanto a quella in uso, poi installa i pacchetti del sistema che la nuova versione vuole e il server non ha (per esempio `nftables` e `unattended-upgrades`), con `apt-get`, e solo dopo installa le unità e i comandi della nuova versione e passa a quella. Se i pacchetti non si installano si ferma, e il pannello resta sulla versione in uso, senza riavvii: controllare le sorgenti di `apt` e la rete, aspettare che finisca un altro `apt` in corso (l'aggiornamento non lo aspetta) e rilanciare. Se le regole di base del firewall sono cambiate, l'aggiornamento scrive il file nuovo ma non lo carica, e stampa «The base firewall rules changed in this version and are not loaded yet»: l'amministratore preme una volta **Applica le regole di base** nella pagina **Amministrazione › Firewall**, che mostra le regole di base come non aggiornate (vedi **Firewall** sotto); fino a quel momento le porte aperte e gli indirizzi bloccati restano in vigore.
 
@@ -445,6 +451,21 @@ I container dei siti e `hp_mariadb` tengono al massimo 3 file di log da 10 MB. U
 
 Dettagli e limiti: [ADR 0026](docs/architecture/adr/0026-health-alerts-and-logs.md).
 
+#### Notifiche
+
+Il pannello scrive quando un avviso della pagina **Stato** si apre e quando si chiude, senza che qualcuno debba guardare la pagina. Non parte nulla finché qualcuno non accende un canale: non c'è un flag né una variabile d'ambiente.
+
+- **Due pagine.** **Amministrazione › Notifiche** per il server (tutti i 17 tipi di avviso) e **Notifiche** nel menu dell'account per il cliente (sette tipi, solo sui propri siti: un sito fermo, un backup o un ripristino non riuscito, un certificato in scadenza o non emesso). I canali di un cliente li imposta solo un proprietario di quell'account: l'amministratore del server non li legge e non li cambia, nemmeno in visita di assistenza.
+- **Tre canali**, al più uno per tipo in ogni ambito: **Email** (per il server da uno a cinque indirizzi; per il cliente i proprietari dell'account, all'indirizzo con cui accedono), **Webhook** (una `POST` HTTPS con i dati dell'avviso, firmata se si imposta una chiave) e **Telegram** (un bot creato con BotFather e una chat).
+- **Gruppi.** Ogni canale sceglie per che cosa essere avvisato: parti del pannello o siti fermi, backup, certificati e, solo per il server, disco e operazioni.
+- **Tempi.** Un controllo ogni due minuti. Un avviso è detto al secondo controllo di fila che lo vede: il messaggio parte da due a quattro minuti dopo che la pagina **Stato** lo mostrerebbe. Più avvisi insieme sono un solo messaggio; ciò che si apre e si chiude tra due controlli non produce nulla.
+- **Prova ed esito.** **Invia un messaggio di prova** parte subito e dice com'è andata. **Ultimi messaggi** mostra gli ultimi venti con il loro esito. Un invio fallito si riprova dopo 2, 10 e 30 minuti; dopo un'ora il messaggio è «Non consegnato», con il motivo.
+- **Quali indirizzi.** Un webhook deve iniziare con `https://`, avere un nome di dominio e portare a un indirizzo pubblico che non sia di questo server: un ricevitore sullo stesso server o su una rete privata è rifiutato, al salvataggio e a ogni invio. Il pannello non segue reindirizzamenti e non legge la risposta.
+- **Segreti.** L'indirizzo di un webhook, la sua chiave di firma e il token di un bot sono cifrati nel database e non vengono più mostrati: la pagina mostra solo il nome host e la chat.
+- **Limiti.** Spedisce l'API: se `hp-api` è ferma non parte nulla, e per sapere che il server è spento bisogna guardarlo da fuori. Nessun messaggio per ciò che è andato bene e nessun evento degli stack applicativi. La mail ha bisogno della posta in uscita impostata (**Email in uscita**); webhook e Telegram hanno bisogno di uscire in HTTPS dal server.
+
+Dettagli e limiti: [ADR 0040](docs/architecture/adr/0040-notifications.md). Procedure dell'operatore, in inglese: [runbook delle notifiche](docs/runbooks/notifications.md).
+
 #### Riavviare un sito o un container del pannello
 
 In **Amministrazione › Stato** il pulsante **Riavvia** è su ogni riga dei **Container dei siti** e sulle righe dei cinque container del pannello (non su un container «Non in uso», mancante o con il runtime disattivato). Il riavvio chiede un **motivo** (obbligatorio, al massimo 500 caratteri): finisce nel **Registro attività** (`admin.site.restart`, `admin.panel_container.restart` e, alla fine, `admin.panel_container.restart.end`) perché chi legge dopo sappia perché è stato fatto; i clienti non lo vedono mai. La finestra dice cosa si interrompe, poi segue il riavvio fino alla fine (dopo 3 minuti senza risposta dice che non lo sa: ricarica la pagina).
@@ -480,7 +501,7 @@ Dove le applicazioni multi-servizio sono attive (il flag `applicationStacksAvail
 - Dal terminale si leggono i valori riservati dell'applicazione (i file e, nel formato esteso, le variabili d'ambiente) e si possono cambiare i suoi dati: il Registro attività dice che una sessione c'è stata, non che cosa ha fatto.
 - Il cliente non ha un terminale, e nessuna sua pagina cambia.
 
-Dettagli e limiti: [ADR 0041](docs/architecture/adr/0041-application-terminal-and-logs.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md), procedure 12 e 13.
+Dettagli e limiti: [ADR 0041](docs/architecture/adr/0041-application-terminal-and-logs.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md), procedure 13 e 14.
 
 #### Firewall
 
@@ -521,8 +542,8 @@ Il prodotto ha **due ruoli** in uso, ciascuno con la sua console; la radice `/` 
 
 | Ruolo | Chi | Console | Cosa fa |
 | :--- | :--- | :--- | :--- |
-| **`infrastructure_admin`** | Amministratore del server (`users.platform_role`, 2FA TOTP obbligatorio), creato da `install.sh`, da `hp-accounts create-admin` o da **Amministrazione › Utenti** | `/admin/*` | Server, applicazioni di tutti i clienti (gli stack in sola lettura), modelli, utenti, backup, firewall, aggiornamenti, stato, log e registro attività. Sui siti di un cliente agisce come il cliente solo con l'accesso di assistenza (sopra). |
-| **`customer_owner`** | Il cliente, creato dall'amministratore in **Amministrazione › Utenti** con la sua organizzazione | `/apps`, `/sites/*`, `/apps/*` | Le proprie applicazioni: per i siti WordPress avvio e arresto, PHP, domini, file, SFTP, database, backup, strumenti WordPress, log; per gli stack, con il flag acceso, le azioni, i domini, i valori riservati e i log. |
+| **`infrastructure_admin`** | Amministratore del server (`users.platform_role`, 2FA TOTP obbligatorio), creato da `install.sh`, da `hp-accounts create-admin` o da **Amministrazione › Utenti** | `/admin/*` | Server, applicazioni di tutti i clienti (gli stack in sola lettura), modelli, utenti, backup, firewall, aggiornamenti, stato, notifiche del server, log e registro attività. Sui siti di un cliente agisce come il cliente solo con l'accesso di assistenza (sopra). |
+| **`customer_owner`** | Il cliente, creato dall'amministratore in **Amministrazione › Utenti** con la sua organizzazione | `/apps`, `/sites/*`, `/apps/*` | Le proprie applicazioni: per i siti WordPress avvio e arresto, PHP, domini, file, SFTP, database, backup, strumenti WordPress, log; per gli stack, con il flag acceso, le azioni, i domini, i valori riservati e i log. Le notifiche del proprio account (`/account/notifications`). |
 
 Il login (`POST /v1/auth/login`) blocca l'account dopo 5 tentativi falliti in 15 minuti (contatore separato per il codice TOTP). La tabella dei permessi contiene anche `hosting_admin` e `customer_collaborator`, ma nessuna pagina e nessun comando del pannello li assegna (li usano solo i dati di prova di sviluppo): non hanno una console. Creare un servizio generico (non un sito), cambiarne la configurazione e invitare un membro in un'organizzazione chiedono un amministratore del server che sia anche membro dell'organizzazione del cliente, e il pannello non rende mai un amministratore membro di un'organizzazione cliente: su un server installato queste azioni sono chiuse a tutti. Un cliente di un'altra organizzazione, o un amministratore senza visita o con una visita chiusa, riceve `404`; un membro che non è amministratore, una visita scaduta o una visita aperta ricevono `403`. Un servizio generico e un secondo membro di un'organizzazione non sono funzioni di questa versione.
 
@@ -554,6 +575,9 @@ corepack pnpm run test
 - [Report di audit](docs/security/audit-report.md): ogni finding dell'audit di M6 con il suo stato, aperto o chiuso.
 - [ADR 0035 — Stack applicativi](docs/architecture/adr/0035-application-stacks.md): modello delle risorse, confini di fiducia, minacce, compatibilità e downgrade, catalogo iniziale (stato `APPROVATO`).
 - [ADR 0038 — Backup e ripristino delle applicazioni](docs/architecture/adr/0038-application-backups.md): che cosa si copia, il fermo durante la copia, il ripristino con la copia di sicurezza, la conservazione (stato `PROPOSTO`).
-- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti, backup e ripristino di un'applicazione, log e terminale per l'amministratore (in inglese).
+- [ADR 0039 — Database autonomi e collegamento privato tra applicazioni](docs/architecture/adr/0039-application-databases.md): i tre database integrati, il collegamento fra un database e un'applicazione dello stesso cliente, limiti e downgrade (stato `PROPOSTO`).
+- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti, backup e ripristino di un'applicazione, database e collegamenti, log e terminale per l'amministratore (in inglese).
 - [ADR 0041 — Terminale e log di un'applicazione per l'amministratore del server](docs/architecture/adr/0041-application-terminal-and-logs.md): chi, dove gira la shell e con quali poteri, limiti in comune con i siti, che cosa resta dopo una sessione (stato `PROPOSTO`).
 - [Report di collaudo degli stack applicativi](docs/security/hcp-spec-005-acceptance-report.md): esito di ogni prova `A1..A20` e `B1..B6`, con i punti in attesa del titolare.
+- [ADR 0040 — Notifiche](docs/architecture/adr/0040-notifications.md): che cosa viene detto e a chi, i tre canali, la regola sugli indirizzi, la coda e gli esiti, il downgrade (stato `PROPOSTO`).
+- [Procedure operative: notifiche](docs/runbooks/notifications.md): accendere un canale e provarlo, leggere perché un messaggio non è stato consegnato, controllare la firma di un webhook, downgrade e ripristino su un nuovo server (in inglese).

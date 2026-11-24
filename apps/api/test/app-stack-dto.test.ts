@@ -142,6 +142,7 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   parameters: [],
   secrets: [],
   activeOperationId: null,
+  installed: null,
   platformWork: null,
   upgrade: null,
   rollback: null,
@@ -159,7 +160,15 @@ const deployed = (components: AppStackComponentRow[], change: Partial<Parameters
 
 describe("appStackSummaryDto", () => {
   const summary = (components: AppStackComponentRow[], domains: AppStackDomainRow[] = []) =>
-    appStackSummaryDto({ stack: stackRow({ status: "running" }), templateName: "Notes Demo", templateVersionNumber: 2, components, domains, now: NOW });
+    appStackSummaryDto({
+      stack: stackRow({ status: "running" }),
+      templateName: "Notes Demo",
+      templateVersionNumber: 2,
+      installed: { revisionNumber: 4, templateVersionNumber: 1 },
+      components,
+      domains,
+      now: NOW,
+    });
 
   it("counts unhealthy and missing components; a stale observation reads unknown and is not counted", () => {
     const dto = summary([
@@ -169,7 +178,7 @@ describe("appStackSummaryDto", () => {
       component("web", "healthy", FRESH),
       component("never", "unhealthy", null),
     ]);
-    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2 });
+    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2, installed: { revisionNumber: 4, templateVersionNumber: 1 } });
     expect(AppStackSummaryDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 
@@ -218,11 +227,35 @@ describe("appStackDetailDto", () => {
     expect(dto.components[0]).toMatchObject({ key: "cache", health: "unknown", healthObservedAt: STALE.toISOString() });
   });
 
-  it("keeps the stored status while the desired revision is not the applied one", () => {
-    const dto = appStackDetailDto(
-      deployed([component("app", "healthy", STALE)], { stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: "srev_old" }) }),
-    );
-    expect(dto.status).toBe("running");
+  it("while the desired revision is not the applied one, the status follows the applied revision's plan", () => {
+    // The target runs only the cache; what runs is the full plan, whose web part is the essential one.
+    const target = {
+      revision: { ...revision, id: "srev_new", revisionNumber: 4 },
+      plan: { ...PLAN, revisionId: "srev_new", components: PLAN.components.filter((c) => c.key === "cache"), ingress: [] } as ApprovedStackPlan,
+    };
+    const shown = (components: AppStackComponentRow[]) =>
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          appliedPlan: PLAN,
+          components,
+        }),
+      ).status;
+    expect(shown([component("app", "healthy", FRESH), component("cache", "healthy", FRESH)])).toBe("running");
+    // A crash of what runs shows, and so does an observation gone stale.
+    expect(shown([component("app", "stopped", FRESH), component("cache", "healthy", FRESH)])).toBe("failed");
+    expect(shown([component("app", "healthy", STALE), component("cache", "healthy", FRESH)])).toBe("unknown");
+    // No readable applied plan: the stored status.
+    expect(
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          components: [component("app", "stopped", FRESH)],
+        }),
+      ).status,
+    ).toBe("running");
   });
 
   it("joins secret parameters with their latest metadata and never lists a secret key among the parameters", () => {
@@ -318,6 +351,7 @@ describe("appStackDetailDto", () => {
       deployed([], {
         volumes: [{ stackId: STACK, organizationId: ORG, volumeKey: "data", retentionPolicy: "retain", status: "present", createdAt: NOW, updatedAt: NOW }],
         activeOperationId: "op_1",
+        installed: { revisionNumber: 2, templateVersionNumber: 1 },
         platformWork: "backups_cleanup",
         upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
         rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
@@ -326,10 +360,12 @@ describe("appStackDetailDto", () => {
     expect(dto).toMatchObject({
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       activeOperationId: "op_1",
+      installed: { revisionNumber: 2, templateVersionNumber: 1 },
       platformWork: "backups_cleanup",
       upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
       rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
     });
+    expect(AppStackDetailDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 });
 
@@ -384,6 +420,8 @@ describe("row mappers", () => {
       problem: "STACK_HEALTH_TIMEOUT",
       startedAt: FRESH,
       endedAt: null,
+      replacedRevisionId: null,
+      replacedStatus: null,
     };
     const dto = appStackDeploymentDto(row, "stack.deploy", 3);
     expect(dto).toEqual({

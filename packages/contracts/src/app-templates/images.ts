@@ -6,7 +6,14 @@ export interface AppImageAllowlistEntry {
   readonly runAsUser: string | null;
   /** Licence and provenance, one line, for the ADR and reviewers (never shown to customers). */
   readonly note: string;
+  /** In-memory areas the image needs besides /tmp (APP_IMAGE_SCRATCH_PATH_PATTERN, at most APP_IMAGE_SCRATCH_PATHS_MAX).
+   *  Declared here only: a template or a customer cannot ask for one (ADR-0039 D3). */
+  readonly scratchPaths?: readonly string[];
 }
+
+/** A scratch area sits directly under /run and is never the directory of the secret files. */
+export const APP_IMAGE_SCRATCH_PATH_PATTERN = /^\/run\/(?!secrets$)[a-z][a-z0-9_-]{0,31}$/;
+export const APP_IMAGE_SCRATCH_PATHS_MAX = 2;
 
 /** What the built-in templates need, nothing more; each row needs the owner's confirmation (BLOCKED.md #4). */
 export const APP_IMAGE_ALLOWLIST: readonly AppImageAllowlistEntry[] = Object.freeze([
@@ -25,6 +32,19 @@ export const APP_IMAGE_ALLOWLIST: readonly AppImageAllowlistEntry[] = Object.fre
     runAsUser: "999:1000",
     note: "BSD-3-Clause, packaging BSD-3-Clause; Docker-Sponsored Open Source (publisher valkey); tini MIT, setpriv/libcap-ng GPL-2.0-or-later; Alpine base with unmodified GPL-2.0-only busybox/apk-tools; image default root, forced to 999:1000; registry read 2026-11-22",
   }),
+  // The two database images are written in full, never `mariadb` or `postgres` short: the WordPress template of release
+  // 0.10.0 names `mariadb` short and runs it as the image's own user, and a short row would refuse its stored plans.
+  Object.freeze({
+    repository: "docker.io/library/mariadb",
+    runAsUser: "999:999",
+    note: "MariaDB Server GPL-2.0-only, packaging GPL-2.0 (image label org.opencontainers.image.licenses); Docker Official Image, source github.com/MariaDB/mariadb-docker; Ubuntu noble base; a separate program reached over the network, nothing of it is linked into the panel; image user unset (the entrypoint drops to mysql 999:999), forced here so the entrypoint never runs as root; port 3306; local image read 2026-11-23",
+  }),
+  Object.freeze({
+    repository: "docker.io/library/postgres",
+    runAsUser: "999:999",
+    note: "PostgreSQL Licence, packaging MIT; Docker Official Image; Debian bookworm base; image user unset (the entrypoint drops to postgres 999:999), forced here so the entrypoint never runs as root; port 5432; needs its socket directory writable, declared as the one scratch area; local image read 2026-11-23",
+    scratchPaths: Object.freeze(["/run/postgresql"]),
+  }),
 ]);
 
 /** Plan form of an image: "<name>@sha256:<64 hex>", tag dropped. */
@@ -36,6 +56,15 @@ export function findAppImageAllowlistEntry(
   allowlist: readonly AppImageAllowlistEntry[] = APP_IMAGE_ALLOWLIST,
 ): AppImageAllowlistEntry | null {
   return allowlist.find((entry) => entry.repository === repository) ?? null;
+}
+
+/** Scratch areas of a plan image ("<name>@sha256:…"), in the row's order; none when the row declares none or is missing. */
+export function appStackImageScratchPaths(
+  image: string,
+  allowlist: readonly AppImageAllowlistEntry[] = APP_IMAGE_ALLOWLIST,
+): readonly string[] {
+  const at = image.lastIndexOf("@");
+  return findAppImageAllowlistEntry(at < 0 ? image : image.slice(0, at), allowlist)?.scratchPaths ?? [];
 }
 
 export type AppStackImageProblem = "not_digest_pinned" | "not_allowlisted" | "user_mismatch";

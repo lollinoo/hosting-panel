@@ -19,7 +19,7 @@ import {
   assertExecutableAppStackPlan,
   isOwnAppStackResource,
 } from "../src/app-stacks/index.js";
-import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
+import { TEST_ALLOWLIST, appStackTestPlan, appStackTestPlanV2, rehash } from "./support/app-stack-plans.js";
 
 const plan = appStackTestPlan();
 const [web, worker] = plan.components as [ApprovedStackPlan["components"][number], ApprovedStackPlan["components"][number]];
@@ -254,6 +254,33 @@ describe("assertExecutableAppStackPlan", () => {
     const expected = { reason: "STACK_PLAN_HASH_MISMATCH", code: "HOST_POLICY_DENIED", message: "The application plan does not match its hash" };
     expect(refusal(check(tampered))).toEqual(expected);
     expect(refusal(check({ ...plan, planHash: "f".repeat(64) }))).toEqual(expected);
+  });
+
+  // ADR-0039: the rows of the database images are written in full. A stored plan of the WordPress template of release
+  // 0.10.0 names `mariadb` short with the image's own user, and must stay executable.
+  describe("with the code allowlist, a database image is judged by its name exactly as written", () => {
+    const v2 = appStackTestPlanV2();
+    const db = v2.components[0]!;
+    const extended = (image: string, runAsUser: string | null) =>
+      rehash({ ...v2, components: [{ ...db, image, runAsUser }], ingress: [], volumes: [{ key: "dbdata" }] });
+    const first = (image: string, runAsUser: string | null) => rehash({ ...plan, components: [{ ...web, image, runAsUser }], volumes: [] });
+
+    it.each(["mariadb", "postgres"])("%s: written short, the image's own user only", (name) => {
+      expect(assertExecutableAppStackPlan(extended(`${name}@${DIGEST}`, null)).components[0]?.runAsUser).toBeNull();
+      expect(refusal(() => assertExecutableAppStackPlan(extended(`${name}@${DIGEST}`, "999:999"))).message).toBe(
+        "The image of component db is not allowed (user_mismatch)",
+      );
+      expect(refusal(() => assertExecutableAppStackPlan(first(`${name}@${DIGEST}`, "999:999"))).message).toBe(
+        "The image of component web is not allowed (not_allowlisted)",
+      );
+    });
+
+    it.each(["mariadb", "postgres"])("docker.io/library/%s: the row's user, in both formats", (name) => {
+      const image = `docker.io/library/${name}@${DIGEST}`;
+      expect(assertExecutableAppStackPlan(extended(image, "999:999")).components[0]?.runAsUser).toBe("999:999");
+      expect(assertExecutableAppStackPlan(first(image, "999:999")).components[0]?.image).toBe(image);
+      expect(refusal(() => assertExecutableAppStackPlan(extended(image, null))).message).toBe("The image of component db is not allowed (user_mismatch)");
+    });
   });
 });
 
