@@ -333,6 +333,29 @@ describe("a v2 source is still refused what a stack must not have", () => {
       expect(validateAppTemplate(build([web("image"), image]), undefined, { allowlist: [] }).ok).toBe(true);
     }
   });
+
+  it.each([`localhost:5000/x:9@${WEB_DIGEST}`, `127.0.0.1:5000/x@${WEB_DIGEST}`, `10.0.0.5/acme/x@${WEB_DIGEST}`, `registry.internal/x@${WEB_DIGEST}`])(
+    "refuses %s, an image of this server or a private network, in a new version only",
+    (image) => {
+      const document = build([web("image"), image]);
+      expect(validateAppTemplate(document).ok).toBe(true);
+      const result = validateAppTemplate(document, undefined, { newVersion: true });
+      expect(result.ok ? [] : result.errors).toEqual([
+        {
+          path: "services.web.image",
+          code: "IMAGE_REGISTRY_NOT_PUBLIC",
+          reason: "STACK_IMAGE_NOT_ALLOWED",
+          message: "The registry of this image is this server, an IP address or a private network name: use an image of a public registry.",
+        },
+      ]);
+    },
+  );
+
+  it("accepts a new version whose images name a public registry or Docker Hub", () => {
+    for (const image of [`evil.example/any/thing@${WEB_DIGEST}`, `ghcr.io/acme/x:1.0@${WEB_DIGEST}`, `blog@${WEB_DIGEST}`]) {
+      expect(validateAppTemplate(build([web("image"), image]), undefined, { newVersion: true }).ok).toBe(true);
+    }
+  });
 });
 
 describe("generated secrets", () => {

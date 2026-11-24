@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   appStackImageLookupProblem,
+  appStackImageRegistryProblem,
   appStackLinkAlias,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
@@ -161,6 +162,11 @@ export class SimulatedAppStacks implements StackExecutorPort {
     this.faults.set(step, [...(this.faults.get(step) ?? []), fault]);
   }
 
+  /** An image already on the server (loaded by an operator, or pulled before a rule refused its registry). */
+  public loadAppStackImage(image: string): void {
+    this.images.add(image);
+  }
+
   public setAppStackComponentProbe(stackId: string, componentKey: string, outcome: "passed" | "failed"): void {
     this.probes.set(appStackContainerName(stackId, componentKey), outcome);
   }
@@ -263,6 +269,11 @@ export class SimulatedAppStacks implements StackExecutorPort {
         throw new AppStackExecutorError("STACK_IMAGE_PULL_FAILED", "Could not download the software of the application");
       }
       if (this.images.has(req.image)) return { image: req.image, pulled: false };
+      const registry = appStackImageRegistryProblem(req.image);
+      if (registry !== null) {
+        const owner = plan.components.find((c) => c.image === req.image)?.key ?? "";
+        throw new AppStackExecutorError("STACK_IMAGE_NOT_ALLOWED", `The image of component ${owner} is not allowed (${registry})`);
+      }
       this.images.add(req.image);
       this.mutate("pull", req.image);
       return { image: req.image, pulled: true };
