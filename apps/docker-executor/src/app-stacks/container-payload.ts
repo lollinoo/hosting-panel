@@ -85,10 +85,12 @@ export interface AppStackContainerCreatePayload {
 }
 
 /** The environment secrets of a version 2 component as "NAME=value" entries, in plan order; [] for a version 1 one.
- *  The values exist only in the returned strings: no message of this function carries one. */
+ *  The values exist only in the returned strings: no message or log line of this function carries one. `stackId` names
+ *  the application in the log line of a refused joined value. */
 export function expandAppStackSecretEnvironment(
   component: AppStackPlanComponent,
   contents: Readonly<Record<string, string>>,
+  stackId?: string,
 ): string[] {
   return appStackComponentSecretEnvironment(component).map((entry) => {
     const value = entry.pieces
@@ -106,6 +108,16 @@ export function expandAppStackSecretEnvironment(
     }
     // Every piece passed the mark rule alone; joined they can still spell a mark the terminal's clean-up looks for (ADR-0041 §4).
     if (APP_STACK_PROCESS_MARK_PATTERN.test(value)) {
+      // The API answers this refusal with a generic one: this line is what tells the operator which component it was.
+      console.warn(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_stack_env_mark_refused",
+          stackId: stackId ?? null,
+          componentKey: component.key,
+          timestamp: new Date().toISOString(),
+        }),
+      );
       throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} holds the mark of a platform process`);
     }
     return `${entry.name}=${value}`;
@@ -134,7 +146,7 @@ export function buildAppStackContainerCreatePayload(
     Env: [
       ...c.environment.map((entry) => `${entry.name}=${entry.value}`),
       ...c.secretFiles.map((file) => `${file.envName}=${appStackSecretFilePath(file.parameterKey)}`),
-      ...expandAppStackSecretEnvironment(c, ctx.secretContents ?? {}),
+      ...expandAppStackSecretEnvironment(c, ctx.secretContents ?? {}, plan.stackId),
     ],
     Labels: appStackComponentLabels(plan, c.key),
     ExposedPorts: Object.fromEntries(c.expose.map((port) => [`${port}/tcp`, {}])),

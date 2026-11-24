@@ -255,6 +255,33 @@ describe("the container body of a version 2 plan", () => {
       "DB_PAIR=-d PHP_INI_SCAN_DIR=/x",
     ]);
   });
+
+  it("logs one line naming the application and the component when it refuses a joined value, never a value (ADR-0041 §4)", () => {
+    // The API turns the refusal into a generic one, so this line is the only place that says which component it was.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const pair = withPair(null);
+      const [first, second] = ["xHP_TERMINAL_", "SESSION=term_"];
+      thrown(() => build("db", pair, { db_password: first, db_root_password: second }));
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0]![0]);
+      expect(JSON.parse(line)).toEqual({
+        component: "hp-docker-executor",
+        event: "app_stack_env_mark_refused",
+        stackId: pair.stackId,
+        componentKey: "db",
+        timestamp: expect.any(String) as unknown,
+      });
+      for (const value of [first, second]) expect(line).not.toContain(value);
+      // An accepted value and a refusal of another kind log nothing.
+      warn.mockClear();
+      build("db", pair, { db_password: "-d PHP_", db_root_password: "INI_SCAN_DIR=/x" });
+      expect(thrown(() => build("db", pair, { db_password: first }))).toMatchObject({ reason: "STACK_SECRET_MISSING" });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("the hardening check of a version 2 body", () => {
