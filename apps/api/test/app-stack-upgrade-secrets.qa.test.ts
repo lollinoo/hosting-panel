@@ -88,6 +88,14 @@ if (!JOB_V2.includes("MAIL_PASSWORD") || !JOB_V2.includes("mail_password\n    la
 /** Version 2 with the mail password delivered as a file: no environment limit, only the bound of the store. */
 const JOB_V2_FILE = JOB_V2.replace("      - name: MAIL_PASSWORD\n", "      - name: MAIL_PASSWORD_FILE\n");
 if (JOB_V2_FILE === JOB_V2) throw new Error("the job template fixture lost its file secret");
+/** Version 1 with the optional token already, so an application can have it set long before version 2 is reviewed. */
+const JOB_V1_TOKEN = JOB_V1.replace("schemaVersion: 1", "schemaVersion: 2")
+  .replace("services:\n", ["  - key: api_token", "    label: API token", "    type: secret", "    required: false", "    customer: true", "services:", ""].join("\n"))
+  .replace(
+    "    depends_on:\n      - storage\n",
+    ["    depends_on:", "      - storage", "    environment:", "      - name: API_TOKEN", "        secret: api_token", ""].join("\n"),
+  );
+if (!JOB_V1_TOKEN.includes("API_TOKEN")) throw new Error("the job template fixture lost its token");
 
 const MAIL_PASSWORD = "Upgrade-typed mail password 7f3a";
 const json = (value: unknown): string => JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
@@ -172,8 +180,8 @@ describe("an upgrade to a version that adds a required private value (issue #89)
   }
 
   /** Version 1 installed and running, version 2 published as the default. */
-  async function installed(name: string, next = JOB_V2): Promise<{ stackId: string; v1: string; v2: string }> {
-    const { templateId, versionId: v1 } = await h.publish(JOB_V1);
+  async function installed(name: string, next = JOB_V2, first = JOB_V1): Promise<{ stackId: string; v1: string; v2: string }> {
+    const { templateId, versionId: v1 } = await h.publish(first);
     const created = await h.call(
       h.a.token,
       "POST",
@@ -357,6 +365,31 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     await runUntilSettled(stackId);
     expect(await upgradeOps(stackId)).toEqual(["failed", "succeeded"]);
     expect(envOf(stackId, "worker")).toContain(`MAIL_PASSWORD=${MAIL_PASSWORD}`);
+  }, 120_000);
+
+  it("an optional value the application has had since before the review is not needed, however often it is reviewed again", async () => {
+    const { stackId, v2 } = await installed("job-optional", JOB_V2, JOB_V1_TOKEN);
+    const set = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/secrets`, { parameterKey: "api_token", value: "token set long before" });
+    expect(set.status, set.raw).toBe(200);
+    const before = await h.counts();
+    const mail = { parameterKey: "mail_password", value: MAIL_PASSWORD };
+    const token = { parameterKey: "api_token", value: "token sent with the update" };
+    // No review could have asked for it: a review again would change nothing, so the answer is not plan_changed.
+    for (const secrets of [[mail, token], [token], [mail, token]]) {
+      const diff = await plan(stackId, v2);
+      expect(diff.body.data.newSecrets).toEqual([{ key: "mail_password", label: "Mail password" }]);
+      const res = await upgrade(stackId, { templateVersionId: v2, planHash: diff.body.data.planHash as string, secrets });
+      expect(res.status, res.raw).toBe(400);
+      expect(res.body.error.details).toEqual([expect.objectContaining({ field: "secrets.api_token", reason: "secret_not_needed" })]);
+    }
+    expect(await h.counts()).toEqual(before);
+    expect(await versionsOf(stackId)).toEqual(["api_token:1"]);
+    expect(await valueOf(stackId, "api_token")).toBe("token set long before");
+
+    const diff = await plan(stackId, v2);
+    const queued = await upgrade(stackId, { templateVersionId: v2, planHash: diff.body.data.planHash as string, secrets: [mail] });
+    expect(queued.status, queued.raw).toBe(202);
+    expect(await versionsOf(stackId)).toEqual(["api_token:1", "mail_password:1", "session_key:1"]);
   }, 120_000);
 
   it("a value stored after the review is refused inside the transaction: nothing is written, and the same key works once reviewed again", async () => {

@@ -185,6 +185,10 @@ function assertCustomerSecret(spec: AppTemplateSpec, entry: TypedSecret, fields:
     throw refusal(fields.value, "value_too_long", `This value is too long for this application: at most ${String(maxBytes)} bytes.`);
   }
 }
+/** The private values a review of an upgrade asks for when the application has none: required, typed by the customer. */
+function requiredCustomerSecrets(spec: AppTemplateSpec): { readonly key: string; readonly label: string }[] {
+  return appTemplateInstallParameters(spec.parameters).flatMap((p) => (p.type === "secret" && p.required ? [{ key: p.key, label: p.label }] : []));
+}
 function statusLocked(status: string): ControlPlaneError {
   const message = `This action is not possible while the application is ${status}.`;
   return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: status }, false);
@@ -717,9 +721,7 @@ export class AppStacksService {
     const generate = appSecretsToGenerate(spec, secretVersions);
     // A required private value the customer types and the stack never had: version 1, carried by the upgrade request.
     // An optional one is set after the upgrade, among the private values, so that the reviewed plan stays the same.
-    const ask = appTemplateInstallParameters(spec.parameters).flatMap((p) =>
-      p.type === "secret" && p.required && !secretVersions.has(p.key) ? [{ key: p.key, label: p.label }] : [],
-    );
+    const ask = requiredCustomerSecrets(spec).filter((s) => !secretVersions.has(s.key));
     for (const { parameterKey } of generate) secretVersions.set(parameterKey, 1);
     for (const { key } of ask) secretVersions.set(key, 1);
     const c = compileRevision(
@@ -739,12 +741,14 @@ export class AppStacksService {
     const ask = candidate.ask ?? [];
     if (given.length === 0 && ask.length === 0) return [];
     const spec = validatedSpec(candidate.version.source, this.validation);
+    const required = new Set(requiredCustomerSecrets(spec).map((s) => s.key));
     for (const entry of given) {
       const field = `secrets.${entry.parameterKey}`;
       assertCustomerSecret(spec, entry, { key: field, value: field });
-      // A value the application has now was asked for by an older review (an upgrade taken back keeps its value): the
-      // plan hash is the same, but the review the caller confirmed is stale and is reviewed again.
-      if (candidate.stored?.has(entry.parameterKey)) throw planChanged();
+      // A required value the application has now was asked for by an older review (an upgrade taken back keeps its
+      // value): the plan hash is the same, but the review the caller confirmed is stale and is reviewed again. No
+      // review asks for any other value, so a new review would not change the answer below.
+      if (required.has(entry.parameterKey) && candidate.stored?.has(entry.parameterKey)) throw planChanged();
       // An optional value is set among the private values of the application instead.
       if (!ask.some((s) => s.key === entry.parameterKey)) {
         throw refusal(field, "secret_not_needed", "This update does not need this value: set it among the private values of the application.");
