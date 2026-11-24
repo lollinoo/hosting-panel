@@ -69,11 +69,10 @@ import {
 } from "./plan-check.js";
 import { assertAppStackRoutesInPlan } from "./routes-check.js";
 import {
-  appStackLogMaskValues,
+  appStackContainerMaskValues,
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretFiles,
   writeAppStackComponentSecrets,
 } from "./secrets.js";
 
@@ -127,6 +126,8 @@ interface ContainerInspect {
   readonly Name?: string;
   /** Env is read only to mask the logs; no inspect result leaves the executor. */
   readonly Config?: { readonly Labels?: Labels | null; readonly Env?: readonly string[] | null };
+  /** Binds is read only to know which secret files the container was given (log masking). */
+  readonly HostConfig?: { readonly Binds?: readonly string[] | null } | null;
   readonly State?: {
     readonly Status?: string;
     readonly Running?: boolean;
@@ -617,13 +618,13 @@ export class AppStackEngine implements StackExecutorPort {
 
   public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
     const target = await this.inspectAppStackComponentContainer(req);
-    // Established before any line is read; the environment secrets come from this container, which outlives the tmpfs.
-    const values = appStackLogMaskValues(
-      req.componentKey,
-      { labels: target.Config?.Labels, env: target.Config?.Env },
-      await readAppStackComponentSecretFiles(this.deps.secretsRootDir, req.stackId, req.componentKey),
-      req.secretFileCount,
-    );
+    // Established before any line is read, from this container alone: its binds name the secret files it was given,
+    // and its environment secrets come from it, which outlives the tmpfs.
+    const values = await appStackContainerMaskValues(this.deps.secretsRootDir, req, {
+      labels: target.Config?.Labels,
+      env: target.Config?.Env,
+      hostConfig: target.HostConfig,
+    });
     const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(req.tail) || 1));
     const res = await this.deps.request(
       "GET",

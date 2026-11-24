@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -424,23 +424,47 @@ describe("SimulatedAppStacks on disk", () => {
     expect(existsSync(path.join("/run/hosting-panel/secrets", `app_${ID}__worker`))).toBe(false);
   });
 
-  it("refuses, like the engine, a log read short of the secret files the plan gives the component (BUG-43)", async () => {
+  it("refuses, like the engine, a log read short of the secret files the container was given (BUG-43)", async () => {
     const root = tempDir();
     const sim = simulator({ secretsRootDir: root });
     await deploy(sim);
     sim.appStacks.setAppStackComponentLogs(ID, "worker", [{ at: null, stream: "stdout", text: "key=s3cr3t-content" }]);
     sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: "GET / 200" }]);
-    rmSync(path.join(root, `app_${ID}__worker`), { recursive: true, force: true });
-    for (const secretFileCount of [1, undefined]) {
-      const err = await failure(sim.getAppStackComponentLogs({ ...ref, componentKey: "worker", tail: 5, ...(secretFileCount === undefined ? {} : { secretFileCount }) }));
+    const dir = path.join(root, `app_${ID}__worker`);
+    rmSync(dir, { recursive: true, force: true });
+    const refused = async () => {
+      const err = await failure(sim.getAppStackComponentLogs({ ...ref, componentKey: "worker", tail: 5 }));
       expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component worker cannot be masked" });
       expect(JSON.stringify([String(err), err])).not.toContain("s3cr3t-content");
-    }
-    // web is given no secret: with the count its read is served, without one (an API one release older) its missing dir refuses it.
-    expect(await sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5, secretFileCount: 0 })).toEqual([
-      { at: null, stream: "stdout", text: "GET / 200" },
-    ]);
-    await expect(sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 })).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    };
+    await refused();
+    // What Docker does after a reboot: the missing bind source comes back as a directory.
+    mkdirSync(path.join(dir, "shared_key"), { recursive: true });
+    await refused();
+    // web was given no secret file: served, with or without a folder.
+    const web = () => sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 });
+    expect(await web()).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+    mkdirSync(path.join(root, `app_${ID}__web`));
+    expect(await web()).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+  });
+
+  it("refuses in memory too when the container was given a file the simulator does not hold yet", async () => {
+    const sim = simulator();
+    await deploy(sim);
+    // An upgrade gives web its first secret file: its new container has the bind before its start writes the file.
+    const upgraded = rehash({
+      ...plan,
+      components: plan.components.map((c) =>
+        c.key === "web" ? { ...c, secretFiles: [{ envName: "WEB_TOKEN_FILE", parameterKey: "web_token", version: 1 }] } : c,
+      ),
+    });
+    await sim.createAppStackComponents({ plan: upgraded });
+    const token = "w3b-token-value";
+    sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: `token=${token}` }]);
+    const read = () => sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 });
+    await expect(read()).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component web cannot be masked" });
+    await sim.startAppStackComponent({ plan: upgraded, componentKey: "web", secretFileContents: [{ parameterKey: "web_token", version: 1, content: token }] });
+    expect((await read())[0]?.text).toBe("token=[REDACTED]");
   });
 
   it("writes a real app_<stackId>.yml only when ingressRootDir is set", async () => {

@@ -43,19 +43,60 @@ export async function purgeAppStackSecrets(secretsRootDir: string, stackId: stri
   }
 }
 
-/** Contents of the regular files of the component dir; null when the dir or a file cannot be read (a host reboot
- *  empties the tmpfs, and a component without secrets has no dir), so the log reader can tell "none" from "lost". */
+/** The component's secret folder, resolved the way `assertAppStackPayloadHardening` resolves it for the binds. */
+function appStackComponentSecretDir(secretsRootDir: string, stackId: string, componentKey: string): string {
+  return path.join(path.resolve(secretsRootDir), appStackSecretDirKey(stackId, componentKey));
+}
+
+/** The names of the secret files a container was given, from the `HostConfig` of its inspect: the binds whose source
+ *  lies inside the component's secret folder (derived here, compared resolved), each a plain file name of it. A bind
+ *  elsewhere is not a secret file: it does not count and is never read. Binds null or absent is a container created
+ *  with none (Docker's answer then). null when the binds cannot tell: no HostConfig, Binds not a list, an entry that is
+ *  not a `source:target[:mode]` bind, or a source in the folder that is not a plain file name of it (the folder
+ *  itself, a nested path). */
+export function appStackContainerSecretFileNames(secretsRootDir: string, stackId: string, componentKey: string, hostConfig: unknown): string[] | null {
+  if (typeof hostConfig !== "object" || hostConfig === null) return null;
+  const binds: unknown = (hostConfig as { readonly Binds?: unknown }).Binds ?? [];
+  if (!Array.isArray(binds)) return null;
+  const dir = appStackComponentSecretDir(secretsRootDir, stackId, componentKey);
+  const names: string[] = [];
+  for (const bind of binds as unknown[]) {
+    // Docker splits a bind at every colon, so a source never holds one.
+    const parts = typeof bind === "string" ? bind.split(":") : [];
+    const source = parts[0] ?? "";
+    if (parts.length < 2 || parts.length > 3 || source === "") return null;
+    if (!path.isAbsolute(source)) continue; // a named volume
+    const resolved = path.resolve(source);
+    if (resolved !== dir && !resolved.startsWith(`${dir}${path.sep}`)) continue;
+    const name = path.relative(dir, resolved);
+    if (name === "" || name.includes(path.sep)) return null;
+    names.push(name);
+  }
+  return names;
+}
+
+/** Contents of the regular files of the component's secret folder, which also holds the values of its environment
+ *  secrets. null when one of `expected` (the secret files its container was given) is not in the folder as a regular
+ *  file (a host reboot empties the tmpfs, and Docker then recreates a missing bind source as a directory), when the
+ *  folder cannot be read while a file is expected, or when a file cannot be read. With no file expected, a folder
+ *  that cannot be read gives [] (a component without secrets has none). */
 export async function readAppStackComponentSecretFiles(
   secretsRootDir: string,
   stackId: string,
   componentKey: string,
+  expected: readonly string[],
 ): Promise<string[] | null> {
+  const dir = appStackComponentSecretDir(secretsRootDir, stackId, componentKey);
+  let names: string[];
   try {
-    const dir = path.join(secretsRootDir, appStackSecretDirKey(stackId, componentKey));
+    names = (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name);
+  } catch {
+    return expected.length === 0 ? [] : null;
+  }
+  if (expected.some((name) => !names.includes(name))) return null;
+  try {
     const values: string[] = [];
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.isFile()) values.push((await readFile(path.join(dir, entry.name), "utf8")).slice(0, APP_STACK_SECRET_CONTENT_MAX_CHARS));
-    }
+    for (const name of names) values.push((await readFile(path.join(dir, name), "utf8")).slice(0, APP_STACK_SECRET_CONTENT_MAX_CHARS));
     return values;
   } catch {
     return null;
@@ -68,7 +109,33 @@ export async function readAppStackComponentSecretValues(
   stackId: string,
   componentKey: string,
 ): Promise<string[]> {
-  return (await readAppStackComponentSecretFiles(secretsRootDir, stackId, componentKey)) ?? [];
+  try {
+    return (await readAppStackComponentSecretFiles(secretsRootDir, stackId, componentKey, [])) ?? [];
+  } catch {
+    return []; // an identifier the folder name refuses
+  }
+}
+
+/** What a reader of a component's output needs from its inspected container. */
+export interface AppStackInspectedContainer {
+  readonly labels: Readonly<Record<string, string>> | null | undefined;
+  readonly env: readonly string[] | null | undefined;
+  /** The `HostConfig` of the inspect, as it came. */
+  readonly hostConfig: unknown;
+}
+
+/** The values a reader of a component's output masks, from its inspected container alone: the secret files its binds
+ *  name must all be in the component's folder (see `appStackContainerSecretFileNames`), else, like any value that
+ *  cannot be established, it throws "cannot be masked" before a line is read. A container with no secret bind needs
+ *  no folder. */
+export async function appStackContainerMaskValues(
+  secretsRootDir: string,
+  ref: { readonly stackId: string; readonly componentKey: string },
+  container: AppStackInspectedContainer,
+): Promise<string[]> {
+  const expected = appStackContainerSecretFileNames(secretsRootDir, ref.stackId, ref.componentKey, container.hostConfig);
+  const files = expected === null ? null : await readAppStackComponentSecretFiles(secretsRootDir, ref.stackId, ref.componentKey, expected);
+  return appStackLogMaskValues(ref.componentKey, container, files);
 }
 
 /** The secrets inside one environment value, by its pieces (template text, null = a secret): null when the value does
@@ -108,22 +175,20 @@ function splitAppStackSecretValue(value: string, pieces: readonly (string | null
   return starts.map((start, i) => value.slice(start, ends[i]));
 }
 
-/** The values the log reader masks: the component's secret files (`fileValues`, null when its dir cannot be read) and
- *  the environment secrets its container holds, which its label names and its own Config.Env gives, so they outlive the
- *  tmpfs (a reboot). Throws, before any log is read, when they cannot be established: fewer files than the
- *  `expectedFiles` of the component's plan (without that number, from an API one release older: no readable dir), a
- *  label that is not the executor's, a name that is not once in the environment, a value without the label's text, a
- *  value only the files can split and no file, or a value too short to mask (stored before the panel's minimum). */
+/** The values the log reader masks: the component's secret files (`fileValues`, null when they cannot be established:
+ *  see `readAppStackComponentSecretFiles`) and the environment secrets its container holds, which its label names and
+ *  its own Config.Env gives, so they outlive the tmpfs (a reboot). Throws, before any log is read, when they cannot be
+ *  established: no file values, a label that is not the executor's, a name that is not once in the environment, a
+ *  value without the label's text, a value only the files can split and no file, or a value too short to mask (stored
+ *  before the panel's minimum). */
 export function appStackLogMaskValues(
   componentKey: string,
   container: { readonly labels: Readonly<Record<string, string>> | null | undefined; readonly env: readonly string[] | null | undefined },
   fileValues: readonly string[] | null,
-  expectedFiles?: number,
 ): string[] {
   const unmaskable = () => new ExecutorCodedError(`The logs of component ${componentKey} cannot be masked`, "DOCKER_ENGINE_UNAVAILABLE");
-  if (expectedFiles === undefined ? fileValues === null : (fileValues?.length ?? 0) < expectedFiles) throw unmaskable();
-  const files = fileValues ?? [];
-  const values = [...files];
+  if (fileValues === null) throw unmaskable();
+  const values = [...fileValues];
   const label = container.labels?.[APP_STACK_LABELS.secretEnvironment];
   if (label !== undefined) {
     const entries = decodeAppStackSecretEnvLabel(label);
@@ -133,7 +198,7 @@ export function appStackLogMaskValues(
       const found = env.filter((entry) => typeof entry === "string" && entry.startsWith(`${name}=`));
       if (found.length !== 1) throw unmaskable();
       const parts = splitAppStackSecretValue((found[0] ?? "").slice(name.length + 1), pieces);
-      if (parts === null || (parts === "ambiguous" && files.length === 0)) throw unmaskable();
+      if (parts === null || (parts === "ambiguous" && fileValues.length === 0)) throw unmaskable();
       if (parts !== "ambiguous") values.push(...parts);
     }
   }

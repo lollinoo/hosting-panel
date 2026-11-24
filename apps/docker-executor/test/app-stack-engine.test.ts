@@ -16,7 +16,7 @@ import {
 } from "../src/app-stacks/index.js";
 import { LOG_READ_MAX_BYTES } from "../src/docker-logs.js";
 import type { AppStackRouteEntry } from "../src/traefik-config.js";
-import { createAppStackFakeEngine } from "./support/app-stack-fake-engine.js";
+import { createAppStackFakeEngine, type FakeHostConfig } from "./support/app-stack-fake-engine.js";
 import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
 
 const ID = "stk_0123456789abcdef";
@@ -1052,7 +1052,8 @@ describe("getAppStackComponentLogs (5.17)", () => {
     async function stack() {
       const h = await setup();
       await deployed(h);
-      await writeAppStackComponentSecrets(h.root, ID, "worker", { ascii: ASCII, wide: WIDE });
+      // The folder is written whole: the file the worker's container was given stays, or the read is refused (BUG-43).
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: SECRET, ascii: ASCII, wide: WIDE });
       return h;
     }
 
@@ -1093,35 +1094,145 @@ describe("getAppStackComponentLogs (5.17)", () => {
 
   describe("a value it could not mask (BUG-43)", () => {
     const unmaskable = (key: string) => ({ code: "DOCKER_ENGINE_UNAVAILABLE", message: `The logs of component ${key} cannot be masked` });
-    const counted = (h: Harness, componentKey: string, secretFileCount?: number) =>
-      h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 50, ...(secretFileCount === undefined ? {} : { secretFileCount }) });
+    const readOf = (h: Harness, componentKey: string) => h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 50 });
     const readLogs = (h: Harness) => h.fake.log.some((line) => line.includes("/logs?"));
+    const TOKEN = "t0ken-value-77";
+    /** worker is given two secret files. */
+    const twoFiles = () => {
+      const plan = appStackTestPlan();
+      return rehash({
+        ...plan,
+        components: plan.components.map((c) =>
+          c.key === "worker" ? { ...c, secretFiles: [{ envName: "API_TOKEN_FILE", parameterKey: "api_token", version: 1 }, ...c.secretFiles] } : c,
+        ),
+      });
+    };
+    async function twoFilesDeployed(h: Harness) {
+      const plan = twoFiles();
+      await prepared(h, plan);
+      await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+      await h.engine.startAppStackComponent({
+        plan,
+        componentKey: "worker",
+        secretFileContents: [...SECRETS, { parameterKey: "api_token", version: 1, content: TOKEN }],
+      });
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET} token=${TOKEN}\n` });
+      h.fake.log.length = 0;
+    }
+    /** What Docker does after a host reboot emptied the tmpfs: it makes each missing bind source a directory. */
+    async function recreatedByDocker(h: Harness) {
+      for (const entry of await readdir(h.root)) await rm(path.join(h.root, entry), { recursive: true, force: true });
+      for (const container of h.fake.containers.values()) {
+        for (const bind of container.HostConfig?.Binds ?? []) await mkdir(bind.split(":")[0] ?? "", { recursive: true });
+      }
+    }
 
-    it("refuses, before any log read, when the plan gives the component secret files and they are gone", async () => {
+    it("masks every file of a container given two secret files, when the folder holds both", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED] token=[REDACTED]"]);
+    });
+
+    it("refuses, before any log read, when one file the container was given is missing", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      await rm(path.join(secretDir(h, "worker"), "api_token"));
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("refuses when the folder is gone, and when Docker recreated each bind source as a directory", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      await rm(secretDir(h, "worker"), { recursive: true, force: true });
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      await recreatedByDocker(h);
+      expect((await readdir(secretDir(h, "worker"))).sort()).toEqual(["api_token", "shared_key"]);
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("reads a container given no secret file, with its folder and without", async () => {
+      const h = await setup();
+      await deployed(h);
+      const web = h.fake.containers.get(WEB)!;
+      web.logs.push({ stream: "stdout", payload: `${AT} GET / 200\n` });
+      expect(web.HostConfig).toEqual({ Binds: [] });
+      await expect(exists(secretDir(h, "web"))).resolves.toBe(false);
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      await mkdir(secretDir(h, "web"));
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      // Docker's answer for a container created without binds: no list, or null.
+      for (const host of [{ Binds: null }, {}]) {
+        web.HostConfig = host as FakeHostConfig;
+        await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      }
+    });
+
+    it("never counts or reads a bind whose source is outside the component's folder", async () => {
+      const h = await setup();
+      await deployed(h);
+      const elsewhere = path.join(h.root, "elsewhere");
+      await mkdir(elsewhere);
+      await writeFile(path.join(elsewhere, "token"), TOKEN);
+      const web = h.fake.containers.get(WEB)!;
+      web.HostConfig = {
+        Binds: [
+          `${path.join(elsewhere, "token")}:/run/secrets/token:ro`,
+          `${path.join(secretDir(h, "web"), "..", `app_${ID}__worker`, "shared_key")}:/run/secrets/shared_key:ro`,
+          `${path.join(elsewhere, "missing")}:/run/secrets/missing:ro`,
+        ],
+      };
+      web.logs.push({ stream: "stdout", payload: `${AT} token=${TOKEN}\n` });
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: `token=${TOKEN}` }]);
+    });
+
+    it("refuses a bind into the folder that is not one file of it, and an inspect whose binds cannot be read", async () => {
       const h = await setup();
       await deployed(h);
       logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
-      await rm(secretDir(h, "worker"), { recursive: true, force: true });
-      await expect(counted(h, "worker", 1)).rejects.toMatchObject(unmaskable("worker"));
-      // Without the number (an API one release older) a folder that cannot be read refuses too.
-      await expect(counted(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      const worker = h.fake.containers.get(WORKER)!;
+      const own = worker.HostConfig?.Binds ?? [];
+      expect(own).toEqual([`${path.join(secretDir(h, "worker"), "shared_key")}:/run/secrets/shared_key:ro`]);
+      for (const host of [
+        { Binds: [...own, `${secretDir(h, "worker")}:/run/secrets:ro`] },
+        { Binds: [...own, `${path.join(secretDir(h, "worker"), "sub", "x")}:/run/secrets/x:ro`] },
+        { Binds: [...own, "no-target"] },
+        { Binds: [...own, 42] },
+        { Binds: own.join(",") },
+        null,
+      ]) {
+        worker.HostConfig = host as FakeHostConfig;
+        await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      }
       expect(readLogs(h)).toBe(false);
+      worker.HostConfig = { Binds: own };
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED]"]);
     });
 
-    it("refuses when the folder holds fewer files than the plan gives", async () => {
+    it("refuses a container built with a secret file the plan it was first installed from did not have", async () => {
+      // The reviewer's case: an upgrade gives web its first secret file, then a reboot; the API's stored "applied" plan
+      // may still be the older one, and the executor asks it nothing.
       const h = await setup();
       await deployed(h);
-      await expect(counted(h, "worker", 2)).rejects.toMatchObject(unmaskable("worker"));
-      expect(readLogs(h)).toBe(false);
-      await expect(counted(h, "worker", 1)).resolves.toEqual([]);
-    });
-
-    it("reads a component the plan gives no secret file, whose folder does not exist", async () => {
-      const h = await setup();
-      await deployed(h);
-      h.fake.containers.get(WEB)?.logs.push({ stream: "stdout", payload: `${AT} GET / 200\n` });
-      await expect(exists(secretDir(h, "web"))).resolves.toBe(false);
-      await expect(counted(h, "web", 0)).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      const plan = appStackTestPlan();
+      const upgraded = rehash({
+        ...plan,
+        components: plan.components.map((c) =>
+          c.key === "web" ? { ...c, secretFiles: [{ envName: "WEB_TOKEN_FILE", parameterKey: "web_token", version: 1 }] } : c,
+        ),
+      });
+      await h.engine.createAppStackComponents({ plan: upgraded });
+      await h.engine.startAppStackComponent({ plan: upgraded, componentKey: "web", secretFileContents: [{ parameterKey: "web_token", version: 1, content: TOKEN }] });
+      h.fake.containers.get(WEB)?.logs.push({ stream: "stdout", payload: `${AT} token=${TOKEN}\n` });
+      expect((await readOf(h, "web")).map((line) => line.text)).toEqual(["token=[REDACTED]"]);
+      await rm(secretDir(h, "web"), { recursive: true, force: true });
+      const gone = await readOf(h, "web").then(() => null, (err: unknown) => err);
+      expect(gone).toMatchObject(unmaskable("web"));
+      await recreatedByDocker(h);
+      const recreated = await readOf(h, "web").then(() => null, (err: unknown) => err);
+      expect(recreated).toMatchObject(unmaskable("web"));
+      expect(JSON.stringify([String(gone), String(recreated)])).not.toContain(TOKEN);
     });
 
     it("refuses a stored value shorter than six characters, which it would show as it is", async () => {
@@ -1129,7 +1240,7 @@ describe("getAppStackComponentLogs (5.17)", () => {
       await deployed(h);
       await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: "abcde" });
       logs(h).push({ stream: "stdout", payload: `${AT} key=abcde\n` });
-      await expect(counted(h, "worker", 1)).rejects.toMatchObject(unmaskable("worker"));
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
       expect(readLogs(h)).toBe(false);
     });
 
@@ -1143,7 +1254,7 @@ describe("getAppStackComponentLogs (5.17)", () => {
         { stream: "stdout", payload: `${AT} body p=${encodeURIComponent(value).replace(/%20/g, "+")}&ok=1\n` },
         { stream: "stdout", payload: `${AT} plain ${value} end\n` },
       );
-      expect((await counted(h, "worker", 1)).map((line) => line.text)).toEqual([
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual([
         "GET /login?p=[REDACTED]&next=/",
         "body p=[REDACTED]&ok=1",
         "plain [REDACTED] end",

@@ -34,7 +34,9 @@ import type { APP_STACK_EXECUTOR_METHODS, ServiceLogLine, StackExecutorPort } fr
 import {
   APP_STACK_LABELS,
   AppStackExecutorError,
+  appStackContainerMaskValues,
   appStackContainerName,
+  appStackContainerSecretFileNames,
   appStackEdgeNetworkName,
   appStackInternalNetworkName,
   appStackLogMaskValues,
@@ -51,7 +53,6 @@ import {
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretFiles,
   readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
@@ -103,7 +104,8 @@ interface SimStack {
   networks: Map<AppStackNetworkRole, Readonly<Record<string, string>>>;
   volumes: Map<string, Readonly<Record<string, string>>>;
   containers: Map<string, SimContainer>;
-  secrets: Map<string, string[]>;
+  /** The secret files of each started component, by name (what the engine keeps in its folder). */
+  secrets: Map<string, Readonly<Record<string, string>>>;
   routeYaml: string;
 }
 
@@ -239,7 +241,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
     const secretValues =
       this.options.secretsRootDir !== null
         ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : (stack.secrets.get(req.componentKey) ?? []);
+        : Object.values(stack.secrets.get(req.componentKey) ?? {});
     return { running: container.state === "running", secretValues };
   }
 
@@ -517,11 +519,17 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
       if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      // The engine's rule: a component started without secrets has no dir, and no entry here.
-      const files = this.options.secretsRootDir !== null
-        ? await readAppStackComponentSecretFiles(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : (stack?.secrets.get(req.componentKey) ?? null);
-      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files, req.secretFileCount);
+      // The engine's rule, from the container's binds: every secret file it was given must be there.
+      const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
+      let values: string[];
+      if (this.options.secretsRootDir !== null) {
+        values = await appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
+      } else {
+        const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
+        const held = stack?.secrets.get(req.componentKey) ?? {};
+        const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
+        values = appStackLogMaskValues(req.componentKey, inspected, files);
+      }
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }
@@ -643,7 +651,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
 
   private async writeSecrets(stack: SimStack, stackId: string, key: string, contents: Readonly<Record<string, string>> | null): Promise<void> {
     if (contents === null) stack.secrets.delete(key);
-    else stack.secrets.set(key, Object.values(contents));
+    else stack.secrets.set(key, { ...contents });
     const root = this.options.secretsRootDir;
     if (root === null) return;
     try {
