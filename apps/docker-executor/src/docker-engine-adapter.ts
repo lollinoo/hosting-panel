@@ -1501,12 +1501,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         },
       },
       readLogs: (ref, tail) => this.readContainerLogs(ref, tail),
+      // The engine and the tasks of one application exclude each other (ADR-0042).
+      taskRunning: (stackId) => this.appStackTasks.isRunning(stackId),
     });
     this.appStackTaskLimits = options?.appStackTaskLimits;
     this.appStackTasks = new AppStackTaskRunner({
       target: this.execTarget,
       secretsRootDir: this.secretsRootDir,
       ...(this.appStackTaskLimits ? { limits: this.appStackTaskLimits } : {}),
+      engineBusy: (stackId) => this.appStackEngine.isChanging(stackId),
       // Nothing of the run is logged: no name, no argument, no output.
       onCleanupFailed: () => {
         console.warn(

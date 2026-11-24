@@ -68,6 +68,8 @@ export interface AppStackTaskRunnerDeps {
   readonly now?: () => Date;
   /** The clean-up after a run did not finish, also when tried again. It is told nothing: no name and no output. */
   readonly onCleanupFailed?: () => void;
+  /** The engine of this executor is changing the application: no task of it starts meanwhile (ADR-0042). */
+  readonly engineBusy?: (stackId: string) => boolean;
   readonly limits?: AppStackTaskLimits;
 }
 
@@ -237,6 +239,7 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
       return seen.state;
     }
     if (this.busy.has(req.stackId)) refuse("STACK_BUSY", "A task of this application is already running");
+    if (this.deps.engineBusy?.(req.stackId) === true) refuse("STACK_BUSY", "The application is being changed");
     this.busy.add(req.stackId);
     try {
       const containerId = await this.findContainer(req);
@@ -256,6 +259,11 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     } finally {
       this.busy.delete(req.stackId);
     }
+  }
+
+  /** A task of the application runs here (the engine asks before it changes the application's containers). */
+  public isRunning(stackId: string): boolean {
+    return this.busy.has(stackId);
   }
 
   /** A read: it starts nothing. A run of another application, or of another customer, is `unknown`. */

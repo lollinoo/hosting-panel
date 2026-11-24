@@ -486,6 +486,53 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect(commands).toBe(2);
   });
 
+  it("keeps the engine off the containers of an application while its task runs, and a task off while the engine works", async () => {
+    let held = "";
+    const { adapter, mockDaemon } = await setup({
+      command: (call) => {
+        if (held !== "") return {};
+        held = call.execId;
+        return { stayOpen: true, frames: [[1, "going\n"]] };
+      },
+    });
+    mockDaemon.containers.set("other_id", component("web", { id: "other_id" }, OTHER_STACK));
+    const ref = { stackId: STACK, organizationId: ORG };
+    const plan = appStackTestPlan();
+    const first = adapter.runAppStackTask(request(1, { timeoutSeconds: 600 }));
+    await until(() => held !== "");
+
+    // The executor does not trust the API's lock: create, start, restart, stop and remove are refused meanwhile.
+    const asked = mockDaemon.requestedPaths.length;
+    const changes: Array<() => Promise<unknown>> = [
+      () => adapter.createAppStackComponents({ plan }),
+      () => adapter.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }),
+      () => adapter.restartAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }),
+      () => adapter.stopAppStack(ref),
+      () => adapter.removeAppStack({ ...ref, removeVolumes: false }),
+      () => adapter.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
+    ];
+    for (const change of changes) {
+      const err = await refusal(change());
+      expect([err.reason, err.code, err.message]).toEqual(["STACK_BUSY", "RESOURCE_LOCKED", "A task of this application stack is running"]);
+    }
+    expect(mockDaemon.requestedPaths.length).toBe(asked);
+    // Another application is not held back.
+    await adapter.stopAppStack({ stackId: OTHER_STACK, organizationId: ORG });
+    mockDaemon.endExec(held, 0);
+    expect((await first).outcome).toBe("succeeded");
+
+    // The reverse: while the engine changes the application, a task is refused before anything is asked to Docker.
+    const execs = mockDaemon.execBodies.length;
+    const stopping = adapter.stopAppStack(ref);
+    const err = await refusal(adapter.runAppStackTask(request(2)));
+    expect([err.reason, err.code, err.message]).toEqual(["STACK_BUSY", "RESOURCE_LOCKED", "The application is being changed"]);
+    await stopping;
+    expect(mockDaemon.execBodies).toHaveLength(execs);
+    // Nothing ran: the same run may be asked again once the engine is done.
+    mockDaemon.containers.set(`${WEB}_id`, component("web"));
+    expect((await adapter.runAppStackTask(request(2))).outcome).toBe("succeeded");
+  });
+
   it("tells a run only to the application and the customer it belongs to", async () => {
     const { adapter, mockDaemon } = await setup();
     const result = await adapter.runAppStackTask(request(1));
