@@ -900,21 +900,24 @@ describe("wizard", () => {
     expect(inner(h, "button")).toEqual([m.apps.wizard.retry]);
   });
 
-  it.each(LOCALES)("%s · a create whose outcome is unknown says so in the alert and offers Retry alone: no Back, no link, no field", (_l, m) => {
+  it.each(LOCALES)("%s · a create whose outcome is unknown says so in the alert and offers Retry and the list of applications: no Back, no field", (_l, m) => {
     for (const step of WIZARD_STEPS) {
       const h = wizard(m, { 0: step, 1: "my-notes", 3: ["admin_password"], 6: m.apps.wizard.createUnknown, 10: SENT_CREATE });
       expect(withRole(h, "alert"), step).toEqual([m.apps.wizard.createUnknown]);
       expect(inner(h, "h2"), step).toEqual([m.apps.wizard.step.install]);
       expect(inner(h, "button"), step).toEqual([m.apps.wizard.retry]);
-      expect(inner(h, "a"), step).toEqual([]);
+      expect(inner(h, "a"), step).toEqual([m.apps.wizard.appsLink]);
+      expect(h, step).toContain('href="/apps"');
       expect(controls(h), step).toEqual([]);
     }
   });
 
-  it.each(LOCALES)("%s · the text of an unknown create says the panel does not know yet and Retry is safe, never to reload or start again", (l, m) => {
+  // The key lives in the page only: Retry here is safe, a create started from another page is not.
+  it.each(LOCALES)("%s · the text of an unknown create says Retry here is safe and to look at the applications before installing again elsewhere, never to reload", (l, m) => {
     const text = m.apps.wizard.createUnknown;
     expect(text).toContain(l === "it" ? "non sa ancora" : "does not know yet");
-    expect(text).toContain(l === "it" ? "Riprovare è sicuro" : "Trying again is safe");
+    expect(text).toContain(l === "it" ? "Riprovare da questa pagina è sicuro" : "Trying again from this page is safe");
+    expect(text).toContain(l === "it" ? "da un'altra pagina, guarda tra le tue applicazioni" : "from another page, look at your applications");
     expect(text).not.toMatch(/reload|refresh|start again|start over|ricarica|aggiorna la pagina|ricomincia|da capo/i);
   });
 });

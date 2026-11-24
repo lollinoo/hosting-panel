@@ -490,7 +490,12 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           <Button asChild variant="outline">
             <Link href={detailHref(createdStackId)}>{t.openApp}</Link>
           </Button>
-        ) : unsure ? null : view === "configure" ? (
+        ) : unsure ? (
+          // The key lives in this page only: the list is where to look before installing again from elsewhere.
+          <Button asChild variant="outline">
+            <Link href="/apps">{t.appsLink}</Link>
+          </Button>
+        ) : view === "configure" ? (
           <Button asChild variant="outline">
             <Link href="/apps/new">{t.back}</Link>
           </Button>

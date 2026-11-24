@@ -3146,7 +3146,8 @@ x-hp-ingress:
       secretFailed: "The application was created but a private value was not saved. Try again or set it from the application page.",
       created: "The application was created but is not installed yet: you can finish it here or later from its page, among your applications.",
       createUnknown:
-        "The panel does not know yet whether the application was created. Trying again is safe: the same details are sent again and the application is never created twice.",
+        "The panel got no clear answer and does not know yet whether the application was created. Trying again from this page is safe: the same details are sent again and the application is never created twice. Before installing it again from another page, look at your applications: it may already be there.",
+      appsLink: "Your applications",
       openApp: "Open the application",
       domainInvalid: "Write the address name only, for example shop.example.com, without http:// or a path.",
       domainRepeated: "This address is already in the list.",

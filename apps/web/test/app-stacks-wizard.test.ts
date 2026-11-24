@@ -717,7 +717,9 @@ describe("AppWizard when the create's outcome is unknown", () => {
     for (const step of ["install", "review", "domains", "configure"]) {
       for (const m of [en, itMsgs]) {
         const { tree } = wizard({ ...unsure, 0: step, 6: m.apps.wizard.createUnknown }, { 0: values }, ENTRY, m);
-        expect(actions(tree), step).toEqual([m.apps.wizard.retry]);
+        // The list is where a create that did happen shows: the only way out the sentence points at.
+        expect(actions(tree), step).toEqual([m.apps.wizard.appsLink, m.apps.wizard.retry]);
+        expect(els(tree).find((e) => textOf(e) === m.apps.wizard.appsLink && typeof e.props.href === "string")?.props.href, step).toBe("/apps");
         expect(editable(tree), step).toEqual([]);
         const out = html(tree, m);
         expect(out, step).toMatch(new RegExp(`aria-current="step"[^>]*>${m.apps.wizard.step.install}`));
@@ -814,10 +816,10 @@ describe("AppWizard when the create's outcome is unknown", () => {
     expect(again.sets.filter(([k]) => k === 0 || k === 5 || k === 8)).toEqual([[5, {}]]);
     expect(keys.current.create).toBe(keyOf(0));
 
-    // What that state offers: Retry alone, no field, whatever step the state names.
+    // What that state offers: the list and Retry, no field, whatever step the state names.
     for (const step of ["install", "review", "configure"]) {
       const shown = wizard({ ...unsure, 0: step, 6: text }, { 0: values, 1: keys });
-      expect(actions(shown.tree), step).toEqual([t.retry]);
+      expect(actions(shown.tree), step).toEqual([t.appsLink, t.retry]);
       expect(editable(shown.tree), step).toEqual([]);
       expect(html(shown.tree), step).toMatch(new RegExp(`role="alert"[^>]*><p>${text}</p>`));
     }
