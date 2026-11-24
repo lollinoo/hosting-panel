@@ -240,8 +240,9 @@ async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueA
         .where(and(eq(appStackTaskSchedules.stackId, stack.id), eq(appStackTaskSchedules.taskKey, input.taskKey)));
     }
     // The last runs of the task stay; a run that has not ended is the newest one (the locks allow one at a time).
-    // A run requested later than `now` was stamped by a clock that ran ahead: it is set aside, neither dropped nor
-    // counted, until real time reaches it, so the time it served is found by its run and not run a second time.
+    // A run requested later than `now` is set aside, neither dropped nor counted. That is a run of a clock that ran
+    // ahead, seen once the clock is right: while the clock still runs ahead its own runs are ordinary ones here and
+    // the oldest beyond `runsKept` leave, so a time whose run is gone can run once more (ADR-0042 A7).
     const asOf = sql`${now.toISOString()}::timestamptz`;
     await tx.execute(sql`
       DELETE FROM app_stack_task_runs

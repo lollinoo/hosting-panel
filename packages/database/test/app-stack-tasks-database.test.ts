@@ -1103,54 +1103,69 @@ describe("@hosting-panel/database — tasks of applications", () => {
     const CHANGED_AHEAD = at("2031-01-12T08:30:00.000Z");
     const aheadScope = (stackId: string) => ({ organizationId: orgA, stackId, taskKey: "cleanup" });
 
-    /**
-     * `count` hourly runs queued by the clock that ran ahead, each stamped a minute after its hour. Each run is left
-     * unfinished while the next one is queued (a run that has not ended is never dropped), then all of them end.
-     */
-    async function ranAhead(stackId: string, count: number): Promise<string[]> {
-      await stack(stackId);
-      await setAppStackTaskScheduleTransactional(db(), { ...aheadScope(stackId), schedule: { frequency: "hourly" }, changedBy: USER, now: CHANGED_AHEAD });
-      const ids: string[] = [];
-      for (let index = 0; index < count; index += 1) {
-        const result = await scheduled(stackId, "cleanup", hourOf(index), CHANGED_AHEAD, new Date(hourOf(index).getTime() + 60_000));
-        if (result.outcome !== "queued") throw new Error(result.outcome);
-        ids.push(result.run.id);
-        await settle(stackId);
-      }
-      for (const [index, runId] of ids.entries()) {
-        await finishAppStackTaskRun(db(), {
-          runId,
-          status: "succeeded",
-          problem: null,
-          exitCode: 0,
-          startedAt: null,
-          endedAt: new Date(hourOf(index).getTime() + 120_000),
-          output: "",
-          outputTruncated: false,
-        });
-      }
-      return ids;
+    /** Ends a run as the runtime does (`finishAppStackTaskRun`) and its operation as the worker does: no row is left open. */
+    async function ended(stackId: string, runId: string, endedAt: Date): Promise<void> {
+      expect(await startAppStackTaskRun(db(), { runId, startedAt: endedAt })).toBe(true);
+      expect(
+        await finishAppStackTaskRun(db(), { runId, status: "succeeded", problem: null, exitCode: 0, startedAt: null, endedAt, output: "", outputTruncated: false }),
+      ).toBe(true);
+      await settle(stackId);
     }
 
-    it("stay until real time reaches them: a time they served is not run again after the clean-up of a later run", async () => {
-      const STACK = "stk_tk_aheadruns";
-      const ids = await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept + 2);
-      expect(ids).toHaveLength(22);
-      // The clock is set right; a run is asked for at the real time and the application keeps the last runs.
-      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), REAL)).toBeGreaterThanOrEqual(1);
-      await finished(STACK, "cleanup", new Date(REAL.getTime() + HOUR_MS));
+    /**
+     * `count` hourly runs of one task made one after the other by the clock that ran ahead, each stamped a minute after
+     * its hour and ended before the next is queued. The clean-up that follows each one reads that clock, so a task keeps
+     * the last `runsKept` of them.
+     */
+    async function ranAhead(stackId: string, count: number): Promise<void> {
+      await stack(stackId);
+      await setAppStackTaskScheduleTransactional(db(), { ...aheadScope(stackId), schedule: { frequency: "hourly" }, changedBy: USER, now: CHANGED_AHEAD });
+      for (let index = 0; index < count; index += 1) {
+        const stamped = new Date(hourOf(index).getTime() + 60_000);
+        const result = await scheduled(stackId, "cleanup", hourOf(index), CHANGED_AHEAD, stamped);
+        if (result.outcome !== "queued") throw new Error(result.outcome);
+        await ended(stackId, result.run.id, new Date(stamped.getTime() + 60_000));
+      }
+    }
+    const slotsOf = async (stackId: string) =>
+      (await runsOf(stackId)).map((run) => run.slotAt?.getTime() ?? null).sort((a, b) => (a ?? 0) - (b ?? 0));
 
-      // Real time reaches the oldest time the clock which ran ahead served: its run is still there.
+    it("does not run again the times whose runs a task keeps: the last runsKept times served by the wrong clock", async () => {
+      const STACK = "stk_tk_aheadruns";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
+      // The clock is set right.
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), REAL)).toBeGreaterThanOrEqual(1);
       const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
       expect(changedAt).toEqual(REAL);
-      expect(await scheduled(STACK, "cleanup", hourOf(0), changedAt, hourOf(0))).toEqual({ outcome: "stale" });
-      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: hourOf(0), skippedSlotAt: null, skipReason: null });
-      const runs = await runsOf(STACK);
-      expect(runs).toHaveLength(ids.length + 1);
-      expect(runs.filter((run) => run.slotAt?.getTime() === hourOf(0).getTime())).toHaveLength(1);
+
+      // Real time reaches each of those times in turn: its run is found, the time is served, nothing is queued, no note.
+      for (let index = 0; index < APP_STACK_TASK_LIMITS.runsKept; index += 1) {
+        expect(await scheduled(STACK, "cleanup", hourOf(index), changedAt, hourOf(index)), `time ${String(index)}`).toEqual({ outcome: "stale" });
+        expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: hourOf(index), skippedSlotAt: null, skipReason: null });
+      }
+      expect(await runsOf(STACK)).toHaveLength(APP_STACK_TASK_LIMITS.runsKept);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(APP_STACK_TASK_LIMITS.runsKept);
     });
 
-    it("are not counted among the last runs: the runs made at the real time stay", async () => {
+    it("runs once more a time of the wrong clock whose run is no longer kept: the limit ADR-0042 A7 states, not an accident", async () => {
+      const STACK = "stk_tk_aheadlimit";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept + 3);
+      // The clean-up that followed each run, under the wrong clock, dropped the three oldest: a task keeps its last runsKept runs.
+      expect(await slotsOf(STACK)).toEqual(Array.from({ length: APP_STACK_TASK_LIMITS.runsKept }, (_, index) => hourOf(index + 3).getTime()));
+      await repairAppStackTaskSchedulesAheadOfClock(db(), REAL);
+      const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
+
+      // Real time reaches the oldest of the three: nothing remembers it, so it runs once.
+      const again = await scheduled(STACK, "cleanup", hourOf(0), changedAt, new Date(hourOf(0).getTime() + 60_000));
+      if (again.outcome !== "queued") throw new Error(again.outcome);
+      expect(again.run.slotAt).toEqual(hourOf(0));
+      await ended(STACK, again.run.id, new Date(hourOf(0).getTime() + 120_000));
+      expect((await runsOf(STACK)).filter((run) => run.slotAt?.getTime() === hourOf(0).getTime())).toHaveLength(1);
+      // The oldest time whose run is kept is still found by it.
+      expect(await scheduled(STACK, "cleanup", hourOf(3), changedAt, hourOf(3))).toEqual({ outcome: "stale" });
+    });
+
+    it("keeps the runs made at the real time: a run stamped ahead is not counted among the last runs", async () => {
       const STACK = "stk_tk_aheadkept";
       await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
       const first = await finished(STACK, "cleanup", new Date(REAL.getTime() + HOUR_MS));
@@ -1159,7 +1174,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await runsOf(STACK)).toHaveLength(APP_STACK_TASK_LIMITS.runsKept + 2);
     });
 
-    it("leave like any other run once real time has passed them", async () => {
+    it("lets a run stamped ahead leave like any other once real time has passed it", async () => {
       const STACK = "stk_tk_aheadpassed";
       await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
       const [oldest] = (await runsOf(STACK)).sort((a, b) => a.requestedAt.getTime() - b.requestedAt.getTime());
