@@ -5921,7 +5921,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes
+          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or after a restart of the application when it is still refused
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6119,7 +6119,9 @@ paths:
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
         `path_target_removed` (`details[0].field: domains`). When every such address is one being removed, the refusal
         is 409 `RESOURCE_LOCKED` with `address_removing` instead: its row goes once its route is withdrawn, so the same
-        upgrade is accepted a few minutes later. A database that an application still uses is refused with
+        upgrade is normally accepted a few minutes later; while the application is `failed`, or after a stop that
+        failed before it withdrew the routes, only once a start, a restart or a stop of the application succeeds. A
+        database that an application still uses is refused with
         `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
         Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
