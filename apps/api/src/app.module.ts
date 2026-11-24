@@ -116,7 +116,7 @@ import { MailRelayService } from "./mail/mail-relay.service.js";
 import { NotificationDispatchService } from "./notifications/notification-dispatch.service.js";
 import { NotificationSenderService } from "./notifications/notification-sender.service.js";
 import { NotificationSettingsService } from "./notifications/notification-settings.service.js";
-import { createOutboundHttp, type OutboundHttpPort } from "./notifications/outbound-http.js";
+import { createOutboundHttp, recordedServerAddresses, type OutboundHttpPort } from "./notifications/outbound-http.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
 import { TlsCertificatesService } from "./certificates/tls-certificates.service.js";
 import { SiteTlsApplier } from "./certificates/site-tls-applier.js";
@@ -222,8 +222,9 @@ export class AppModule {
         },
         {
           provide: NOTIFICATION_OUTBOUND_TOKEN,
-          useFactory: (dns: DnsLookup): OutboundHttpPort => options.notificationOutbound ?? createOutboundHttp(dns),
-          inject: [DNS_LOOKUP_TOKEN],
+          useFactory: (dns: DnsLookup, dbClient: DatabaseClient): OutboundHttpPort =>
+            options.notificationOutbound ?? createOutboundHttp(dns, () => recordedServerAddresses(dbClient.db)),
+          inject: [DNS_LOOKUP_TOKEN, DATABASE_CLIENT_TOKEN],
         },
         {
           provide: TLS_VALIDATOR_OPTIONS,

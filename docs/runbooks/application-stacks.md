@@ -83,7 +83,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
      `degraded` (`failed` if an essential component is not healthy); if instead the previous revision is still the one
      running, the operation fails (`OPERATION_INTERRUPTED`) and the stack keeps the status of that revision (an upgrade
      or a rollback whose create step never started also goes back to the version, settings and quota its request
-     replaced); otherwise the stack is `failed` with `OPERATION_INTERRUPTED`;
+     replaced); otherwise the stack is `failed` with `OPERATION_INTERRUPTED`. A deploy, upgrade or rollback of a stopped
+     application whose create step never started leaves it `stopped` whichever of these it reads, once a version of it
+     was installed (it has an applied revision); one never installed ends `failed`;
    - route refresh (the panel's own `stack.deploy`, no user, which only changes routes): done when the routes seen are
      today's addresses of the healthy targets, otherwise it fails with `OPERATION_INTERRUPTED`; the stack is `running`
      when it is done and every component is healthy, otherwise `degraded`, never `failed`; a later route refresh
@@ -138,7 +140,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    one); **Reinstalla** tries that one again, the way back reinstalls the previous one. The way back only offers a
    version that ran (an install, upgrade or rollback of it succeeded, or failed only at publishing its routes once its
    components were healthy), never a failed attempt. A start of a stopped application refused before anything is
-   touched leaves it `stopped`; any other start or restart refused that way takes the status the containers show (so
+   touched leaves it `stopped`, and so does a reinstall, upgrade or rollback of it refused before its components are
+   created once a version of it was installed, an upgrade or a rollback going back as above (when it does not, the new
+   version stays the one asked for, as after a reinstall with new settings); one never installed ends `failed`, as no
+   version of it is there to start; any other start or restart refused that way takes the status the containers show (so
    does the start that follows a backup or a restore, which then ends `failed`: the panel stopped it, not the customer);
    the history names the reason.
 

@@ -37,7 +37,13 @@ import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { AdminHealthService, type AlertObservation } from "../src/health/admin-health.service.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { NOTIFICATION_SIGNATURE_HEADER, notificationSignature } from "../src/notifications/notification-sender.service.js";
-import type { OutboundHttpPort, OutboundProblem, OutboundResult } from "../src/notifications/outbound-http.js";
+import {
+  createOutboundHttp,
+  recordedServerAddresses,
+  type OutboundHttpPort,
+  type OutboundProblem,
+  type OutboundResult,
+} from "../src/notifications/outbound-http.js";
 import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
@@ -132,8 +138,8 @@ describe("notifications (ADR-0040)", () => {
     return { status: res.status, body: raw ? (JSON.parse(raw) as Json) : {}, raw };
   }
 
-  /** `stub: false` keeps the real look at the alerts; otherwise a pass sees what `seen` holds. */
-  async function start(opts: { stub?: boolean } = {}): Promise<void> {
+  /** `stub: false` keeps the real look at the alerts; otherwise a pass sees what `seen` holds. `real` builds the port. */
+  async function start(opts: { stub?: boolean; real?: (db: DatabaseClient) => OutboundHttpPort } = {}): Promise<void> {
     dbClient = createDatabaseClient({ mode: "pglite" });
     await dbClient.migrate();
     await setupInstallation(dbClient.db, SETUP);
@@ -149,7 +155,7 @@ describe("notifications (ADR-0040)", () => {
       runtimeBackend: "local-simulator",
       dockerExecutor: sim,
       hostAgent: new InMemoryHostSimulatorAdapter(),
-      notificationOutbound: outbound,
+      notificationOutbound: opts.real ? opts.real(dbClient) : outbound,
       notificationsIntervalMs: null,
       autoProcessOutbox: false,
       outboxPollIntervalMs: null,
@@ -885,6 +891,39 @@ describe("notifications (ADR-0040)", () => {
       await adminWebhook();
       await refused("webhook", { url: "https://inside.example.test/hook" }, "url", "address_not_allowed");
       expect((await call("GET", ADMIN_BASE, adminToken)).body.data.channels.webhook.host).toBe("hooks.example.test");
+    });
+
+    it("refuses an address that leads to this server's recorded address, on no interface, at save, at the test and at the pass", async () => {
+      // The real module on the panel's host row; documentation addresses stand for public ones.
+      const table: Record<string, { a: string[]; aaaa: string[] }> = {
+        "self.example.test": { a: ["203.0.113.10"], aaaa: [] },
+        "self6.example.test": { a: [], aaaa: ["2001:db8::10"] },
+        "both.example.test": { a: ["198.51.100.20", "203.0.113.10"], aaaa: [] },
+        "elsewhere.example.test": { a: ["198.51.100.20"], aaaa: [] },
+      };
+      const dns = { lookup: async (name: string) => table[name] ?? { a: [], aaaa: [] } };
+      await start({ real: (db) => createOutboundHttp(dns, () => recordedServerAddresses(db.db), { treatAsPublic: () => true, localAddresses: () => [] }) });
+      // Behind address translation the installer records the public address by hand; the row may write it in long form.
+      await dbClient.db.update(hosts).set({ ipv4Address: "203.0.113.10", ipv6Address: "2001:DB8:0:0:0:0:0:10" });
+      for (const url of ["https://self.example.test/hook", "https://self6.example.test/hook", "https://both.example.test/hook"]) {
+        const res = await save(ADMIN_BASE, adminToken, "webhook", { enabled: true, groups: ["server"], url });
+        // The refusal a private address gets, and no address in it.
+        expect([url, res.status, res.body.error?.code, res.body.error?.details]).toEqual([url, 400, "VALIDATION_ERROR", [{ field: "url", message: "address_not_allowed" }]]);
+        for (const address of ["203.0.113", "2001:db8", "2001:DB8", "198.51.100"]) expect(res.raw).not.toContain(address);
+      }
+      expect(await dbClient.db.select().from(notificationChannels)).toEqual([]);
+
+      // Saved while it is someone else's; then a rerun of the installer records it for this server.
+      expect((await save(ADMIN_BASE, adminToken, "webhook", { enabled: true, groups: SERVER_GROUPS, url: "https://elsewhere.example.test/hook" })).status).toBe(200);
+      await dbClient.db.update(hosts).set({ ipv4Address: "198.51.100.20" });
+      const tried = await call("POST", `${ADMIN_BASE}/channels/webhook/test`, adminToken);
+      expect([tried.status, tried.body.data]).toEqual([200, { outcome: "failed", problem: "address_not_allowed", httpStatus: null }]);
+      seen.alerts = [disk()];
+      await tick(at(0));
+      await tick(at(2));
+      const rows = await deliveries();
+      expect(rows.filter((d) => d.test).map((d) => [d.status, d.problem])).toEqual([["failed", "address_not_allowed"]]);
+      expect(rows.filter((d) => !d.test).map((d) => [d.status, d.problem, d.nextAttemptAt?.toISOString()])).toEqual([["pending", "address_not_allowed", at(4).toISOString()]]);
     });
 
     it("sends a Telegram message as plain text to the bot's own address, with no preview", async () => {
