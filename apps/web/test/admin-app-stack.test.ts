@@ -223,10 +223,15 @@ describe("the terminal page of one component", () => {
     return html(m, (await AdminAppStackTerminalPage({ params: Promise.resolve({ stackId, componentKey }) })) as ReactElement);
   };
 
-  it.each(locales)("names the component and the application, links back to the application and asks for a code (%s)", async (_l, m) => {
+  it.each(locales)("names the component, the application and its customer, links back to the application and asks for a code (%s)", async (_l, m) => {
     fetchUpstream.mockResolvedValue(ok(stack()));
     const out = await page(m, "cache");
-    expect(out).toContain(`>${format(m.admin.appStack.terminal.title, { component: "cache", name: "notes" })}</h1>`);
+    expect(out).toContain(`>${format(m.admin.appStack.terminal.title, { component: "cache", name: "notes", customer: "Beta" })}</h1>`);
+    // Two customers may each have an application called "notes": the heading where commands are typed says whose it is.
+    expect(out).toMatch(/<h1[^>]*>[^<]*\bcache\b[^<]*\bnotes\b[^<]*\bBeta\b[^<]*<\/h1>/);
+    fetchUpstream.mockResolvedValue(ok(stack({ organizationName: "Gamma & Co" })));
+    expect(await page(m, "cache")).toMatch(/<h1[^>]*>[^<]*Gamma &amp; Co[^<]*<\/h1>/);
+    fetchUpstream.mockResolvedValue(ok(stack()));
     expect(out).toContain(`href="/admin/apps/${STACK}"`);
     expect(out).toContain(format(m.admin.appStack.terminal.back, { name: "notes" }));
     expect(out).toContain(m.admin.appStack.terminal.intro);

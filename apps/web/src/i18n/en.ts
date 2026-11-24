@@ -2701,7 +2701,7 @@ export const en: Messages = {
       logsTitle: "Logs",
       logsHint: "The last lines a component printed, with the application's private values hidden. Each read is recorded in the activity log.",
       terminal: {
-        title: "Terminal: {component} of {name}",
+        title: "Terminal: {component} of {name}, customer {customer}",
         back: "Back to {name}",
         intro: "A shell inside this component of the application, as the user the component itself runs as and with what the component can reach, no more. Who opened it, in which application and component, when and for how long is recorded in the activity log; what is typed and printed is not.",
         limits: "Plain text only: full-screen programs such as editors, pagers or top do not work, and a component may have very few commands. One session per component and four on the server; a session ends after 30 minutes, or 60 seconds after this page stops reading.",

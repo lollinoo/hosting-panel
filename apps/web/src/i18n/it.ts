@@ -2728,7 +2728,7 @@ export const it = {
       logsTitle: "Registri",
       logsHint: "Le ultime righe stampate da un componente, con i valori riservati dell'applicazione nascosti. Ogni lettura è registrata nel registro attività.",
       terminal: {
-        title: "Terminale: {component} di {name}",
+        title: "Terminale: {component} di {name}, cliente {customer}",
         back: "Torna a {name}",
         intro: "Una shell dentro questo componente dell'applicazione, come l'utente con cui gira il componente e con ciò che il componente può raggiungere, niente di più. Chi l'ha aperta, in quale applicazione e componente, quando e per quanto è registrato nel registro attività; ciò che viene digitato e stampato no.",
         limits: "Solo testo semplice: i programmi a schermo intero come editor, pager o top non funzionano, e un componente può avere pochissimi comandi. Una sessione per componente e quattro sul server; una sessione finisce dopo 30 minuti, o 60 secondi dopo che questa pagina smette di leggere.",

@@ -29,7 +29,9 @@ export default async function AdminAppStackTerminalPage({ params }: { params: Pr
         <Link href={`/admin/apps/${stack.id}`} className="text-sm text-muted-foreground hover:underline">
           {format(t.back, { name: stack.name })}
         </Link>
-        <h1 className="text-2xl font-bold tracking-tight">{format(t.title, { component: componentKey, name: stack.name })}</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {format(t.title, { component: componentKey, name: stack.name, customer: stack.organizationName })}
+        </h1>
       </div>
       <TerminalConsole component={{ stackId: stack.id, componentKey }} csrfToken={session.csrfToken} />
     </div>

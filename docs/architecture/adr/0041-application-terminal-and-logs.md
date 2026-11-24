@@ -106,7 +106,7 @@ Nessun DTO contiene un id di Docker: il nome del container è quello che il pann
 
 - **Applicazioni** dell'amministratore: la riga di un'applicazione porta alla sua pagina.
 - **La pagina di un'applicazione** (`/admin/apps/{stackId}`): cliente, modello e versione, stato; per ogni componente la salute, i log e il collegamento al terminale.
-- **Il terminale** (`/admin/apps/{stackId}/terminal/{componentKey}`): la console dei siti, con le sue regole di pagina (chiude la sessione quando la pagina viene lasciata, la considera persa dopo 40 secondi senza risposta).
+- **Il terminale** (`/admin/apps/{stackId}/terminal/{componentKey}`): il titolo nomina il componente, l'applicazione e il suo cliente, perché due clienti possono avere un'applicazione con lo stesso nome; la console dei siti, con le sue regole di pagina (chiude la sessione quando la pagina viene lasciata, la considera persa dopo 40 secondi senza risposta).
 
 Italiano e inglese. Le pagine ci sono solo dove le applicazioni sono disponibili. Nessuna pagina del cliente cambia.
 
