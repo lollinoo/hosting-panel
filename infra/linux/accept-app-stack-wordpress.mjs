@@ -17,6 +17,11 @@
  * are the digests recorded with them, so the run is repeatable and downloads nothing new. With
  * HP_ACCEPT_REGISTRY_CASES=1 it also asks the registry for those tags through the product (read-only, needs the network).
  *
+ * The built-in run is made for the newest version of the template; HP_ACCEPT_WORDPRESS_VERSION=1 makes it for version 1,
+ * where address-follows-host and uploads-limit fail: the reproduction of what version 2 fixes (a site that answers only
+ * as the name it was installed on, uploads of up to 2 MB). no-redirect-loop is expected to fail there too, the login of
+ * version 1 being on that first name.
+ *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack id stk_swarmtest_<hex>_a, so every container, network and volume name
  *    the engine derives contains swarmtest_<hex>; the script's own names and paths use hp_swarmtest_stk_<hex>.
@@ -38,6 +43,8 @@
  *  - The docker CLI (an independent observer) is called with an argv array only and refuses any argument naming an hp_
  *    object of another run; inspect/logs and the commands run inside a container only ever name this run's objects.
  *    The secrets are random values of this run that die with it; the login checks pass them as arguments.
+ *  - uploads-limit writes one page of this run into this run's site volume (docker exec of php in this run's wordpress
+ *    container) and removes it in the same step.
  *  - Images: the digest-pinned refs of the wordpress-mariadb seed in APP_BUILT_IN_TEMPLATES (the imported draft pins
  *    the same two), pulled by the product through the gate when missing (offline run: docker pull each
  *    <repository>@sha256:<digest> first). traefik:v3.7 must be local.
@@ -45,9 +52,11 @@
  *    exact own names through the gate, gate closed, temp dirs removed.
  *
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-wordpress.mjs [--imported]
+ *  (version 1: HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs)
  * Steps: gate-self-test, preflight, snapshot-before, plan-compiles-from-seed, refused-before-docker,
  * deploy-creates-exact-set, container-standard-profile, secrets-reach-only-their-component, network-shape,
- * no-control-plane-reach, route-published-after-health, wordpress-installs, logs-mask-environment-secrets,
+ * no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, no-redirect-loop,
+ * uploads-limit (these three skipped with --imported: the administrator's draft sets neither), logs-mask-environment-secrets,
  * data-survives-stop-and-start, idempotent-reapply, upgrade-keeps-data, recovery-reads-only, remove-keeps-volumes,
  * destroy-data-removes-volume, host-nft-metadata-drop-on-stack-net (root only: HP_ACCEPT_ROOT_CASES=1 as root),
  * gate-clean, nothing-left. With --imported: compose-imports-to-draft first, plan-compiles-from-draft in place of
@@ -114,6 +123,10 @@ const ingressNet = `${runPrefix}_ingress`;
 const ORG = `org_swarmtest_${hex}`;
 const A = `stk_swarmtest_${hex}_a`;
 const HOST1 = `wp-${hex}.hp-stk.test`;
+/** A second name of this run on the same route: the site must answer it as itself (address-follows-host). */
+const HOST2 = `wp2-${hex}.hp-stk.test`;
+/** The command version 2 gives WordPress: the image's own start program with the uploads limit (ADR-0036). */
+const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 const TITLE = `Acceptance ${hex}`;
 const HEALTH_MS = 180_000;
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
@@ -180,6 +193,20 @@ const leaks = (text) => SECRET_CONTENTS.some((e) => leakedWindows(text, e.conten
 
 // ---- plans (the extended format: no allowlist row, generated secrets) ----
 const seed = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === "wordpress-mariadb");
+/** Every version of the seed, oldest first; the run is made for the newest unless HP_ACCEPT_WORDPRESS_VERSION names one. */
+const SEED_VERSIONS = [...(seed.previousVersions ?? []), { versionId: seed.versionId, source: seed.source }];
+const wantedVersion = process.env.HP_ACCEPT_WORDPRESS_VERSION;
+const VERSION = wantedVersion === undefined ? SEED_VERSIONS.length : /^[1-9][0-9]*$/.test(wantedVersion) ? Number(wantedVersion) : 0;
+if (VERSION < 1 || VERSION > SEED_VERSIONS.length || (IMPORTED && wantedVersion !== undefined)) {
+  console.log(
+    `FAIL preflight: HP_ACCEPT_WORDPRESS_VERSION=${String(wantedVersion)} (the built-in template has versions 1 to ${String(SEED_VERSIONS.length)}; not with --imported)`,
+  );
+  console.log("RESULT 0/1 passed in 0.0s");
+  process.exit(1);
+}
+const built = SEED_VERSIONS[VERSION - 1];
+/** Version 2 and later: the address line and the uploads limit. */
+const FIXED = !IMPORTED && VERSION >= 2;
 /** The tag and the digest the seed pins for a repository. */
 const pinned = (repository) => {
   const m = seed.source.match(new RegExp(`image: (${repository}:[\\w.-]+)@(sha256:[0-9a-f]{64})`));
@@ -198,14 +225,14 @@ if (IMPORTED) {
   imported = importComposeToAppTemplate({ compose, digests: new Map([...LOOKUPS].map((image) => [image, pinned(image.split(":")[0]).digest])) });
 }
 const first = compileAppStackPlan({
-  source: IMPORTED ? (imported.source ?? "") : seed.source,
+  source: IMPORTED ? (imported.source ?? "") : built.source,
   parameters: [],
   secretVersions: new Map(SECRET_CONTENTS.map((e) => [e.parameterKey, e.version])),
   ids: {
     stackId: A,
     organizationId: ORG,
     hostAllocationId: `alloc_swarmtest_${hex}`,
-    templateVersionId: IMPORTED ? `atv_swarmtest_${hex}` : seed.versionId,
+    templateVersionId: IMPORTED ? `atv_swarmtest_${hex}` : built.versionId,
     revisionId: `srev_swarmtest_${hex}_1`,
   },
 });
@@ -776,7 +803,7 @@ async function main() {
       const stale = (await lines(["ps", "-a", "--format", "{{.Names}}"])).filter(ours);
       assert(stale.length === 0, "no object name contains the run marker", stale.join(","));
       assert(CAP_MASK === "00000000000004cb", "the capability list of the standard profile is the one this script knows", `${CAP_MASK} ${APP_STACK_STANDARD_CAP_ADD.join(",")}`);
-      info(`engine ${engineVersion}, marker ${marker}, template: ${T.what}, images ${[...IMAGES].join(" ")}`);
+      info(`engine ${engineVersion}, marker ${marker}, template: ${T.what}${IMPORTED ? "" : ` version ${String(VERSION)}`}, images ${[...IMAGES].join(" ")}`);
     });
 
     await step("snapshot-before", async () => {
@@ -794,7 +821,15 @@ async function main() {
       assert(same(planA.ingress, [{ componentKey: WORDPRESS, port: 80 }]), "ingress wordpress:80", JSON.stringify(planA.ingress));
       assert(same(planA.volumes.map((v) => v.key), [T.volumes.database, T.volumes.site]), `volumes [${T.volumes.database}, ${T.volumes.site}]`, JSON.stringify(planA.volumes));
       assert(planA.components.every((c) => /^[a-z0-9./-]+@sha256:[0-9a-f]{64}$/.test(c.image)), "every image is a digest reference", planA.components.map((c) => c.image).join(" "));
-      assert(planA.components.every((c) => c.profile === "standard" && c.runAsUser === null && c.argv === null), "both on the standard profile, image user and command", "other");
+      // Version 2 starts WordPress with the uploads limit; version 1 and the imported draft keep the image's command.
+      const argvOf = (key) => (FIXED && key === WORDPRESS ? UPLOADS_ARGV : null);
+      assert(
+        planA.components.every((c) => c.profile === "standard" && c.runAsUser === null && same(c.argv, argvOf(c.key))),
+        "both on the standard profile and the image user, with the command of the version",
+        planA.components.map((c) => `${c.key}:${JSON.stringify(c.argv)}`).join(" "),
+      );
+      const addressLine = componentOf(planA, WORDPRESS).environment.filter((e) => e.name === "WORDPRESS_CONFIG_EXTRA").length;
+      assert(addressLine === (FIXED ? 1 : 0), `the address line ${FIXED ? "is" : "is not"} in the environment of wordpress`, String(addressLine));
       assert(planA.components.every((c) => c.secretFiles.length === 0), "no secretFiles", "some");
       const reads = (key) => componentOf(planA, key).secretEnvironment.map((e) => `${e.name}<-${e.pieces.map((x) => x.parameterKey ?? "literal").join("+")}`);
       assert(same(reads(T.db), READS.db), "the database reads its account and the root password", reads(T.db).join(","));
@@ -907,7 +942,7 @@ async function main() {
           NoHostNamespaces: ["PidMode", "IpcMode", "UsernsMode", "UTSMode"].every((k) => !String(h[k] ?? "").startsWith("host")) && (h.Devices ?? []).length === 0,
           Privileged: h.Privileged === false,
           Image: c.Config.Image === comp.image && c.Image === img.Id,
-          Entrypoint: same(c.Config.Entrypoint ?? null, img.Config.Entrypoint ?? null) && same(c.Config.Cmd ?? null, img.Config.Cmd ?? null),
+          Entrypoint: same(c.Config.Entrypoint ?? null, img.Config.Entrypoint ?? null) && same(c.Config.Cmd ?? null, comp.argv ?? img.Config.Cmd ?? null),
           User: (c.Config.User ?? "") === (img.Config.User ?? ""),
           Labels: labels["io.hostingpanel.managed"] === "true" && labels["io.hostingpanel.role"] === "app_component" && labels["io.hostingpanel.stack_id"] === A,
           NoSiteLabels: labels["io.hostingpanel.site_id"] === undefined && labels["io.hostingpanel.service_instance_id"] === undefined,
@@ -1039,6 +1074,74 @@ async function main() {
       const setup = await viaProxy(HOST1, "/wp-admin/install.php");
       assert(setup.status === 200 && !setup.body.includes("admin_password2"), "the setup is closed once the site exists", String(setup.status));
     });
+
+    if (IMPORTED) {
+      for (const name of ["address-follows-host", "no-redirect-loop", "uploads-limit"]) {
+        skip(name, "the imported draft is the administrator's file: it sets neither the address line nor the uploads limit of the built-in template");
+      }
+    } else {
+      await step("address-follows-host", async () => {
+        // The application gets a second name: the site answers it as itself, not as the name it was installed on.
+        const r = await adapter.publishAppStackRoutes(route(planA, [HOST1, HOST2]));
+        assert(r.changed === true && same([...r.hostnames].sort(), [HOST1, HOST2].sort()), "the publish adds the second host", JSON.stringify(r));
+        const home = await until(`${HOST2} is routed by the proxy`, 30_000, async () => {
+          const res = await viaProxy(HOST2, "/");
+          return res.status !== 0 && res.status !== 404 ? res : null;
+        });
+        assert(home.status === 200 && home.body.includes(TITLE), `${HOST2}/ answers the home page with 200, not a redirect to ${HOST1}`, `${String(home.status)} ${home.location}`);
+        const assets = [...home.body.matchAll(/<(?:link|script)\b[^>]*\b(?:href|src)=["']([^"']+)["']/gi)].map((x) => x[1]);
+        assert(assets.some((a) => a.includes(`//${HOST2}/`)), `the page's style and script addresses name ${HOST2}`, assets.slice(0, 5).join(" "));
+        assert(!home.body.includes(HOST1), `the page names ${HOST1} nowhere`, assets.filter((a) => a.includes(HOST1)).slice(0, 3).join(" ") || "in its text");
+        const login = await viaProxy(HOST2, "/wp-login.php");
+        const action = (login.body.match(/<form\b[^>]*\bloginform\b[^>]*>/i)?.[0] ?? "").match(/\baction=["']([^"']+)["']/i)?.[1] ?? "";
+        assert(login.status === 200 && action !== "" && new URL(action.replaceAll("&amp;", "&"), `http://${HOST2}/`).host === HOST2, `the login form of ${HOST2} posts to ${HOST2}`, `${String(login.status)} ${action}`);
+        const first = await viaProxy(HOST1, "/");
+        assert(first.status === 200 && first.body.includes(`//${HOST1}/`) && !first.body.includes(HOST2), `${HOST1} still answers as itself`, String(first.status));
+      });
+
+      await step("no-redirect-loop", async () => {
+        // Where a visitor of the second name is sent: never to the first name, and to a page within five redirects.
+        for (const start of ["/", "/wp-admin/", "/wp-login.php"]) {
+          let host = HOST2;
+          let target = start;
+          const hops = [];
+          for (;;) {
+            const res = await viaProxy(host, target);
+            if (res.status < 300 || res.status >= 400) {
+              assert(res.status === 200, `${HOST2}${start} ends on a page`, `${String(res.status)} after ${hops.join(" -> ") || "no redirect"}`);
+              break;
+            }
+            const next = new URL(res.location, `http://${host}${target}`);
+            hops.push(next.href);
+            assert(next.host !== HOST1, `${HOST2}${start} never sends the visitor to ${HOST1}`, hops.join(" -> "));
+            assert(next.protocol === "http:" && next.host === HOST2, `${HOST2}${start} stays on ${HOST2}, over http`, hops.join(" -> "));
+            assert(hops.length <= 5, `${HOST2}${start} reaches a page within five redirects`, hops.join(" -> "));
+            host = next.host;
+            target = `${next.pathname}${next.search}`;
+          }
+        }
+      });
+
+      await step("uploads-limit", async () => {
+        // The limits of the web server's PHP, read by a page of this run written into the site's volume and removed in
+        // this step. The PHP command line reads php.ini only: what it says proves nothing about the site.
+        const file = `/var/www/html/hp-limits-${hex}.php`;
+        const page = '<?php echo ini_get("upload_max_filesize"), " ", ini_get("post_max_size");';
+        assert(await phpIn(WP, "exit(file_put_contents($argv[1], $argv[2]) === false ? 1 : 0);", [file, page]), "the page is written into the site", "refused");
+        let answer;
+        try {
+          answer = await served(HOST1, `/${path.basename(file)}`, 200, () => true, 30_000);
+        } finally {
+          const removed = await phpIn(WP, "exit(unlink($argv[1]) ? 0 : 1);", [file]);
+          if (!removed) info(`${path.basename(file)} could not be removed from the site volume (it goes with the volume)`);
+        }
+        const cli = (await docker(["exec", WP, "php", "-r", 'echo ini_get("upload_max_filesize"), " ", ini_get("post_max_size");'], 30_000)).trim();
+        info(`the PHP command line reads ${cli} (php.ini only), the web server ${answer.body.trim().slice(0, 40)}`);
+        assert(answer.body.trim() === "64M 64M", "the web server's PHP takes uploads of up to 64 MB (upload_max_filesize post_max_size)", answer.body.trim().slice(0, 80));
+        const gone = await viaProxy(HOST1, `/${path.basename(file)}`);
+        assert(gone.status === 404, "the page is gone from the site", String(gone.status));
+      });
+    }
 
     await step("logs-mask-environment-secrets", async () => {
       // The value of a secret ends up in the application's own log: the web server writes every address it is asked
