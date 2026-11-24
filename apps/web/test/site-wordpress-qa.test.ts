@@ -596,4 +596,26 @@ describe("B7. a check or an update keeps its Idempotency-Key until an answer com
     }
     sameThenNew(sent, `${BASE}/updates`);
   });
+
+  it("a check whose answer was lost does not come back after an update was accepted: the next check has a new key", async () => {
+    const sent = answering(["lost", 202, 202]);
+    const tab = slot();
+    const labels: unknown[] = [en.site.wordpress.header.checkNow, en.site.wordpress.header.checking];
+    const checkNow = async () => {
+      const button = tab.run(SiteWordpress, props).find((e) => labels.includes((e.props as { children?: unknown }).children))!;
+      (button.props as { onClick: () => void }).onClick();
+      await settle();
+    };
+    await checkNow();
+    const core = format(en.site.wordpress.tables.updateLabel, { name: en.site.wordpress.tables.core, version: STATE.coreUpdate! });
+    const open = tab.run(SiteWordpress, props).find((e) => (e.props as { "aria-label"?: string })["aria-label"] === core)!;
+    (open.props as { onClick: () => void }).onClick();
+    await (tab.run(SiteWordpress, props).find((e) => e.type === WordpressUpdateDialog)!.props as { onConfirm: () => Promise<unknown> }).onConfirm();
+    // The accepted update ran under the site's lock, so the lost check has ended; the next check is a new one.
+    await checkNow();
+    expect(sent.map(([u]) => u)).toEqual([`${BASE}/refresh`, `${BASE}/updates`, `${BASE}/refresh`]);
+    const keys = sent.map(([, key]) => key);
+    for (const k of keys) expect(k).toMatch(/\S{8,}/);
+    expect(new Set(keys).size).toBe(3);
+  });
 });

@@ -307,6 +307,8 @@ export function SiteWordpress({ basePath, initial, csrfToken }: { basePath: stri
   }, [running, pollStopped, basePath, m]);
 
   const startRunning = (next: RunningOperation) => {
+    // Accepted under the site's lock: any check or update whose answer was lost has ended, so none is replayed.
+    keysRef.current = {};
     setPollStopped(false);
     setNotice(null);
     setPageError(null);
