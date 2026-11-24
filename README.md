@@ -150,7 +150,7 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.16.0
+V=0.17.0
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -277,6 +277,8 @@ Dettagli e limiti: [ADR 0024](docs/architecture/adr/0024-wordpress-import.md).
 
 Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei dati e nelle API (`ADR-0035`). Nelle due console sono tutte **Applicazioni**: un sito WordPress è un'applicazione di tipo WordPress, uno stack è un'applicazione del suo modello; il cliente le trova in un solo elenco (`/apps`) e ne crea una nuova da una sola pagina (`/apps/new`), l'amministratore le vede in **Amministrazione › Applicazioni** (di uno stack apre la pagina, con i log e il terminale dei componenti, senza poterlo avviare, fermare o cambiare) e ne gestisce i modelli, dei due tipi, in **Amministrazione › Modelli**. Un **modello di applicazione** è scritto e pubblicato dall'amministratore del server nel formato `HCP-STACK/v1` (da uno a otto componenti, volumi con nome, ingresso HTTP) o nel formato esteso `HCP-STACK/v2` (`ADR-0036`); uno **stack** è l'installazione di un modello pubblicato sull'allocazione Dedicated di un cliente, con i suoi componenti, i suoi volumi dei dati e i suoi domini.
 
+**Un modello da una sola immagine (`ADR-0043`).** In **Modelli → Nuovo modello → Applicazione da un'immagine** l'amministratore compila pochi campi (una delle immagini ammesse con la sua impronta `sha256:`, la porta, se i clienti possono dargli un indirizzo web, le impostazioni, una cartella da conservare, processore e memoria) e il pannello scrive il sorgente di un modello con un solo componente, che si apre nell'editor per essere controllato e salvato. Il modulo non salva nulla e non contatta nessun registro; un cliente non nomina mai un'immagine.
+
 - **Stato.** I flag `applicationTemplatesAvailable` e `applicationStacksAvailable` valgono `true` sul backend `linux-systemd` e `false` sugli altri (`ADR-0036` §2.10): l'amministratore trova i modelli in **Amministrazione › Modelli**, e un cliente vede un modello solo dopo che l'amministratore lo ha pubblicato. Le porte pubbliche e le build da Git restano spente su ogni backend.
 - **Il primo rilascio.** Solo immagini già pronte (nessuna build), solo Dedicated, solo ingresso HTTP, TLS solo Let's Encrypt per i domini degli stack; nessuna porta TCP/UDP pubblica.
 - **Il formato esteso.** Un modello `HCP-STACK/v2` può usare un'immagine di qualunque registro pubblico, sempre fissata a digest; può far generare al pannello password e nomi utente, che il cliente non scrive e non legge; può passare un segreto a un componente come variabile d'ambiente. I modelli `HCP-STACK/v1` restano validi e si comportano come prima.
@@ -359,7 +361,7 @@ Cosa sapere prima:
 
 ```bash
 sudo hp-update                    # ultima release
-sudo hp-update --version 0.16.0    # oppure --archive <file>
+sudo hp-update --version 0.17.0    # oppure --archive <file>
 ```
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--allow-feature-loss`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall (**il proxy non viene ricreato**: i certificati caricati a mano e le destinazioni di backup non richiedono nessuna interruzione). Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito, `8` downgrade rifiutato perché la release di destinazione perderebbe una funzione già in uso.
