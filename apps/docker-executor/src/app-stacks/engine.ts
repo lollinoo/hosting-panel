@@ -65,6 +65,7 @@ import {
 } from "./names.js";
 import {
   appStackImageDigestMatches,
+  appStackUncoveredImageFolder,
   assertAppStackCreateSecretContents,
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
@@ -327,7 +328,7 @@ export class AppStackEngine implements StackExecutorPort {
       const { image } = req;
       if (!plan.components.some((c) => c.image === image)) refuse("STACK_PLAN_INVALID", "The image is not part of the plan");
       const inspectPath = `/images/${enc(image)}/json`;
-      let found = await this.get<{ RepoDigests?: unknown[] }>(inspectPath, "inspect an application image");
+      let found = await this.get<{ RepoDigests?: unknown[]; Config?: { Volumes?: unknown } | null }>(inspectPath, "inspect an application image");
       const pulled = found === null;
       if (found === null) {
         if (!this.deps.pullMissingImages) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
@@ -353,6 +354,18 @@ export class AppStackEngine implements StackExecutorPort {
       }
       if (!appStackImageDigestMatches(image, found.RepoDigests)) {
         refuse("STACK_IMAGE_DIGEST_MISMATCH", "The downloaded software does not match its pinned fingerprint");
+      }
+      // #98: the Engine gives a hidden writable volume to a folder the image declares that no mount sits at. This step
+      // runs before anything of the application is created or removed, so the application keeps what it has.
+      const declared = found.Config?.Volumes ?? null;
+      if (typeof declared !== "object" || Array.isArray(declared)) throw malformed();
+      const open = appStackUncoveredImageFolder(plan, image, declared === null ? [] : Object.keys(declared));
+      if (open !== null) {
+        const named = /^\/[A-Za-z0-9._/-]{1,254}$/.test(open.folder) ? `the folder ${open.folder}` : "a folder with an unusual name";
+        refuse(
+          "STACK_IMAGE_VOLUME_UNCOVERED",
+          `The image of component ${open.componentKey} declares ${named} and no volume of the component is mounted at exactly that folder`,
+        );
       }
       return { image, pulled };
     });

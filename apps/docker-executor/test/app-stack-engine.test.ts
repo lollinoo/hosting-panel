@@ -246,6 +246,125 @@ describe("pullAppStackImage (5.8)", () => {
     expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: expect.stringContaining("(HTTP 500)") });
     expect(err).not.toHaveProperty("reason");
   });
+
+  // #98: a folder an image declares (VOLUME) gets a hidden writable volume from Docker at create unless a mount sits at
+  // exactly that folder. The image step is the last one before anything changes, so it refuses.
+  describe("a folder the image declares (#98)", () => {
+    const mountAt = (containerPath: string) => [{ volumeKey: "data", containerPath, readOnly: false }];
+    /** The test plan with both components, on the one image, mounting the volume at `containerPath`. */
+    const bothMountAt = (containerPath: string) =>
+      appStackTestPlan({ components: appStackTestPlan().components.map((c) => ({ ...c, volumes: mountAt(containerPath) })) });
+    /** The test plan with the web component alone, which mounts nothing. */
+    const webAlone = () => appStackTestPlan({ components: appStackTestPlan().components.filter((c) => c.key === "web"), volumes: [] });
+    const declare = (h: Harness, volumes: unknown) => {
+      h.fake.images.set(IMAGE, { repoDigests: [IMAGE] });
+      h.fake.declaredVolumes.set(IMAGE, volumes);
+    };
+    const uncovered = (folder: string, owner: string) => ({
+      reason: "STACK_IMAGE_VOLUME_UNCOVERED",
+      code: "HOST_POLICY_DENIED",
+      message: `The image of component ${owner} declares the folder ${folder} and no volume of the component is mounted at exactly that folder`,
+    });
+
+    it("refuses a declared folder that no mount covers, and creates and removes nothing", async () => {
+      const h = await setup();
+      declare(h, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(h.fake.log).toEqual([inspect]);
+      expect([...h.fake.containers.keys()]).toEqual([PROXY]);
+      expect(h.fake.networks.size).toBe(0);
+      expect(h.fake.volumes.size).toBe(0);
+    });
+
+    it("refuses after a pull too, and keeps the downloaded image", async () => {
+      const h = await setup();
+      h.fake.pullable.add(IMAGE);
+      h.fake.declaredVolumes.set(IMAGE, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(h.fake.log).toEqual([inspect, pull, inspect]);
+      expect(h.fake.images.has(IMAGE)).toBe(true);
+      expect(h.fake.volumes.size).toBe(0);
+    });
+
+    it("names the component that mounts nothing when another component of the same image does mount it", async () => {
+      const h = await setup();
+      declare(h, { "/data": {} });
+      // The worker mounts the volume at /data, the web component does not.
+      await expect(h.engine.pullAppStackImage({ plan, image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(mutations(h.fake.log)).toEqual([]);
+    });
+
+    it.each([
+      ["/data", "/data"],
+      ["/data/", "/data"],
+      ["/data/./", "/data"],
+      ["//data", "/data"],
+      ["/data//", "/data"],
+    ])("passes a declared folder %s that every component mounts at %s", async (declared, mount) => {
+      const h = await setup();
+      declare(h, { [declared]: {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt(mount), image: IMAGE })).resolves.toEqual({ image: IMAGE, pulled: false });
+      expect(h.fake.log).toEqual([inspect]);
+    });
+
+    it.each([
+      ["a mount at the parent folder", "/srv/data", "/srv"],
+      ["a mount inside the folder", "/srv", "/srv/data"],
+      ["a mount at a sibling", "/data", "/data2"],
+    ])("refuses a declared folder with %s", async (_name, declared, mount) => {
+      const h = await setup();
+      declare(h, { [declared]: {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt(mount), image: IMAGE })).rejects.toMatchObject(uncovered(declared, "web"));
+      expect(mutations(h.fake.log)).toEqual([]);
+    });
+
+    it("refuses when one of two declared folders is not covered, and names that one", async () => {
+      const h = await setup();
+      declare(h, { "/data": {}, "/cache": {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt("/data"), image: IMAGE })).rejects.toMatchObject(uncovered("/cache", "web"));
+    });
+
+    it.each([
+      ["null", null],
+      ["an empty map", {}],
+      ["no Volumes key", undefined],
+    ])("passes an image whose Config.Volumes is %s", async (_name, volumes) => {
+      const h = await setup();
+      declare(h, volumes);
+      await expect(h.engine.pullAppStackImage({ plan, image: IMAGE })).resolves.toEqual({ image: IMAGE, pulled: false });
+      expect(h.fake.log).toEqual([inspect]);
+    });
+
+    it("does not copy a folder name that is not a plain path into the message", async () => {
+      const h = await setup();
+      declare(h, { "/da ta\u0007<x>": {} });
+      const err = await h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE }).catch((e: Error) => e);
+      expect(err).toMatchObject({ reason: "STACK_IMAGE_VOLUME_UNCOVERED", code: "HOST_POLICY_DENIED" });
+      expect(String(err)).not.toContain("da ta");
+      expect(String(err)).not.toContain("\u0007");
+      expect((err as Error).message).toBe(
+        "The image of component web declares a folder with an unusual name and no volume of the component is mounted at exactly that folder",
+      );
+    });
+
+    it.each([
+      ["a list", ["/data"]],
+      ["a string", "/data"],
+    ])("treats Config.Volumes that is %s as malformed data, not as no folder", async (_name, volumes) => {
+      const h = await setup();
+      declare(h, volumes);
+      const err = await h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE }).catch((e: Error & { reason?: string }) => e);
+      expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The container engine answered with malformed data" });
+      expect(err).not.toHaveProperty("reason");
+    });
+
+    it("checks the digest first: a mismatching image is refused for its digest, not for its folders", async () => {
+      const h = await setup();
+      h.fake.images.set(IMAGE, { repoDigests: [`registry.test/acme/web@sha256:${"d".repeat(64)}`] });
+      h.fake.declaredVolumes.set(IMAGE, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject({ reason: "STACK_IMAGE_DIGEST_MISMATCH" });
+    });
+  });
 });
 
 describe("prepareAppStack (5.9)", () => {

@@ -320,6 +320,14 @@ describe("application stack IPC routes", () => {
     const conflict = await failure(client.getAppStackStatus(ref));
     expect([conflict.statusCode, conflict.code, conflict.reason]).toEqual([403, "HOST_POLICY_DENIED", "STACK_NAMESPACE_CONFLICT"]);
 
+    // An image folder no volume covers (#98): a policy denial whose message names the folder for the administrator.
+    fns.pullAppStackImage.mockRejectedValueOnce(
+      new AppStackExecutorError("STACK_IMAGE_VOLUME_UNCOVERED", "The image of component web declares the folder /data and no volume of the component is mounted at exactly that folder"),
+    );
+    const uncovered = await failure(client.pullAppStackImage({ plan, image }));
+    expect([uncovered.statusCode, uncovered.code, uncovered.reason, uncovered.ambiguousOutcome]).toEqual([403, "HOST_POLICY_DENIED", "STACK_IMAGE_VOLUME_UNCOVERED", false]);
+    expect(uncovered.message).toContain("/data");
+
     fns.prepareAppStack.mockRejectedValueOnce(Object.assign(new ExecutorCodedError("Manifest moved", "RESOURCE_LOCKED"), { reason: "TLS_MANIFEST_CONFLICT" }));
     expect((await failure(client.prepareAppStack({ plan }))).reason).toBe("TLS_MANIFEST_CONFLICT");
 

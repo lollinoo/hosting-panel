@@ -338,9 +338,9 @@ describe("application stack IPC wire", () => {
     expect(AppStackLogsIpcRequestSchema.parse(logs)).toEqual(logs);
   });
 
-  it("lists twelve executor reasons, each mapped to an error code by a total frozen map", () => {
-    expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(12);
-    expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(12);
+  it("lists thirteen executor reasons, each mapped to an error code by a total frozen map", () => {
+    expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(13);
+    expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(13);
     for (const reason of APP_STACK_EXECUTOR_REASONS) {
       expect(reason).toMatch(/^STACK_[A-Z_]{1,40}$/);
       expect(AppStackExecutorReasonSchema.parse(reason)).toBe(reason);
@@ -348,8 +348,11 @@ describe("application stack IPC wire", () => {
     }
     expect(Object.keys(APP_STACK_EXECUTOR_REASON_CODES).sort()).toEqual([...APP_STACK_EXECUTOR_REASONS].sort());
     expect(Object.isFrozen(APP_STACK_EXECUTOR_REASON_CODES)).toBe(true);
+    // An image that declares a folder no mount covers (#98) is refused as a permanent policy denial, never as an outage.
+    expect(APP_STACK_EXECUTOR_REASON_CODES.STACK_IMAGE_VOLUME_UNCOVERED).toBe("HOST_POLICY_DENIED");
     expect(APP_STACK_EXECUTOR_REASONS.filter((r) => (APP_STACK_REASONS as readonly string[]).includes(r))).toEqual([
       "STACK_IMAGE_NOT_ALLOWED",
+      "STACK_IMAGE_VOLUME_UNCOVERED",
       "STACK_SECRET_MISSING",
       "STACK_VOLUME_IN_USE",
       "STACK_UNSUPPORTED_FEATURE",

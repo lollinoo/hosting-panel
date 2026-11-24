@@ -27,7 +27,7 @@ export const APP_STACK_LOG_TAIL_MAX = 500;
 export const APP_STACK_NETWORK_ROLES = ["app_internal", "app_edge"] as const;
 export type AppStackNetworkRole = (typeof APP_STACK_NETWORK_ROLES)[number];
 
-/** details[0].reason of every executor refusal of the stack routes. Four names are spec §16 ones (APP_STACK_REASONS). */
+/** details[0].reason of every executor refusal of the stack routes. Five names are in APP_STACK_REASONS. */
 export const APP_STACK_EXECUTOR_REASONS = [
   "STACK_PLAN_INVALID",
   "STACK_PLAN_HASH_MISMATCH",
@@ -35,6 +35,7 @@ export const APP_STACK_EXECUTOR_REASONS = [
   "STACK_IMAGE_PULL_FAILED",
   "STACK_IMAGE_DIGEST_MISMATCH",
   "STACK_IMAGE_MISSING",
+  "STACK_IMAGE_VOLUME_UNCOVERED",
   "STACK_SECRET_MISSING",
   "STACK_NAMESPACE_CONFLICT",
   "STACK_COMPONENT_NOT_READY",
@@ -51,6 +52,7 @@ export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorRe
   STACK_IMAGE_PULL_FAILED: "DOCKER_ENGINE_UNAVAILABLE", // pull HTTP error or "error" line in the 200 stream
   STACK_IMAGE_DIGEST_MISMATCH: "HOST_POLICY_DENIED", // local image has no RepoDigests entry for the plan digest
   STACK_IMAGE_MISSING: "NOT_FOUND", // image not local (create, or pull with pullMissingImages false)
+  STACK_IMAGE_VOLUME_UNCOVERED: "HOST_POLICY_DENIED", // the image declares a folder (Config.Volumes) that no mount of a component using it sits at (#98)
   STACK_SECRET_MISSING: "VALIDATION_ERROR", // a (parameterKey, version) the component pins has no content entry
   STACK_NAMESPACE_CONFLICT: "HOST_POLICY_DENIED", // a derived name or a stack_id label belongs to something not ours
   STACK_COMPONENT_NOT_READY: "RESOURCE_LOCKED", // needed resource missing, dependency or route target not running, other plan
