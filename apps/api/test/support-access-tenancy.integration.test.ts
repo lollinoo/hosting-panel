@@ -210,6 +210,7 @@ describe("support access tenancy over every organization route", () => {
       componentKey: "app",
       linkId: `slnk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
       channel: "webhook",
+      taskKey: "save",
     };
   });
 

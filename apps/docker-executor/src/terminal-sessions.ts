@@ -6,6 +6,7 @@ import {
   TERMINAL_SESSION_MAX_MS,
   TERMINAL_SESSIONS_MAX,
 } from "@hosting-panel/contracts";
+import type { AppStackTerminalOpenIpcRequest } from "@hosting-panel/contracts";
 import type {
   TerminalEnded,
   TerminalExecutorEndReason,
@@ -31,8 +32,22 @@ type StartShell = (sink: TerminalShellSink) => Promise<{ readonly shell: Termina
 
 interface Waiter { cursor: number; resolve(r: TerminalReadResult): void; reject(e: Error): void; timer: NodeJS.Timeout }
 
+/** What a session is on, as the list returns it: a site's container or one component of an application (ADR-0041). */
+type SessionTarget =
+  | { readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string }
+  | { readonly sessionId: string; readonly stackId: string; readonly organizationId: string; readonly componentKey: string };
+
+const targetOf = (req: TerminalOpenRequest | AppStackTerminalOpenIpcRequest): SessionTarget =>
+  "stackId" in req
+    ? { sessionId: req.sessionId, stackId: req.stackId, organizationId: req.organizationId, componentKey: req.componentKey }
+    : { sessionId: req.sessionId, siteId: req.siteId, serviceInstanceId: req.serviceInstanceId };
+
+/** One session per container: the site, or the component of the application. The two prefixes never meet. */
+const containerKey = (t: SessionTarget): string => ("stackId" in t ? `stack:${t.stackId}:${t.componentKey}` : `site:${t.siteId}`);
+
 interface Session {
-  readonly req: TerminalOpenRequest;
+  readonly req: SessionTarget;
+  readonly key: string;
   containerName: string | null; // null until the shell has started
   openedAt: string;
   shell: TerminalShell | null;
@@ -81,17 +96,23 @@ export class TerminalSessions {
     };
   }
 
-  public async open(req: TerminalOpenRequest, start: StartShell): Promise<TerminalOpenResult> {
+  /** A session on a site or on a component: the limit of the server counts both, the limit of a container its own. */
+  public async open(req: TerminalOpenRequest | AppStackTerminalOpenIpcRequest, start: StartShell): Promise<TerminalOpenResult> {
     if (this.sessions.has(req.sessionId)) throw new ExecutorCodedError("Terminal session already exists", "ALREADY_EXISTS");
+    const target = targetOf(req);
+    const key = containerKey(target);
     const live = [...this.sessions.values()].filter((s) => !s.ended);
-    if (live.some((s) => s.req.siteId === req.siteId)) {
-      throw new ExecutorCodedError("A terminal is already open on this site", "RESOURCE_LOCKED");
+    if (live.some((s) => s.key === key)) {
+      throw new ExecutorCodedError(
+        "stackId" in target ? "A terminal is already open on this component" : "A terminal is already open on this site",
+        "RESOURCE_LOCKED",
+      );
     }
     if (live.length >= this.limits.maxSessions) throw new ExecutorCodedError("Too many terminal sessions open", "QUOTA_EXCEEDED");
 
     // The slot is taken here, before the first await.
     const s: Session = {
-      req: { sessionId: req.sessionId, siteId: req.siteId, serviceInstanceId: req.serviceInstanceId },
+      req: target, key,
       containerName: null, openedAt: new Date().toISOString(), shell: null, start: 0, buf: Buffer.alloc(0),
       ended: null, killWanted: false, killing: null, waiter: null,
     };
@@ -164,7 +185,16 @@ export class TerminalSessions {
 
   public endService(serviceInstanceId: string, reason: TerminalExecutorEndReason): void {
     for (const s of this.sessions.values()) {
-      if (s.req.serviceInstanceId === serviceInstanceId) this.end(s, reason, true);
+      if ("serviceInstanceId" in s.req && s.req.serviceInstanceId === serviceInstanceId) this.end(s, reason, true);
+    }
+  }
+
+  /** Ends the sessions on one component of an application, or on all of them when no component is named. */
+  public endAppStack(stackId: string, componentKey: string | null, reason: TerminalExecutorEndReason): void {
+    for (const s of this.sessions.values()) {
+      if ("stackId" in s.req && s.req.stackId === stackId && (componentKey === null || s.req.componentKey === componentKey)) {
+        this.end(s, reason, true);
+      }
     }
   }
 

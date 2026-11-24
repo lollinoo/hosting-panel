@@ -15,6 +15,7 @@ import {
   AppStackRefIpcRequestSchema,
   AppStackRemoveIpcRequestSchema,
   AppStackRoutesIpcRequestSchema,
+  AppStackTerminalOpenIpcRequestSchema,
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
@@ -59,6 +60,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
+  isAppStackTerminalExecutor,
   isStackExecutor,
   type DockerExecutionResult,
   type DockerExecutorPort,
@@ -66,6 +68,7 @@ import {
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import { AppStackExecutorError } from "./app-stacks/errors.js";
+import { appStackTaskIpcRoute } from "./app-stacks/task-ipc.js";
 import { parseSiteFilesRequest } from "./site-files-helper.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
@@ -634,6 +637,17 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      // A terminal in one component of an application (ADR-0041). It is its own optional port, so it is answered here,
+      // before the application routes; the session then lives with the sites' ones (write, read, close and list below).
+      if (method === "POST" && pathname === "/v1/app-stacks/terminal/open") {
+        if (!isAppStackTerminalExecutor(this.executor)) {
+          throw new ExecutorCodedError("Application terminals are not supported by the active executor backend", "NOT_SUPPORTED");
+        }
+        const req = this.parseBody(AppStackTerminalOpenIpcRequestSchema, rawBody, "application terminal open");
+        writeJson(res, 200, { data: await this.executor.openAppStackTerminal(req) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/terminal/write") {
         // The schema's messages are fixed sentences, so a refusal never carries the input.
         const req = this.parseBody(TerminalWriteIpcRequestSchema, rawBody, "terminal write");
@@ -707,6 +721,13 @@ export class DockerExecutorIpcServer {
         }
         const ensured = await this.executor.ensureIngressProxy();
         writeJson(res, 200, { data: ensured });
+        return;
+      }
+
+      // Tasks of applications (ADR-0042): an optional port of their own, answered before the application routes.
+      const taskRoute = appStackTaskIpcRoute(method, pathname, parsedUrl, rawBody);
+      if (taskRoute !== null) {
+        writeJson(res, 200, { data: await taskRoute(this.executor) });
         return;
       }
 

@@ -13,6 +13,7 @@ import {
   APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_PROCESS_MARKS,
   APP_STACK_RUN_PROFILES,
   APP_STACK_SECRET_ENV_LIMITS,
   APP_TEMPLATE_CATEGORY_PATTERN,
@@ -45,6 +46,7 @@ import {
   type AppTemplateService,
   type AppTemplateSpec,
   type AppTemplateSpecVersion,
+  type AppTemplateTask,
   type TemplateLocator,
   type TemplatePath,
 } from "@hosting-panel/contracts";
@@ -506,28 +508,42 @@ function checkVariable(ctx: Context, name: string, path: TemplatePath): Paramete
   return null;
 }
 
-function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string[] | null {
+/** "HP_TERMINAL_SESSION=, HP_TASK_RUN=": the marks a value may not hold, as a message names them. */
+const PROCESS_MARKS_TEXT = APP_STACK_PROCESS_MARKS.map((mark) => `${mark}=`).join(", ");
+
+/**
+ * The command of a component, or of a task when `fixed`: a task takes no placeholder, and what comes back is then the
+ * arguments as they are run (a "$$" already "$"), not the raw items.
+ */
+function validateCommand(ctx: Context, raw: unknown, path: TemplatePath, fixed = false): string[] | null {
   const { issues } = ctx;
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) {
     issues.mismatch(path, "a list of strings (there is no shell form)");
     return null;
   }
-  if (raw.length === 0) issues.add("ARGV_EMPTY", path, "Remove 'command' to use the image's own, or give at least one item.");
+  if (raw.length === 0) {
+    issues.add("ARGV_EMPTY", path, fixed ? "A task needs at least one command item." : "Remove 'command' to use the image's own, or give at least one item.");
+  }
+  const literals: string[] = [];
   if (raw.length > LIMITS.argvItems) issues.add("ARGV_TOO_MANY", path, `At most ${LIMITS.argvItems} command items are allowed.`);
   raw.forEach((item: unknown, index) => {
     const itemPath = [...path, index];
     if (typeof item !== "string") return issues.add("ARGV_ITEM_NOT_STRING", itemPath, "Every command item must be a string: quote it.");
     if (item === "" || item.length > LIMITS.argvItemLength || appStackTextProblem(item) !== null) {
-      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints or URL credentials.`);
+      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints, URL credentials or a platform mark (${PROCESS_MARKS_TEXT}).`);
     }
     const scan = scanInterpolation(item);
     if (!scan.ok) return issues.add(scan.code, itemPath, scan.message);
     const variables = scan.pieces.flatMap((piece) => ("variable" in piece ? [piece.variable] : []));
+    if (fixed && variables.length > 0) {
+      return issues.add("TASK_COMMAND_PLACEHOLDER", itemPath, "A task command takes no placeholder: the template fixes every argument (write '$$' for a dollar sign).");
+    }
     if (variables.length > 0 && scan.pieces.length !== 1) {
       issues.add("ARGV_PLACEHOLDER_NOT_WHOLE", itemPath, "A placeholder must be a whole command item, alone: split the item.");
     }
     const literal = scan.pieces.map((piece) => ("literal" in piece ? piece.literal : "")).join("");
+    literals.push(literal);
     if (index === 0) {
       if (variables.length > 0) issues.add("ARGV_EXECUTABLE_PLACEHOLDER", itemPath, "The executable (first item) cannot be a placeholder.");
       else {
@@ -540,7 +556,7 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string
     }
     for (const variable of variables) checkVariable(ctx, variable, itemPath);
   });
-  return raw.filter((item): item is string => typeof item === "string");
+  return fixed ? literals : raw.filter((item): item is string => typeof item === "string");
 }
 
 const NAME_PROBLEM_MESSAGES = {
@@ -638,9 +654,12 @@ function validateEnvValue(ctx: Context, name: string, value: unknown, entryPath:
   // Without a secret reference the whole value is checked as written; with one, each stretch of text around them is.
   const checked = secretReferences > 0 && scan.ok ? textAroundSecrets(scan.pieces, isSecret) : [value];
   const valueProblem = checked.map((text) => envValueProblem(text)).find((problem) => problem !== null) ?? null;
+  const textProblems = valueProblem === null ? checked.map((text) => appStackTextProblem(text)) : [];
   if (valueProblem !== null) issues.add(valueProblem, path, VALUE_PROBLEM_MESSAGES[valueProblem]);
-  else if (checked.some((text) => appStackTextProblem(text) === "metadata_endpoint")) {
+  else if (textProblems.includes("metadata_endpoint")) {
     issues.add("ENV_VALUE_METADATA_ENDPOINT", path, "The value names a cloud metadata endpoint, which is never reachable from a stack.");
+  } else if (textProblems.includes("process_mark")) {
+    issues.add("ENV_VALUE_PROCESS_MARK", path, `The value holds a mark the platform sets on its own programs (${PROCESS_MARKS_TEXT}).`);
   }
   if (!scan.ok) {
     issues.add(scan.code, path, scan.message);
@@ -871,6 +890,71 @@ function validateIngress(issues: Issues, root: Mapping, services: ReadonlyMap<st
   return ingress;
 }
 
+/**
+ * `x-hp-tasks` (ADR-0042): commands of the template that a customer may run, or schedule, in one of its components.
+ * A task names a declared service, so a service with a problem of its own does not add a second issue here.
+ */
+function validateTasks(ctx: Context, root: Mapping): AppTemplateTask[] {
+  const { issues } = ctx;
+  const path: TemplatePath = ["x-hp-tasks"];
+  const items = listAt(issues, own(root, "x-hp-tasks"), path) ?? [];
+  if (items.length > LIMITS.tasks) issues.add("TASK_TOO_MANY", path, `At most ${LIMITS.tasks} tasks are allowed.`);
+  const tasks: AppTemplateTask[] = [];
+  const seen = new Set<string>();
+  items.forEach((item: unknown, index) => {
+    const itemPath = [...path, index];
+    if (!isMapping(item)) return issues.mismatch(itemPath, "a mapping");
+    const before = issues.list.length;
+    checkKeys(issues, item, itemPath, "task");
+    const at = (key: string): TemplatePath => [...itemPath, key];
+    for (const key of ["key", "label", "service", "command"]) {
+      if (own(item, key) === undefined) issues.add("TASK_FIELD_MISSING", itemPath, `A task needs '${key}'.`);
+    }
+    const key = own(item, "key");
+    if (key !== undefined && (typeof key !== "string" || !APP_STACK_KEY_PATTERN.test(key) || key.length > APP_STACK_COMPONENT_KEY_MAX)) {
+      issues.add(
+        "TASK_KEY_INVALID",
+        at("key"),
+        `A task key starts with a lower-case letter, uses lower-case letters, digits and '-' (at most ${APP_STACK_COMPONENT_KEY_MAX}) and does not end with '-'.`,
+      );
+    } else if (typeof key === "string") {
+      if (seen.has(key)) issues.add("TASK_KEY_DUPLICATE", at("key"), `The task key '${clip(key)}' is used twice.`);
+      seen.add(key);
+    }
+    const label = own(item, "label");
+    if (label !== undefined && !isText(label, LIMITS.taskLabel, 1)) {
+      issues.add("TASK_LABEL_INVALID", at("label"), `A label is 1 to ${LIMITS.taskLabel} characters of plain text.`);
+    }
+    const description = ownOr(item, "description", "");
+    if (!isText(description, LIMITS.taskDescription)) {
+      issues.add("TASK_DESCRIPTION_INVALID", at("description"), `A description is at most ${LIMITS.taskDescription} characters of plain text.`);
+    }
+    const service = own(item, "service");
+    if (service !== undefined && (typeof service !== "string" || !ctx.serviceKeys.includes(service))) {
+      issues.add("TASK_SERVICE_UNKNOWN", at("service"), "service must name a service of this template.");
+    }
+    const command = validateCommand(ctx, own(item, "command"), at("command"), true);
+    const timeout = ownOr(item, "timeoutSeconds", LIMITS.taskTimeoutDefault);
+    if (!isSafeInt(timeout) || timeout < LIMITS.taskTimeoutMin || timeout > LIMITS.taskTimeoutMax) {
+      issues.add(
+        "TASK_TIMEOUT_INVALID",
+        at("timeoutSeconds"),
+        `timeoutSeconds is a whole number from ${LIMITS.taskTimeoutMin} to ${LIMITS.taskTimeoutMax}.`,
+      );
+    }
+    if (issues.list.length > before || command === null) return;
+    tasks.push({
+      key: key as string,
+      label: label as string,
+      description: description as string,
+      service: service as string,
+      command,
+      timeoutSeconds: timeout as number,
+    });
+  });
+  return tasks;
+}
+
 function fail(issues: readonly AppTemplateIssue[]): AppTemplateValidationResult {
   return { ok: false, errors: sortAppTemplateIssues(issues) };
 }
@@ -938,6 +1022,7 @@ export function validateAppTemplate(
       if (!ctx.mounted.has(name)) issues.add("VOLUME_UNUSED", ["volumes", name], "The volume is mounted by no service: remove it.", "key");
     }
     const ingress = validateIngress(issues, value, results);
+    const tasks = validateTasks(ctx, value);
     if (issues.list.length > 0) return fail(issues.list);
 
     const parsed = AppTemplateSpecSchema.safeParse({
@@ -947,6 +1032,7 @@ export function validateAppTemplate(
       services: [...results.values()].flatMap((result) => (result.service ? [result.service] : [])).sort((a, b) => compare(a.key, b.key)),
       volumes: [...volumes].sort(compare).map((key) => ({ key })),
       ingress,
+      ...(tasks.length > 0 ? { tasks } : {}),
     });
     return parsed.success ? { ok: true, spec: parsed.data } : internal();
   } catch {

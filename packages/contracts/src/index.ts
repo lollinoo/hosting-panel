@@ -36,3 +36,4 @@ export * from "./app-templates/admin-dto.js";
 export * from "./app-templates/stack-dto.js";
 export * from "./notifications.js";
 export * from "./notification-texts.js";
+export * from "./app-templates/stack-tasks.js";

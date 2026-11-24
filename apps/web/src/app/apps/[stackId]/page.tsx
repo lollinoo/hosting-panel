@@ -9,6 +9,7 @@ import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
 import { AppStackComponents, AppStackData, AppStackHistory, AppStackResources, AppStackSettings } from "@/components/app-stacks/app-stack-sections";
 import { StackStatusBadge } from "@/components/app-stacks/app-stack-status";
+import { AppStackTasks } from "@/components/app-stacks/app-stack-tasks";
 import { AppsUnavailable, appsGate } from "@/components/app-stacks/apps-unavailable";
 import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -20,6 +21,7 @@ import {
   fetchServerOrgAppStackDeployments,
   fetchServerOrgAppStackDomains,
   fetchServerOrgAppStackLinks,
+  fetchServerOrgAppStackTasks,
 } from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
@@ -50,11 +52,12 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains, backups, links] = await Promise.all([
+  const [deployments, domains, backups, links, tasks] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
     fetchServerOrgAppStackBackups(orgId, stackId),
     fetchServerOrgAppStackLinks(orgId, stackId),
+    fetchServerOrgAppStackTasks(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
@@ -111,6 +114,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       <Section id="logs" title={d.section.logs}>
         <AppStackLogs orgId={orgId} stackId={stackId} componentKeys={s.components.map((c) => c.key)} />
       </Section>
+      {tasks !== null && tasks.length > 0 && (
+        <Section id="tasks" title={d.section.tasks}>
+          <AppStackTasks {...ids} initial={tasks} />
+        </Section>
+      )}
       <Section id="settings" title={d.section.settings}>
         <AppStackSettings parameters={s.parameters} m={m} />
         <AppStackSecrets {...ids} secrets={s.secretParameters} />

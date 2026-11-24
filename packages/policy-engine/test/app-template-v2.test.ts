@@ -280,6 +280,11 @@ describe("a v2 source is still refused what a stack must not have", () => {
     resources: web("deploy", "resources"),
     limits: web("deploy", "resources", "limits"),
     ingress: ["x-hp-ingress", 0],
+    task: ["x-hp-tasks", 0],
+  };
+  /** The source declares no task: the task level is checked on one added to it (ADR-0042). */
+  const SETUP: Partial<Record<string, Edit[]>> = {
+    task: [[["x-hp-tasks"], [{ key: "tidy", label: "Tidy up", service: "web", command: ["/usr/local/bin/tidy"] }]]],
   };
   const rows = Object.entries(APP_TEMPLATE_KEY_LEVELS_V2).flatMap(([level, { refusals }]) => {
     const at = LEVEL_PATHS[level as AppTemplateKeyLevelName];
@@ -287,8 +292,8 @@ describe("a v2 source is still refused what a stack must not have", () => {
     return [...refusedKeys, [level, "x-not-a-key", "KEY_UNKNOWN"] as const].map(([name, key, code]) => [name, key, code, at] as const);
   });
 
-  it("covers all eleven levels and every key the v1 table refuses", () => {
-    expect(new Set(rows.map(([level]) => level)).size).toBe(11);
+  it("covers all twelve levels and every key the v1 table refuses", () => {
+    expect(new Set(rows.map(([level]) => level)).size).toBe(12);
     const v1Refused = Object.values(APP_TEMPLATE_KEY_LEVELS).reduce(
       (total, row) => total + Object.values(row.refusals).reduce((sum, keys) => sum + keys.length, 0),
       0,
@@ -296,8 +301,8 @@ describe("a v2 source is still refused what a stack must not have", () => {
     expect(rows.filter(([, , code]) => code !== "KEY_UNKNOWN")).toHaveLength(v1Refused);
   });
 
-  it.each(rows)("%s: %s -> %s", (_level, key, code, at) => {
-    refused(build([[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
+  it.each(rows)("%s: %s -> %s", (level, key, code, at) => {
+    refused(build(...(SETUP[level] ?? []), [[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
   });
 
   it.each<Row>([
@@ -399,6 +404,14 @@ describe("secrets in the environment", () => {
   ])("refuses %s", (_name, document, code, path) => {
     refused(document, code, path);
   });
+
+  // ADR-0041 §4: the marks of the platform's processes are refused in the text around a secret, as in any other value.
+  it.each(["HP_TERMINAL_SESSION=${db_password}", "x${db_password}HP_TASK_RUN=1", "${db_password}${api_token}HP_TERMINAL_SESSION=term_"])(
+    "refuses the mark of a platform process beside a secret reference: %s",
+    (value) => {
+      refused(build([env(1, "value"), value]), "ENV_VALUE_PROCESS_MARK", "services.web.environment[1].value");
+    },
+  );
 
   it("lets a value that carries a secret have a name that looks like one", () => {
     expect(validateAppTemplate(build([env(1, "name"), "DATABASE_PASSWORD"])).ok).toBe(true);
@@ -561,6 +574,14 @@ describe("compiling a v2 source", () => {
     if (result.ok) throw new Error("expected the compile to be refused");
     expect(result.issues.map(({ path, code }) => ({ path, code }))).toEqual([{ path: "parameters.site_title", code: "RENDERED_VALUE_FORBIDDEN" }]);
     expect(JSON.stringify(result.issues)).not.toContain("docker.sock");
+  });
+
+  it("refuses a customer value that turns the text around a secret into the mark of a platform process", () => {
+    const source = edit(SOURCE, '"postgres://blog:${db_password}@db:5432/${site_title}"', '"x${site_title}=${db_password}"');
+    expect(compileAppStackPlan(input({ source })).ok).toBe(true);
+    const result = compileAppStackPlan(input({ source, parameters: [{ key: "site_title", value: "HP_TASK_RUN" }] }));
+    if (result.ok) throw new Error("expected the compile to be refused");
+    expect(result.issues.map(({ path, code }) => ({ path, code }))).toEqual([{ path: "parameters.site_title", code: "RENDERED_VALUE_FORBIDDEN" }]);
   });
 
   it("leaves out every variable of an optional secret nobody set, and needs the required ones", () => {

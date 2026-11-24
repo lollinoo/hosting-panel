@@ -296,10 +296,21 @@ class DockerFrameDemuxer {
   }
 }
 
-async function inspectExecExitCode(
+export interface DockerExecState {
+  readonly exitCode: number | null;
+  readonly exitUnknown: boolean;
+  /** The process of the exec as the engine reports it: 0 = it never started one; null = not reported. */
+  readonly pid: number | null;
+}
+
+/**
+ * How an exec ended, waiting a moment while the engine still calls it running. null when the engine does not know the
+ * exec (404): it drops one that never ran when its container stops, and forgets them all when it restarts.
+ */
+export async function inspectExecState(
   target: DockerExecTarget,
   execId: string,
-): Promise<{ readonly exitCode: number | null; readonly exitUnknown: boolean }> {
+): Promise<DockerExecState | null> {
   const deadline = Date.now() + EXEC_INSPECT_WAIT_MS;
   for (;;) {
     const res = await requestDockerJson(
@@ -307,29 +318,48 @@ async function inspectExecExitCode(
       "GET",
       `/exec/${encodeURIComponent(execId)}/json`,
     );
+    if (res.statusCode === 404) {
+      return null;
+    }
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
         `Failed to inspect Docker exec state (HTTP ${String(res.statusCode)})`,
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
-    const parsed = parseDockerJson<{ readonly Running?: unknown; readonly ExitCode?: unknown }>(
+    const parsed = parseDockerJson<{ readonly Running?: unknown; readonly ExitCode?: unknown; readonly Pid?: unknown }>(
       res.body,
       "exec inspect",
     );
+    const pid = typeof parsed.Pid === "number" ? parsed.Pid : null;
     if (parsed.Running !== true) {
       return typeof parsed.ExitCode === "number"
-        ? { exitCode: parsed.ExitCode, exitUnknown: false }
-        : { exitCode: null, exitUnknown: true };
+        ? { exitCode: parsed.ExitCode, exitUnknown: false, pid }
+        : { exitCode: null, exitUnknown: true, pid };
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      return { exitCode: null, exitUnknown: true };
+      return { exitCode: null, exitUnknown: true, pid };
     }
     await new Promise<void>((resolve) =>
       setTimeout(resolve, Math.min(EXEC_INSPECT_POLL_MS, remaining)),
     );
   }
+}
+
+/** How an exec ended, waiting a moment while the engine still calls it running. */
+export async function inspectExecExitCode(
+  target: DockerExecTarget,
+  execId: string,
+): Promise<{ readonly exitCode: number | null; readonly exitUnknown: boolean }> {
+  const state = await inspectExecState(target, execId);
+  if (state === null) {
+    throw new ExecutorCodedError(
+      "Failed to inspect Docker exec state (HTTP 404)",
+      "DOCKER_ENGINE_UNAVAILABLE",
+    );
+  }
+  return { exitCode: state.exitCode, exitUnknown: state.exitUnknown };
 }
 
 /** Runs a non-TTY exec with half-closed stdin, byte-safe demux, per-stream cap, and timeout. */

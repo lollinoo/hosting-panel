@@ -150,7 +150,7 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.14.0
+V=0.16.0
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -275,7 +275,7 @@ Dettagli e limiti: [ADR 0024](docs/architecture/adr/0024-wordpress-import.md).
 
 ### Applicazioni multi-servizio (stack)
 
-Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei dati e nelle API (`ADR-0035`). Nelle due console sono tutte **Applicazioni**: un sito WordPress è un'applicazione di tipo WordPress, uno stack è un'applicazione del suo modello; il cliente le trova in un solo elenco (`/apps`) e ne crea una nuova da una sola pagina (`/apps/new`), l'amministratore le vede in **Amministrazione › Applicazioni** (gli stack in sola lettura) e ne gestisce i modelli, dei due tipi, in **Amministrazione › Modelli**. Un **modello di applicazione** è scritto e pubblicato dall'amministratore del server nel formato `HCP-STACK/v1` (da uno a otto componenti, volumi con nome, ingresso HTTP) o nel formato esteso `HCP-STACK/v2` (`ADR-0036`); uno **stack** è l'installazione di un modello pubblicato sull'allocazione Dedicated di un cliente, con i suoi componenti, i suoi volumi dei dati e i suoi domini.
+Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei dati e nelle API (`ADR-0035`). Nelle due console sono tutte **Applicazioni**: un sito WordPress è un'applicazione di tipo WordPress, uno stack è un'applicazione del suo modello; il cliente le trova in un solo elenco (`/apps`) e ne crea una nuova da una sola pagina (`/apps/new`), l'amministratore le vede in **Amministrazione › Applicazioni** (di uno stack apre la pagina, con i log e il terminale dei componenti, senza poterlo avviare, fermare o cambiare) e ne gestisce i modelli, dei due tipi, in **Amministrazione › Modelli**. Un **modello di applicazione** è scritto e pubblicato dall'amministratore del server nel formato `HCP-STACK/v1` (da uno a otto componenti, volumi con nome, ingresso HTTP) o nel formato esteso `HCP-STACK/v2` (`ADR-0036`); uno **stack** è l'installazione di un modello pubblicato sull'allocazione Dedicated di un cliente, con i suoi componenti, i suoi volumi dei dati e i suoi domini.
 
 - **Stato.** I flag `applicationTemplatesAvailable` e `applicationStacksAvailable` valgono `true` sul backend `linux-systemd` e `false` sugli altri (`ADR-0036` §2.10): l'amministratore trova i modelli in **Amministrazione › Modelli**, e un cliente vede un modello solo dopo che l'amministratore lo ha pubblicato. Le porte pubbliche e le build da Git restano spente su ogni backend.
 - **Il primo rilascio.** Solo immagini già pronte (nessuna build), solo Dedicated, solo ingresso HTTP, TLS solo Let's Encrypt per i domini degli stack; nessuna porta TCP/UDP pubblica.
@@ -359,7 +359,7 @@ Cosa sapere prima:
 
 ```bash
 sudo hp-update                    # ultima release
-sudo hp-update --version 0.14.0    # oppure --archive <file>
+sudo hp-update --version 0.16.0    # oppure --archive <file>
 ```
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--allow-feature-loss`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall (**il proxy non viene ricreato**: i certificati caricati a mano e le destinazioni di backup non richiedono nessuna interruzione). Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito, `8` downgrade rifiutato perché la release di destinazione perderebbe una funzione già in uso.
@@ -375,6 +375,8 @@ sudo hp-update --version 0.14.0    # oppure --archive <file>
 **Collegamenti ai database nell'aggiornamento.** La migrazione `0028` è solo additiva. Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un collegamento fra un database e un'applicazione, in qualunque stato, e la release di destinazione non conosce `app-stack-links`. Per rientrare senza forzare: scollegare i database dalle applicazioni nel pannello. Con `--allow-feature-loss` la release precedente non conosce i collegamenti: un database resta attaccato solo finché il suo container non viene sostituito, e nulla lo riattacca.
 
 **Notifiche nell'aggiornamento.** La migrazione `0029` è solo additiva (tre tabelle nuove). Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un canale di notifica, acceso o spento, del server o di un cliente, e la release di destinazione non conosce `notifications`: una versione precedente non spedisce nulla, e nessuno saprebbe che gli avvisi sono diventati muti. Per rientrare senza forzare: rimuovere ogni canale con **Rimuovi** (quelli di un cliente li rimuove un proprietario del suo account). Con `--allow-feature-loss` le tabelle restano intatte e non parte nulla finché non torna una release con le notifiche.
+
+**Attività programmate delle applicazioni (`ADR-0042`).** Un modello può dichiarare fino a otto attività (`x-hp-tasks`): un comando per uno dei suoi componenti, scritto dall'amministratore. Il cliente le vede per nome nella pagina dell'applicazione (sezione «Attività programmate»), le esegue subito o sceglie quando partono da sole (mai, ogni ora, ogni giorno o ogni settimana a un'ora intera, in UTC) e legge l'esito e le ultime righe stampate dalle ultime 20 esecuzioni. Nessuna richiesta porta un comando: solo la chiave di un'attività. L'esecutore lancia il comando nel container del componente, come l'utente del componente, lo ferma al limite di tempo (da 5 a 600 secondi) e chiude ciò che ha avviato. La migrazione `0031` è additiva; un downgrade deciso dall'operatore esce con **codice 8** quando esiste una versione di modello con attività e la release di destinazione non conosce `app-tasks`. Procedure in `docs/runbooks/application-stacks.md` §4a.
 
 **Da una versione più vecchia** l'aggiornamento scompatta la nuova versione accanto a quella in uso, poi installa i pacchetti del sistema che la nuova versione vuole e il server non ha (per esempio `nftables` e `unattended-upgrades`), con `apt-get`, e solo dopo installa le unità e i comandi della nuova versione e passa a quella. Se i pacchetti non si installano si ferma, e il pannello resta sulla versione in uso, senza riavvii: controllare le sorgenti di `apt` e la rete, aspettare che finisca un altro `apt` in corso (l'aggiornamento non lo aspetta) e rilanciare. Se le regole di base del firewall sono cambiate, l'aggiornamento scrive il file nuovo ma non lo carica, e stampa «The base firewall rules changed in this version and are not loaded yet»: l'amministratore preme una volta **Applica le regole di base** nella pagina **Amministrazione › Firewall**, che mostra le regole di base come non aggiornate (vedi **Firewall** sotto); fino a quel momento le porte aperte e gli indirizzi bloccati restano in vigore.
 
@@ -492,6 +494,17 @@ Un riavvio del pannello parte circa 2 secondi dopo la richiesta e dura al massim
 
 Dettagli e limiti: [ADR 0027](docs/architecture/adr/0027-restart-and-terminal.md).
 
+#### Log e terminale di un'applicazione
+
+Dove le applicazioni multi-servizio sono attive (il flag `applicationStacksAvailable` vale `true` sul backend `linux-systemd`), **Apri** sulla riga di un'applicazione in **Amministrazione › Applicazioni** porta alla sua pagina: cliente, modello, stato, indirizzo e componenti. Da lì l'amministratore del server ha gli stessi due strumenti che ha per i siti, senza una visita di assistenza.
+
+- **Registri**: le ultime righe (da 1 a 500) stampate da un componente, quelle che vede il cliente, con i valori riservati dell'applicazione nascosti. Ogni lettura è nel **Registro attività** (`admin.app_stack.logs.read`).
+- **Terminale**: una shell di solo testo dentro il container del componente, **come l'utente con cui gira il componente** e con ciò che il componente può raggiungere, niente di più: nessun privilegio aggiunto, file system di base in sola lettura, solo i suoi volumi e le sue reti. Il pannello non apre mai una shell sul server. Le regole sono quelle del terminale di un sito: un codice nuovo a ogni apertura, una sessione per componente e quattro sul server (siti e applicazioni insieme), fine dopo 30 minuti o 60 secondi senza letture, niente di digitato o stampato registrato.
+- Dal terminale si leggono i valori riservati dell'applicazione (i file e, nel formato esteso, le variabili d'ambiente) e si possono cambiare i suoi dati: il Registro attività dice che una sessione c'è stata, non che cosa ha fatto.
+- Il cliente non ha un terminale, e nessuna sua pagina cambia.
+
+Dettagli e limiti: [ADR 0041](docs/architecture/adr/0041-application-terminal-and-logs.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md), procedure 13 e 14.
+
 #### Firewall
 
 **Amministrazione › Firewall** gestisce il firewall `nftables` del server (tabella `inet hp_dedicated_filter`).
@@ -565,7 +578,8 @@ corepack pnpm run test
 - [ADR 0035 — Stack applicativi](docs/architecture/adr/0035-application-stacks.md): modello delle risorse, confini di fiducia, minacce, compatibilità e downgrade, catalogo iniziale (stato `APPROVATO`).
 - [ADR 0038 — Backup e ripristino delle applicazioni](docs/architecture/adr/0038-application-backups.md): che cosa si copia, il fermo durante la copia, il ripristino con la copia di sicurezza, la conservazione (stato `PROPOSTO`).
 - [ADR 0039 — Database autonomi e collegamento privato tra applicazioni](docs/architecture/adr/0039-application-databases.md): i tre database integrati, il collegamento fra un database e un'applicazione dello stesso cliente, limiti e downgrade (stato `PROPOSTO`).
-- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti, backup e ripristino di un'applicazione, database e collegamenti (in inglese).
+- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti, backup e ripristino di un'applicazione, database e collegamenti, log e terminale per l'amministratore (in inglese).
+- [ADR 0041 — Terminale e log di un'applicazione per l'amministratore del server](docs/architecture/adr/0041-application-terminal-and-logs.md): chi, dove gira la shell e con quali poteri, limiti in comune con i siti, che cosa resta dopo una sessione (stato `PROPOSTO`).
 - [Report di collaudo degli stack applicativi](docs/security/hcp-spec-005-acceptance-report.md): esito di ogni prova `A1..A20` e `B1..B6`, con i punti in attesa del titolare.
 - [ADR 0040 — Notifiche](docs/architecture/adr/0040-notifications.md): che cosa viene detto e a chi, i tre canali, la regola sugli indirizzi, la coda e gli esiti, il downgrade (stato `PROPOSTO`).
 - [Procedure operative: notifiche](docs/runbooks/notifications.md): accendere un canale e provarlo, leggere perché un messaggio non è stato consegnato, controllare la firma di un webhook, downgrade e ripristino su un nuovo server (in inglese).

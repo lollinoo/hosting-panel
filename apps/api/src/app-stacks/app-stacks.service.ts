@@ -9,7 +9,9 @@ import {
   PLATFORM_OPS_ORG_ID,
   ApprovedStackPlanSchema,
   appStackAllowedActions,
+  appStackLockKey,
   appStackPlanImageProblems,
+  appStackTaskQueueKey,
   appTemplateHiddenSecretKeys,
   effectiveComponentHealth,
   redactSensitiveString,
@@ -36,8 +38,10 @@ import {
   type UpgradeAppStackInput,
 } from "@hosting-panel/contracts";
 import {
+  ACTIVE_OPERATION_LOCK_STATUSES,
   addAppStackDomainsTransactional,
   and,
+  asc,
   appStackComponents,
   appStackDeployments,
   appStackDomains,
@@ -352,7 +356,7 @@ export class AppStacksService {
     const version = await this.#version(stack);
     const [template] = await db.select().from(appTemplates).where(eq(appTemplates.id, stack.templateId));
     if (!template) throw damaged("The stored application is damaged.");
-    const [desired, components, volumes, domains, parameters, secrets, revisions, active, ran] = await Promise.all([
+    const [desired, components, volumes, domains, parameters, secrets, revisions, [active], holder, ran] = await Promise.all([
       this.#desired(stack),
       listAppStackComponents(db, scope),
       listAppStackVolumes(db, scope),
@@ -360,7 +364,21 @@ export class AppStacksService {
       listAppStackParameters(db, scope),
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
-      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7).
+      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7). A run of a task
+      // that waits for its lane holds a lock of its own; an operation under the application's lock ("stack:<id>" sorts
+      // first) is the one shown.
+      db
+        .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
+        .from(operations)
+        .where(
+          and(
+            inArray(operations.lockKey, [appStackLockKey(stack.id), appStackTaskQueueKey(stack.id)]),
+            inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
+          ),
+        )
+        .orderBy(asc(operations.lockKey))
+        .limit(1),
+      // What the enqueue reads: only an operation under "stack:<id>" refuses an action; a task run waiting in its lane does not.
       getAppStackLockHolder(db, stack.id),
       // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
       // (only the routes were refused, and that revision was applied).
@@ -417,7 +435,7 @@ export class AppStacksService {
       secrets,
       activeOperationId: own?.id ?? null,
       // Read with the lock as it is now: a second later it may be taken, and the request then answers 409.
-      allowedActions: appStackAllowedActions(stack.status, active !== null, may),
+      allowedActions: appStackAllowedActions(stack.status, holder !== null, may),
       installed,
       platformWork,
       upgrade:

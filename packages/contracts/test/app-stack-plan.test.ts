@@ -123,6 +123,10 @@ describe("ApprovedStackPlanSchema: refine rules", () => {
     ["forbidden text in argv", (_, __, app) => void (app.argv = ["serve", "--socket=/run/docker.sock"]), ["components.1.argv.1"]],
     ["metadata endpoint in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "http://169.254.169.254/"), ["components.1.environment.0.value"]],
     ["control character in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "a\nb"), ["components.1.environment.0.value"]],
+    // ADR-0041: no value carries the mark a clean-up looks for (APP_STACK_PROCESS_MARKS).
+    ["a terminal's mark in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "x HP_TERMINAL_SESSION=term_"), ["components.1.environment.0.value"]],
+    ["a task run's mark in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "xHP_TASK_RUN=srun_1"), ["components.1.environment.0.value"]],
+    ["a task run's mark in argv", (_, __, app) => void (app.argv = ["serve", "HP_TASK_RUN=srun_1"]), ["components.1.argv.1"]],
     ["unsorted expose", (_, __, app) => void (app.expose = [8081, 8080]), ["components.1.expose.1"]],
     ["expose over 16 in total", (_, cache, app) => void ((app.expose = ports(8080, 9)), (cache.expose = ports(6379, 9))), ["components"]],
     ["health port not exposed", (_, __, app) => void ((app.healthcheck as { port: number }).port = 9000), ["components.1.healthcheck.port"]],
@@ -154,6 +158,14 @@ describe("ApprovedStackPlanSchema: refine rules", () => {
   it.each(cases)("refuses %s", (_, change, paths) => {
     expect(pathsOf(variant(change))).toEqual(paths);
   });
+
+  it.each(["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "SHP_X=1", "HP_HOME=/x", "ends with HP_TERMINAL_"])(
+    "accepts %j in an env value and in argv: only the marks of the platform's processes are refused",
+    (text) => {
+      expect(pathsOf(variant((_, __, app) => void ((app.environment[0] as { value: string }).value = text)))).toEqual([]);
+      expect(pathsOf(variant((_, __, app) => void (app.argv = ["serve", text])))).toEqual([]);
+    },
+  );
 
   it("refuses an extra key at every object", () => {
     const targets: Array<(plan: Record<string, unknown>) => object> = [

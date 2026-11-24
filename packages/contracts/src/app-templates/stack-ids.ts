@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { APP_FOREIGN_ID_PATTERN, APP_STACK_ID_PATTERN } from "./limits.js";
 
-/** Any id of the application family (template, version, stack, revision, deployment, domain, secret, backup, link). */
+/** Any id of the application family (template, version, stack, revision, deployment, domain, secret, backup, link, task run). */
 export const AppEntityIdSchema = z.string().regex(APP_STACK_ID_PATTERN);
 /** The id of an entity this feature does not mint (organisation, host allocation). */
 export const AppForeignIdSchema = z.string().regex(APP_FOREIGN_ID_PATTERN);
@@ -18,5 +18,6 @@ export const APP_ID_PREFIXES = Object.freeze({
   backup: "sbak",
   backupCopy: "sbkc",
   link: "slnk",
+  taskRun: "srun",
 } as const);
 export type AppIdPrefix = (typeof APP_ID_PREFIXES)[keyof typeof APP_ID_PREFIXES];

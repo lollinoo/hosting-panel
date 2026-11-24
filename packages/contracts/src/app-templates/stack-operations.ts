@@ -112,6 +112,8 @@ export const APP_AUDIT_ACTIONS = Object.freeze({
   backupRestore: "app.stack.backup.restore",
   linkCreate: "app.stack.link.create",
   linkRemove: "app.stack.link.remove",
+  taskRun: "app.task.run",
+  taskSchedule: "app.task.schedule",
 } as const);
 export const APP_AUDIT_TARGET_TYPES = Object.freeze({
   template: "app_template",

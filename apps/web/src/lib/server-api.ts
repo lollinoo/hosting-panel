@@ -48,6 +48,7 @@ import type {
   AdminAppTemplateDetailDto,
   AdminAppTemplateVersionDto,
   AdminAppTemplateUsageDto,
+  AdminAppStackDto,
   AdminAppStacksDto,
   CustomerAppTemplatesDto,
   CustomerAppTemplateDto,
@@ -57,6 +58,8 @@ import type {
   AppStackDomainDto,
   AppStackBackupsDto,
   AppStackLinksDto,
+  AppStackTaskDto,
+  AppStackTasksDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -343,6 +346,12 @@ export async function fetchServerAdminAppStacks(): Promise<ServerResult<AdminApp
   return serverGet<AdminAppStacksDto>("v1/admin/app-stacks");
 }
 
+/** One customer's application for the server administrator (ADR-0041): who it belongs to and its components. */
+export async function fetchServerAdminAppStack(stackId: string): Promise<ServerResult<AdminAppStackDto>> {
+  if (!segments(stackId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppStackDto>(`v1/admin/app-stacks/${enc(stackId)}`);
+}
+
 export async function fetchServerOrgAppTemplates(orgId: string): Promise<ServerResult<CustomerAppTemplatesDto>> {
   return serverGet<CustomerAppTemplatesDto>(`v1/organizations/${enc(orgId)}/app-templates`);
 }
@@ -384,4 +393,10 @@ export async function fetchServerOrgAppStackBackups(orgId: string, stackId: stri
 export async function fetchServerOrgAppStackLinks(orgId: string, stackId: string): Promise<AppStackLinksDto | null> {
   if (!segments(stackId)) return null;
   return orNull(await serverGet<AppStackLinksDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/links`));
+}
+
+/** The tasks of the installed version (ADR-0042); null when the read failed. */
+export async function fetchServerOrgAppStackTasks(orgId: string, stackId: string): Promise<AppStackTaskDto[] | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackTasksDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/tasks`))?.tasks ?? null;
 }

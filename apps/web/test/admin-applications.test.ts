@@ -84,7 +84,7 @@ describe("SitesTable with application stacks", () => {
     expect(cells(rowOf(out, "wp-b"))[1]).toBe("-");
   });
 
-  it.each(locales)("appends read-only stack rows after the WordPress rows (%s)", (_l, m) => {
+  it.each(locales)("appends stack rows, each with only the link to its page, after the WordPress rows (%s)", (_l, m) => {
     const out = table(m, [site("a")], [stack("s1"), stack("s2", { primaryHostname: null, status: "degraded", templateName: "Board", versionNumber: 1 })]);
     expect(out.indexOf(">wp-a<")).toBeLessThan(out.indexOf(">notes-s1<"));
     expect(out.indexOf(">notes-s1<")).toBeLessThan(out.indexOf(">notes-s2<"));
@@ -96,7 +96,7 @@ describe("SitesTable with application stacks", () => {
       "-",
       format(m.admin.sites.templateVersion, { name: "Notes", version: 3 }),
       m.admin.appTemplates.stackStatus.running,
-      "",
+      m.admin.appStack.linkLabel,
     ]);
     expect(cells(rowOf(out, "notes-s2"))).toEqual([
       "notes-s2",
@@ -106,17 +106,19 @@ describe("SitesTable with application stacks", () => {
       "-",
       format(m.admin.sites.templateVersion, { name: "Board", version: 1 }),
       m.admin.appTemplates.stackStatus.degraded,
-      "",
+      m.admin.appStack.linkLabel,
     ]);
   });
 
-  it("a stack row has no button and no link, and adds no support action", () => {
+  it("a stack row has no button and one link, to the application's own page, and adds no support action", () => {
     const out = table(en, [site("a"), site("b", { owner: null })], [stack("s1"), stack("s2")]);
-    for (const name of ["notes-s1", "notes-s2"]) {
-      const row = rowOf(out, name);
+    for (const id of ["s1", "s2"]) {
+      const row = rowOf(out, `notes-${id}`);
       expect(row).not.toBe("");
       expect(row).not.toContain("<button");
-      expect(row).not.toContain("<a");
+      expect(count(row, "<a ")).toBe(1);
+      expect(row).toContain(`href="/admin/apps/${id}"`);
+      expect(row).toContain(`aria-label="${format(en.admin.appStack.linkAria, { name: `notes-${id}` })}"`);
     }
     expect(count(out, en.admin.sites.support.open)).toBe(2);
   });

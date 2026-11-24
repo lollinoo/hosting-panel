@@ -76,6 +76,8 @@ export interface SimulatedAppStacksOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
   readonly assertEngineAvailable: () => void;
   readonly now?: () => Date;
+  /** Told when the container of a component stops running or is removed, replaced or restarted (it ends its terminals). */
+  readonly onComponentGone?: (stackId: string, componentKey: string) => void;
   /** The simulated runner's holdAppStackLane (ADR-0038 K4); absent, no backup job ever holds a lane. */
   readonly holdBackupLane?: (stackId: string) => (() => void) | null;
 }
@@ -164,6 +166,22 @@ export class SimulatedAppStacks implements StackExecutorPort {
     if (container === undefined) throw new Error(`No simulated component ${componentKey}`);
     container.state = "exited";
     container.exitCode = exitCode;
+    this.gone(stackId, componentKey);
+  }
+
+  /**
+   * The running container of one component, for a terminal (ADR-0041): refused when the application is another
+   * customer's, NOT_FOUND when the component is missing or not running. `user` is the Config.User of its payload.
+   */
+  public runningAppStackComponent(req: { readonly stackId: string; readonly organizationId: string; readonly componentKey: string }): {
+    readonly name: string;
+    readonly user: string | null;
+  } {
+    this.options.assertEngineAvailable();
+    const container = this.own(req.stackId, req.organizationId)?.containers.get(req.componentKey);
+    if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+    if (container.state !== "running") throw new ExecutorCodedError("The component is not running", "NOT_FOUND");
+    return { name: container.name, user: container.payload.User ?? null };
   }
 
   public setAppStackComponentLogs(stackId: string, componentKey: string, lines: readonly ServiceLogLine[]): void {
@@ -206,6 +224,22 @@ export class SimulatedAppStacks implements StackExecutorPort {
       ),
       routes: parsePersistedAppStackRoutesFromYaml(stack.routeYaml),
     }) as AppStackSimSnapshot;
+  }
+
+  /** For the simulated tasks: is the component there and running, and which values its output must never show. */
+  public async findAppStackComponent(req: {
+    readonly stackId: string;
+    readonly organizationId: string;
+    readonly componentKey: string;
+  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] } | null> {
+    const stack = this.own(req.stackId, req.organizationId);
+    const container = stack?.containers.get(req.componentKey);
+    if (stack === undefined || container === undefined) return null;
+    const secretValues =
+      this.options.secretsRootDir !== null
+        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
+        : (stack.secrets.get(req.componentKey) ?? []);
+    return { running: container.state === "running", secretValues };
   }
 
   public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
@@ -303,6 +337,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
         if (existing !== undefined) {
           stack.containers.delete(key);
           this.mutate("container_remove", existing.name);
+          this.gone(plan.stackId, key);
         }
         const name = appStackContainerName(plan.stackId, key);
         stack.containers.set(key, {
@@ -338,6 +373,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
         c.state = "exited";
         c.exitCode = 0;
         this.mutate("container_stop", c.name);
+        this.gone(req.stackId, key);
         return { componentKey: key, outcome: "stopped" as const };
       });
       return { components };
@@ -380,6 +416,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       for (const [key, c] of [...stack.containers].sort(byStartDesc)) {
         stack.containers.delete(key);
         this.mutate("container_remove", c.name);
+        this.gone(req.stackId, key);
         result.removedComponents.push(key);
       }
       stack.secrets.clear();
@@ -534,12 +571,17 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const container = this.readyContainer(stack, plan, component.key, false);
       if (step === "start" && container.state === "running") return { componentKey: component.key, outcome: "already_running" };
       await this.writeSecrets(stack!, plan.stackId, component.key, Object.keys(contents).length > 0 ? contents : null);
+      if (container.state === "running") this.gone(plan.stackId, component.key); // a restart ends what ran in it
       container.state = "running";
       container.startedAt = this.now().toISOString();
       container.exitCode = null;
       this.mutate(step === "start" ? "container_start" : "container_restart", container.name);
       return { componentKey: component.key, outcome: step === "start" ? "started" : "restarted" };
     });
+  }
+
+  private gone(stackId: string, componentKey: string): void {
+    this.options.onComponentGone?.(stackId, componentKey);
   }
 
   private detachLinked(consumerStackId: string): void {
@@ -614,6 +656,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
     if (container === undefined) return;
     stack.containers.delete(key);
     this.mutate("container_remove", container.name);
+    this.gone(stackId, key);
     stack.secrets.delete(key);
     if (this.options.secretsRootDir !== null) await purgeAppStackComponentSecrets(this.options.secretsRootDir, stackId, key);
   }

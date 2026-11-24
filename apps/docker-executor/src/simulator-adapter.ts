@@ -39,9 +39,12 @@ import {
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPullIpcRequest,
+  type AppStackTerminalOpenIpcRequest,
   type AppStackRefIpcRequest,
   type AppStackRemoveIpcRequest,
   type AppStackRoutesIpcRequest,
+  type AppStackTaskReadIpcRequest,
+  type AppStackTaskRunIpcRequest,
 } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
@@ -67,7 +70,9 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  AppStackTerminalPort,
   StackExecutorPort,
+  StackTaskExecutorPort,
   StoredCertificate,
   TerminalEnded,
   TerminalOpenRequest,
@@ -80,6 +85,7 @@ import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { SimulatedAppStacks } from "./simulator-app-stacks.js";
+import { SimulatedAppStackTasks } from "./simulator-app-stack-tasks.js";
 import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import { renderPhpIni } from "./site-php.js";
@@ -225,7 +231,7 @@ function simulatedLeafNames(cert: X509Certificate): string[] {
   return traefikCertificateNames({ commonName: cn, dnsNames, ipAddresses });
 }
 
-export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort {
+export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
   private readonly virtualSecretsRoot: string;
@@ -305,6 +311,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType;
   private readonly terminalSinks = new Map<string, TerminalShellSink>();
   public readonly appStacks: SimulatedAppStacks;
+  public readonly appStackTasks: SimulatedAppStackTasks;
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
@@ -319,11 +326,16 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
     this.terminals = new TerminalSessions(options?.terminalLimits);
     this.resolveSiteType = options?.resolveSiteType ?? resolveSimulatorSiteType;
     this.files = new SimulatedSiteFiles(this.resolveSiteType);
+    this.appStackTasks = new SimulatedAppStackTasks({
+      findComponent: (req) => this.appStacks.findAppStackComponent(req),
+      assertEngineAvailable: () => this.assertEngineAvailable(),
+    });
     this.appStacks = new SimulatedAppStacks({
       secretsRootDir: this.secretsRootDir,
       ingress: this.ingressFileManager,
       ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
       assertEngineAvailable: () => this.assertEngineAvailable(),
+      onComponentGone: (stackId, componentKey) => this.terminals.endAppStack(stackId, componentKey, "container_gone"),
       holdBackupLane: (stackId) => this.backupState.holdAppStackLane(stackId),
     });
   }
@@ -937,8 +949,27 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       this.terminalSinks.set(req.sessionId, sink);
       // The sink holds the session's output: let go of it however the session ends.
       const forget = () => this.terminalSinks.delete(req.sessionId);
-      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } }, type);
+      const shell = startSimulatedShell(
+        { data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } },
+        { folder: type.def.files.mountPath, id: type.shellId },
+      );
       return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name.slice(1) };
+    });
+  }
+
+  /** A fake shell in the running container of one component of an application, as the user its payload names (ADR-0041). */
+  public async openAppStackTerminal(req: AppStackTerminalOpenIpcRequest): Promise<TerminalOpenResult> {
+    this.assertEngineAvailable();
+    return this.terminals.open(req, async (sink) => {
+      const container = this.appStacks.runningAppStackComponent(req);
+      this.terminalSinks.set(req.sessionId, sink);
+      const forget = () => this.terminalSinks.delete(req.sessionId);
+      const shell = startSimulatedShell(
+        { data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } },
+        // No user and no folder are named: the shell is whoever the container runs as, where its image starts.
+        { folder: "/", id: container.user === null ? "uid=(the image's own user)" : `uid=${container.user.replace(":", " gid=")}` },
+      );
+      return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name };
     });
   }
 
@@ -1372,6 +1403,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public syncAppStackLinks(req: AppStackLinksIpcRequest) { return this.appStacks.syncAppStackLinks(req); }
   public getAppStackStatus(req: AppStackRefIpcRequest) { return this.appStacks.getAppStackStatus(req); }
   public getAppStackComponentLogs(req: AppStackLogsIpcRequest) { return this.appStacks.getAppStackComponentLogs(req); }
+  public runAppStackTask(req: AppStackTaskRunIpcRequest) { return this.appStackTasks.runAppStackTask(req); }
+  public getAppStackTaskRun(req: AppStackTaskReadIpcRequest) { return this.appStackTasks.getAppStackTaskRun(req); }
 
   public hasActiveVirtualSecret(serviceInstanceId: string, envName?: string): boolean {
     const set = this.virtualSecretFiles.get(serviceInstanceId);

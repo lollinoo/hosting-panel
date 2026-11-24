@@ -850,3 +850,162 @@ describe("0029 notifications", () => {
     expect(await rows(pg, "SELECT id, status FROM notification_deliveries")).toEqual([{ id: "ndl_srv", status: "pending" }]);
   });
 });
+
+describe("0030 terminal sessions of applications", () => {
+  // ADR-0041: after 0030 the previous release keeps opening, listing and closing terminal sessions.
+  const M0030 = "0030_app_terminal_sessions.sql";
+  let pg: PGlite;
+  // What the previous release runs: its insert always sets site_id and never names the two new columns.
+  const OLD_OPEN = (id: string, site: string) =>
+    `INSERT INTO admin_terminal_sessions (id, user_id, site_id, organization_id, container_name) VALUES ('${id}','u','${site}','o','hp_svc_${site}')`;
+  const OLD_CLOSE = (id: string, reason: string) => `
+    UPDATE admin_terminal_sessions SET closed_at = COALESCE(NULL::timestamptz, now()), close_reason = '${reason}'
+    WHERE id = '${id}' AND closed_at IS NULL
+    RETURNING site_id, container_name,
+      GREATEST(0, ROUND(EXTRACT(EPOCH FROM (closed_at - opened_at))))::int AS duration_seconds,
+      (SELECT u.id FROM users u WHERE u.id = user_id) AS actor_id,
+      (SELECT o.id FROM organizations o WHERE o.id = organization_id) AS organization_id`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0030);
+    await pg.exec(`${OLD_OPEN("term_before", "s_before")};`); // a row written before the migration
+    await pg.exec(read(M0030));
+    // A session the new release left open in a component before the rollback.
+    await pg.exec(`INSERT INTO admin_terminal_sessions (id, user_id, stack_id, component_key, organization_id, container_name)
+      VALUES ('term_app','u','stk_a','web','o','hp_app_stk_a_web');`);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("keeps the rows written before the migration", async () => {
+    expect(await rows(pg, "SELECT id, site_id, stack_id, component_key FROM admin_terminal_sessions WHERE id = 'term_before'")).toEqual([
+      { id: "term_before", site_id: "s_before", stack_id: null, component_key: null },
+    ]);
+  });
+
+  it("runs the previous release's open, list and close", async () => {
+    await pg.exec(`${OLD_OPEN("term_rb", "s_rb")};`);
+    // Its limits read every open row: the application's session counts as one more and matches no site.
+    expect(await rows(pg, "SELECT site_id FROM admin_terminal_sessions WHERE closed_at IS NULL ORDER BY id")).toEqual([
+      { site_id: null },
+      { site_id: "s_before" },
+      { site_id: "s_rb" },
+    ]);
+    expect(await rows(pg, OLD_CLOSE("term_rb", "closed"))).toMatchObject([{ site_id: "s_rb", container_name: "hp_svc_s_rb" }]);
+  });
+
+  it("lets the previous release's pass close the session of an application; its audit row has no target id", async () => {
+    const closed = await rows(pg, OLD_CLOSE("term_app", "executor_gone"));
+    expect(closed).toMatchObject([{ site_id: null, container_name: "hp_app_stk_a_web", actor_id: null, organization_id: null }]);
+    // The audit row the previous release writes next: target_type 'site' with a NULL target_id, which the column allows.
+    await pg.exec(`INSERT INTO audit_events (id, actor_type, action, target_type, target_id, details)
+      VALUES ('aud_rb','system','admin.terminal.close','site',NULL,'{"outcome":"succeeded"}')`);
+    expect(await rows(pg, "SELECT close_reason FROM admin_terminal_sessions WHERE id = 'term_app'")).toEqual([{ close_reason: "executor_gone" }]);
+  });
+
+  it("runs 0030 again on a table with both kinds of rows without harm", async () => {
+    await pg.exec(read(M0030));
+    expect(await rows(pg, "SELECT id FROM admin_terminal_sessions ORDER BY id")).toEqual([{ id: "term_app" }, { id: "term_before" }, { id: "term_rb" }]);
+    await expect(pg.exec("INSERT INTO admin_terminal_sessions (id, user_id, organization_id, container_name) VALUES ('term_none','u','o','c')")).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+});
+
+describe("0031 tasks of applications", () => {
+  // HCP-SPEC-005: after 0031 the previous release keeps running on the migrated schema. It never names the two new
+  // tables; when it deletes an application, the trigger removes what the tasks of that application left.
+  const M0031 = "0031_app_stack_tasks.sql";
+  const HASH = "a".repeat(64);
+  let pg: PGlite;
+  // An install of the previous release with two applications.
+  const SEED_BEFORE = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug) VALUES ('o','pi','o','o');
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO users (id, email, name) VALUES ('u','u@example.test','U');
+    INSERT INTO app_templates (id, slug, name, category) VALUES ('atpl_a','alpha','Alpha','web');
+    INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+      VALUES ('atv_a1','atpl_a',1,'x',1,'{}','${HASH}');
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_a','o','a','atpl_a','atv_a1','Stack A','running'), ('stk_b','o','a','atpl_a','atv_a1','Stack B','running');`;
+  // What the new release wrote before the rollback: schedules, runs and the operations of the runs.
+  const TASK_ROWS = `
+    INSERT INTO app_stack_task_schedules (stack_id, organization_id, task_key, frequency, hour_utc, changed_by, served_slot_at)
+      VALUES ('stk_a','o','cleanup','daily',3,'u','2026-11-22T03:00:00Z'), ('stk_b','o','cleanup','hourly',NULL,NULL,NULL);
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id, status)
+      VALUES ('op_ta','o','stack.task','stack','stk_a','succeeded'), ('op_tb','o','stack.task','stack','stk_b','succeeded');
+    INSERT INTO app_stack_task_runs (id, stack_id, organization_id, task_key, component_key, run_trigger, slot_at, operation_id, status,
+        exit_code, started_at, ended_at, output)
+      VALUES ('srun_${"a".repeat(24)}','stk_a','o','cleanup','web','schedule','2026-11-22T03:00:00Z','op_ta','succeeded',0,
+        '2026-11-22T03:00:01Z','2026-11-22T03:00:02Z','done');
+    INSERT INTO app_stack_task_runs (id, stack_id, organization_id, task_key, component_key, run_trigger, requested_by, operation_id, status,
+        exit_code, started_at, ended_at, output)
+      VALUES ('srun_${"b".repeat(24)}','stk_b','o','cleanup','web','manual','u','op_tb','failed',2,
+        '2026-11-22T04:00:01Z','2026-11-22T04:00:02Z','no');`;
+  // The statements the previous release runs on applications: none names a table or a trigger added by 0031.
+  const OLD_RELEASE_WRITES = `
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_rb','o','a','atpl_a','atv_a1','Stack RB','queued');
+    UPDATE app_stacks SET status = 'running', updated_at = NOW() WHERE id = 'stk_rb';
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id) VALUES ('op_rb','o','stack.stop','stack','stk_a');
+    INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload)
+      VALUES ('ev_rb','operation.queued.stack.stop','stack','stk_a','{"operationId":"op_rb"}');
+    UPDATE app_stacks SET status = 'stopping' WHERE id = 'stk_a';
+    UPDATE operations SET status = 'succeeded' WHERE id = 'op_rb';
+    UPDATE outbox_events SET status = 'published', published_at = NOW() WHERE id = 'ev_rb';
+    UPDATE app_stacks SET status = 'stopped' WHERE id = 'stk_a';
+    UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_rb';`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0031);
+    await pg.exec(SEED_BEFORE);
+    await pg.exec(read(M0031));
+    await pg.exec(TASK_ROWS);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  const taskRows = async () => ({
+    schedules: (await rows<{ stack_id: string }>(pg, "SELECT stack_id FROM app_stack_task_schedules ORDER BY stack_id")).map((row) => row.stack_id),
+    runs: (await rows<{ stack_id: string }>(pg, "SELECT stack_id FROM app_stack_task_runs ORDER BY stack_id")).map((row) => row.stack_id),
+  });
+
+  it("runs the previous release's writes on applications, operations and outbox, and keeps what the tasks left", async () => {
+    await pg.exec(OLD_RELEASE_WRITES);
+    expect(await rows(pg, "SELECT id, status FROM app_stacks ORDER BY id")).toEqual([
+      { id: "stk_a", status: "stopped" },
+      { id: "stk_b", status: "running" },
+      { id: "stk_rb", status: "deleted" },
+    ]);
+    expect(await taskRows()).toEqual({ schedules: ["stk_a", "stk_b"], runs: ["stk_a", "stk_b"] });
+  });
+
+  it("removes the schedules and the runs of an application the previous release deletes, and of that one only", async () => {
+    await pg.exec("UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_a'");
+    expect(await taskRows()).toEqual({ schedules: ["stk_b"], runs: ["stk_b"] });
+    // The operations of the runs stay, as every other operation of a deleted application does.
+    expect(await rows(pg, "SELECT id FROM operations WHERE kind = 'stack.task' ORDER BY id")).toEqual([{ id: "op_ta" }, { id: "op_tb" }]);
+  });
+
+  it("lets the previous release remove a person the new tables name", async () => {
+    await pg.exec("DELETE FROM users WHERE id = 'u'");
+    expect(await rows(pg, "SELECT requested_by, status FROM app_stack_task_runs")).toEqual([{ requested_by: null, status: "failed" }]);
+  });
+
+  it("runs 0031 again on a database with schedules and runs without harm", async () => {
+    await pg.exec(read(M0031));
+    expect(await taskRows()).toEqual({ schedules: ["stk_b"], runs: ["stk_b"] });
+    expect(await rows(pg, "SELECT COUNT(*)::int AS n FROM pg_trigger WHERE tgname = 'trg_app_stacks_forget_tasks'")).toEqual([{ n: 1 }]);
+    await pg.exec("UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_b'");
+    expect(await taskRows()).toEqual({ schedules: [], runs: [] });
+  });
+});
