@@ -594,7 +594,7 @@ SQL
   fi
 
   # ---------------------------------------------------------------- 11
-  step 11 "First administrator"
+  step 11 "Server addresses and first administrator"
   local totp_secret="" totp_uri=""
   local setup_args=(--name "${hostname}" --hostname "${hostname}" --ipv4 "${ipv4}")
   if ((ipv6_given)); then setup_args+=(--ipv6 "${ipv6}"); fi
@@ -605,13 +605,15 @@ SQL
     elif [[ "${ipv6}" == none ]]; then
       setup_note=" (removes the recorded IPv6)"
     fi
+    plan "would run hp-accounts setup ${setup_args[*]}${setup_note}"
     if ((admin_done)); then
       plan "skip: administrator already created (${STATE_DIR}/admin-created)"
     else
-      plan "would run hp-accounts setup ${setup_args[*]}${setup_note}"
       plan "would create the first administrator ${admin_email} (password via env, not shown) and print the TOTP enrolment once"
     fi
   else
+    # Every run: a rerun is how the administrator changes the addresses the panel records (NAT, --ipv6).
+    /usr/local/sbin/hp-accounts setup "${setup_args[@]}" >/dev/null
     if ((admin_done == 0)); then
       local has_admin
       has_admin="$(panel_has_admin "${api_env}")"
@@ -620,7 +622,6 @@ SQL
     if ((admin_done)); then
       info "skip: administrator already created"
     else
-      /usr/local/sbin/hp-accounts setup "${setup_args[@]}" >/dev/null
       local out
       out="$(HP_NEW_PASSWORD="${admin_password}" /usr/local/sbin/hp-accounts create-admin --email "${admin_email}" --name "${admin_name}")"
       totp_secret="$(sed -n 's/.*"totpSecretBase32":"\([^"]*\)".*/\1/p' <<<"${out}")"
