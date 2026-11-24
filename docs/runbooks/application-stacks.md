@@ -800,10 +800,13 @@ needed, and a support visit gives none of this.
    3. Still refused, and the executor's secret folder (`HP_SECRETS_ROOT_DIR`) was changed after the component's
       container was created: that container still has its secret files from the old folder, so its lines cannot be
       masked. **Riavvia** keeps the same container and its binds (it writes the files in the new folder, which that
-      container does not see), and so does **Reinstalla** while the component's plan is unchanged. Either put the
-      earlier folder back in the executor's configuration, or have the customer give a new value, in **Valori
-      riservati**, to one of the component's private values that is a secret file, then press **Reinstalla**: the
-      changed plan creates the container again, with its files from the current folder.
+      container does not see), and so does **Reinstalla** while the component's plan is unchanged, except the first
+      **Reinstalla** of an older container (procedure 8a), which replaces it with its files from the current folder
+      and so ends the refusal. Either put the earlier folder back in the executor's configuration, or have the
+      customer give a new value, in **Valori riservati**, to one of the component's private values that is a secret
+      file, then press **Reinstalla**: the changed plan creates the container again, with its files from the current
+      folder. When every secret file of the component holds a generated value, the customer has no value to give:
+      only an upgrade that changes the component creates the container again; otherwise put the earlier folder back.
 
 ## 14. Administrator: a terminal in a component
 
