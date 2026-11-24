@@ -27,7 +27,7 @@ import {
   appStackDomainDto,
   appStackSummaryDto,
 } from "../src/app-stacks/app-stack-dto.js";
-import { appStackRoutePlan, appStackRoutesHash } from "../src/app-stacks/app-stack-runtime-policy.js";
+import { appStackAddressesHash, appStackRoutePlan, appStackRoutesHash } from "../src/app-stacks/app-stack-runtime-policy.js";
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`../../../packages/contracts/test/fixtures/app-stack-notes-demo/${name}`, import.meta.url), "utf8");
@@ -67,6 +67,7 @@ const stackRow = (change: Partial<AppStackRow> = {}): AppStackRow => ({
   appliedRevisionId: null,
   resourceQuotaId: null,
   appliedRoutesHash: null,
+  appliedAddressesHash: null,
   idempotencyKey: "k-1",
   requestHash: "h",
   createdBy: "usr_1",
@@ -243,31 +244,57 @@ describe("appStackDetailDto", () => {
     ]);
   });
 
-  it("says when the saved addresses and options are not what the route file last published holds (ADR-0037)", () => {
+  it("says when the saved addresses and options are not those the last published route file was made from (ADR-0037)", () => {
     const shop = domain("sdom_1", "shop.example.test", "active");
-    const hashOf = (rows: AppStackDomainRow[]) => {
-      const { entries } = appStackRoutePlan({ plan: PLAN, domains: rows, include: new Set(["app"]), now: NOW, acmeEnabled: false });
+    const hashOf = (rows: AppStackDomainRow[], include = new Set(["app"])) => {
+      const { entries } = appStackRoutePlan({ plan: PLAN, domains: rows, include, now: NOW, acmeEnabled: false });
       return entries.length > 0 ? appStackRoutesHash(entries) : null;
     };
-    const live = (domains: AppStackDomainRow[], appliedRoutesHash: string | null) =>
-      appStackDetailDto(
+    /** The stack as a publication made from `from` leaves it, with `include` the targets that were healthy then. */
+    const live = (domains: AppStackDomainRow[], from: AppStackDomainRow[] | null, include = new Set(["app"])) => {
+      const appliedRoutesHash = from === null ? null : hashOf(from, include);
+      const appliedAddressesHash = from === null ? null : appStackAddressesHash(from, appliedRoutesHash);
+      return appStackDetailDto(
         deployed([component("app", "healthy", FRESH)], {
-          stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION, appliedRoutesHash }),
+          stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION, appliedRoutesHash, appliedAddressesHash }),
           appliedPlan: PLAN,
           domains,
         }),
-      );
-    const published = hashOf([shop]);
-    expect(live([shop], published).routesPending).toBe(false);
-    // The target reads unhealthy now and the routes were withdrawn: nothing the customer saved is missing.
-    expect(live([shop], null).routesPending).toBe(false);
+      ).routesPending;
+    };
+    expect(live([shop], [shop])).toBe(false);
+    // Published while the target read unhealthy, so the file holds no route: nothing the customer saved is missing.
+    expect(live([shop], [shop], new Set())).toBe(false);
     const protectedShop = { ...shop, accessUsername: "guest", accessPasswordHash: "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/" };
-    expect(live([protectedShop], published).routesPending).toBe(true);
-    expect(live([protectedShop], hashOf([protectedShop])).routesPending).toBe(false);
-    expect(live([shop, domain("sdom_2", "new.example.test", "pending")], published).routesPending).toBe(true);
-    expect(live([], published).routesPending).toBe(true);
-    // Nothing applied, nothing published: a draft or a stack never installed holds nothing back.
+    expect(live([protectedShop], [shop])).toBe(true);
+    expect(live([protectedShop], [protectedShop])).toBe(false);
+    // Saved after that publication: pending even though the target is not healthy, so a refresh would not show it yet.
+    expect(live([protectedShop], [shop], new Set())).toBe(true);
+    expect(live([shop, domain("sdom_2", "new.example.test", "pending")], [shop])).toBe(true);
+    expect(live([], [shop])).toBe(true);
+    // The first address of a stack published with none.
+    expect(live([shop], [])).toBe(true);
+    // Stopped or never installed: nothing published holds nothing back.
+    expect(live([protectedShop], null)).toBe(false);
     expect(appStackDetailDto(detailInput({ domains: [protectedShop] })).routesPending).toBe(false);
+  });
+
+  it("a routes hash without its fingerprint, or written after it by a release that does not know it, reads pending", () => {
+    const shop = domain("sdom_1", "shop.example.test", "active");
+    const { entries } = appStackRoutePlan({ plan: PLAN, domains: [shop], include: new Set(["app"]), now: NOW, acmeEnabled: false });
+    const published = appStackRoutesHash(entries);
+    const pending = (appliedRoutesHash: string | null, appliedAddressesHash: string | null) =>
+      appStackDetailDto(
+        deployed([component("app", "healthy", FRESH)], {
+          stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION, appliedRoutesHash, appliedAddressesHash }),
+          appliedPlan: PLAN,
+          domains: [shop],
+        }),
+      ).routesPending;
+    expect(pending(published, appStackAddressesHash([shop], published))).toBe(false);
+    expect(pending(published, null)).toBe(true);
+    expect(pending("0".repeat(64), appStackAddressesHash([shop], published))).toBe(true);
+    expect(pending(null, appStackAddressesHash([shop], published))).toBe(true);
   });
 
   it("offers as path targets the entry points of both the revision that runs and the desired one, as the API accepts them", () => {

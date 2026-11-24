@@ -6,8 +6,8 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appStackDomains, resolveMigrationsDirectory } from "../src/index.js";
 
-// Routing options of an application address (ADR-0037): migration 0026 only adds to app_stack_domains (five columns,
-// one unique, one foreign key on the table itself, five CHECKs). A redirect stays inside its application, a verifier
+// Routing options of an application address (ADR-0037): migration 0026 adds to app_stack_domains (five columns,
+// one unique, one foreign key on the table itself, five CHECKs) and one nullable column to app_stacks. A redirect stays inside its application, a verifier
 // has the one accepted shape, and an address that redirects carries neither protection nor path rules.
 const dir = resolveMigrationsDirectory();
 const M0026 = "0026_app_routing_options.sql";
@@ -95,7 +95,7 @@ describe("0026 app_routing_options migration", () => {
   const qualified = (c: Named) => `${c.tbl}.${c.name}`;
 
   describe("1. schema diff against the 0025 schema", () => {
-    it("adds five columns to app_stack_domains and nothing to any other table", () => {
+    it("adds five columns to app_stack_domains, the fingerprint of the published addresses to app_stacks, and nothing else", () => {
       expect(colsBefore.some((c) => c.table_name === "app_stack_domains")).toBe(true);
       const oldKeys = new Set(colsBefore.map(key));
       expect(colsAfter.filter((c) => !oldKeys.has(key(c))).map((c) => [key(c), c.data_type, c.is_nullable, c.column_default])).toEqual([
@@ -104,6 +104,7 @@ describe("0026 app_routing_options migration", () => {
         ["app_stack_domains.compression", "boolean", "NO", "false"],
         ["app_stack_domains.path_routes", "jsonb", "NO", "'[]'::jsonb"],
         ["app_stack_domains.redirect_to_domain_id", "text", "YES", null],
+        ["app_stacks.applied_addresses_hash", "text", "YES", null],
       ]);
     });
 

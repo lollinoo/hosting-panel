@@ -139,10 +139,9 @@ export function appStackDetailDto(input: {
     // A path must point at an entry point of the plan that runs too (the API refuses any other).
     pathTargets: ingress.filter((i) => input.appliedPlan?.ingress.some((a) => a.componentKey === i.componentKey && a.port === i.port) ?? true),
     routesPending: appStackRoutesPending({
-      plan: input.appliedPlan,
       domains: input.domains,
-      now,
       appliedRoutesHash: stack.appliedRoutesHash,
+      appliedAddressesHash: stack.appliedAddressesHash,
     }),
     cpuMilli: totals.cpuMilli,
     memoryBytes: totals.memoryBytes,

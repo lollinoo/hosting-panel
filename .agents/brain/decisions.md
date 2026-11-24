@@ -348,7 +348,7 @@ Source: the owner's directive of 2026-11-22 (take the routing features of a self
 - **R5 Path rules.** Up to four per address: `{ pathPrefix, componentKey, port, stripPrefix }`, target among the plan's ingress pairs; they inherit certificate, HTTPS redirect, protection and compression from the address.
 - **R6 Byte identity.** New wire fields are omitted when unset: the route request, the `# @hp-app-route` line, the route file and the routes hash of an address without options do not change. Site schemas, site code, `site_*.yml` and `hp-panel.yml` are untouched.
 - **R7 The executor re-checks** every value against strict patterns, the redirect target and every path target, and refuses the whole publication on one bad value.
-- **R8 Data.** Additive migration `0026_app_routing_options.sql` on `app_stack_domains`.
+- **R8 Data.** Additive migration `0026_app_routing_options.sql` on `app_stack_domains`, plus `app_stacks.applied_addresses_hash`: the fingerprint of the addresses and options the last successful publication was made from, which makes `routesPending` exact (third review round).
 - **R9 Downgrade gate** `app-routing-options`: in use when an address redirects, is protected or has a path rule (not for compression alone).
 - **R10 Web.** «Opzioni» on each address row, in the customer's words; path rules under an advanced section.
 - **R11 Out of scope.** Public TCP/UDP ports, other proxies, IP allowlists, custom headers, uploaded or wildcard certificates for applications, the same options for WordPress sites.

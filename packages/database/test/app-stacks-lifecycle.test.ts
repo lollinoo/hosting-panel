@@ -505,6 +505,20 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect(components.map((c) => c.appliedRevisionId)).toEqual([revision!.id, revision!.id]);
   });
 
+  it("writes the fingerprint of the published addresses with the routes hash only; a routes hash written alone clears it (ADR-0037)", async () => {
+    const { stack, deployment } = await create();
+    const scope = { organizationId: orgA, stackId: stack.id, deploymentId: deployment!.id, problem: null, stackStatus: null };
+    const stored = async () => (await getAppStack(db(), { organizationId: orgA, stackId: stack.id }))!;
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running", appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    // A write that names neither leaves both.
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running" });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    // A stop or a recovery writes the routes hash alone: what the addresses were is not known any more.
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "succeeded", appliedRoutesHash: null });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: null, appliedAddressesHash: null });
+  });
+
   it("finalises a delete: quota released, domains and components gone, volumes retained, secrets kept, name reusable", async () => {
     await organization("org_sl_final", true);
     const created = await create("org_sl_final", { name: "Final" });

@@ -27,6 +27,7 @@ import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.se
 import {
   APP_STACK_OBSERVE_BATCH,
   APP_STACK_ROUTE_REFRESH_INTERVAL_MS,
+  appStackAddressesHash,
   appStackDisplayStatus,
   appStackRoutePlan,
   appStackRoutesHash,
@@ -847,6 +848,29 @@ describe("AppStackObserverService (PGlite)", () => {
       await fail(4);
       await obs.reconcileOnce(at(5));
       expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("after a restart of the API, an option saved since the last publication does not wait the 10 minutes of a failed action", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "restart.example.com" }] });
+      const rows = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+      const appliedRoutesHash = await routesOf(stack.id, ["restart.example.com"]);
+      const appliedAddressesHash = appStackAddressesHash(rows, appliedRoutesHash);
+      await db().update(appStacks).set({ appliedRoutesHash, appliedAddressesHash }).where(eq(appStacks.id, stack.id));
+      await insertOperation(stack.id, "failed", at(-5));
+
+      // A restarted API remembers no queued refresh: the stored fingerprint says what was published.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      await observer().reconcileOnce(NOW);
+      expect(await deploys(stack.id)).toHaveLength(1);
+
+      // A failed refresh of what is published already (only health moved) still waits.
+      const other = await seedStack({ status: "running", domains: [{ hostname: "restart-same.example.com" }] });
+      const same = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, other.id));
+      await db().update(appStacks).set({ appliedRoutesHash: null, appliedAddressesHash: appStackAddressesHash(same, null) }).where(eq(appStacks.id, other.id));
+      await insertOperation(other.id, "failed", at(-5));
+      await observer().reconcileOnce(NOW);
+      expect(await deploys(other.id)).toEqual([]);
       expect(mutatingCalls()).toEqual([]);
     });
   });

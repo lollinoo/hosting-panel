@@ -1020,4 +1020,109 @@ describe("B3: application web addresses touch only the application's own route f
       expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
     });
   });
+
+  // ADR-0037: "pending" is exact. Two entry points, web:8080 and cache:11211; the addresses are on web unless said.
+  describe("a change the published route file does not hold is queued in the request and reads pending, whatever entry point it names", () => {
+    const TWO_DOORS = `${APP_BUILT_IN_TEMPLATES[0]!.source}  - service: cache\n    port: 11211\n    protocol: http\n`;
+    const CACHE = { componentKey: "cache", port: 11211 };
+    const pathTo = (pathPrefix: string) => ({ pathPrefix, ...CACHE, stripPrefix: false });
+    const rule = (hostname: string, pathPrefix: string) => `Host(\`${hostname}\`) && (Path(\`${pathPrefix}\`) || PathPrefix(\`${pathPrefix}/\`))`;
+    let versionId: string;
+
+    const appPath = (appId: string, verb = "") => `/v1/organizations/${orgId}/app-stacks/${appId}${verb === "" ? "" : `/${verb}`}`;
+    const refreshesOf = async (appId: string) =>
+      (await dbClient.db.select().from(operations).where(eq(operations.resourceId, appId))).filter(
+        (o) => o.kind === "stack.deploy" && (o.idempotencyKey ?? "").startsWith("sys_routes_") && o.requestedByUserId === null,
+      ).length;
+    const pending = async (appId: string) => {
+      const res = await owner("GET", appPath(appId));
+      expect(res.status, res.raw).toBe(200);
+      return (res.body.data as Json).routesPending as boolean;
+    };
+    const setPaths = (appId: string, domainId: string, pathRoutes: readonly unknown[]) =>
+      owner("PATCH", `${base(appId)}/${domainId}`, { redirectToDomainId: null, compression: false, protection: null, pathRoutes });
+    const fileOf = async (appId: string) => (await files()).get(`app_${appId}.yml`) ?? "";
+    /** While the executor cannot be reached the reconcile after a request queues nothing: only the request itself can. */
+    async function unreachable<T>(act: () => Promise<T>): Promise<T> {
+      certificateReadFails = true;
+      try {
+        return await act();
+      } finally {
+        certificateReadFails = false;
+      }
+    }
+
+    beforeAll(async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `two-${randomUUID().slice(0, 8)}`, source: TWO_DOORS }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      versionId = tpl.body.data.defaultVersionId as string;
+    });
+
+    /** A running application of organisation A with both entry points healthy and no address. */
+    async function running(): Promise<string> {
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: versionId, name: `two-${randomUUID().slice(0, 8)}`, deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      const appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow(appId)).status).toBe("running");
+      return appId;
+    }
+    const appRow = async (appId: string) => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+
+    /** `hostname` on web, published; DNS elsewhere, so no certificate moves the file. */
+    async function published(hostname: string, minutes: number): Promise<{ appId: string; domainId: string }> {
+      const appId = await running();
+      lookup.set(hostname, []);
+      const added = await addHost(hostname, appId);
+      expect(added.status, added.raw).toBe(201);
+      await pass(minutes);
+      expect(await fileOf(appId)).toContain(hostname);
+      expect(await pending(appId)).toBe(false);
+      return { appId, domainId: (added.body.data as Json[]).find((d) => d.hostname === hostname)!.id as string };
+    }
+
+    it("a path to the entry point that has no address of its own is queued in the request and reads pending until the file holds it", async () => {
+      const name = "pending-a.example.test";
+      const { appId, domainId } = await published(name, 710);
+      const before = await refreshesOf(appId);
+      await unreachable(async () => {
+        const res = await setPaths(appId, domainId, [pathTo("/admin")]);
+        expect(res.status, res.raw).toBe(200);
+        expect(res.body.applies).toBe("shortly");
+        expect(await refreshesOf(appId)).toBe(before + 1);
+        expect(await pending(appId)).toBe(true);
+        // No action of the customer can start before that refresh, so none can fail in front of it.
+        expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(409);
+      });
+      await drain();
+      expect(await fileOf(appId)).toContain(rule(name, "/admin"));
+      expect(await pending(appId)).toBe(false);
+    });
+
+    it("a second path while the first is published, then a path removed: each is queued in the request and reads pending", async () => {
+      const name = "pending-b.example.test";
+      const { appId, domainId } = await published(name, 712);
+      expect((await setPaths(appId, domainId, [pathTo("/admin")])).status).toBe(200);
+      await drain();
+      expect(await fileOf(appId)).toContain(rule(name, "/admin"));
+      expect(await pending(appId)).toBe(false);
+
+      for (const [pathRoutes, present, absent] of [
+        [[pathTo("/admin"), pathTo("/stats")], ["/admin", "/stats"], []],
+        [[pathTo("/stats")], ["/stats"], ["/admin"]],
+      ] as const) {
+        const before = await refreshesOf(appId);
+        await unreachable(async () => {
+          expect((await setPaths(appId, domainId, pathRoutes)).status).toBe(200);
+          expect(await refreshesOf(appId)).toBe(before + 1);
+          expect(await pending(appId)).toBe(true);
+        });
+        await drain();
+        for (const p of present) expect(await fileOf(appId)).toContain(rule(name, p));
+        for (const p of absent) expect(await fileOf(appId)).not.toContain(rule(name, p));
+        expect(await pending(appId)).toBe(false);
+      }
+    });
+  });
 });

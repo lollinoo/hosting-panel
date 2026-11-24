@@ -323,19 +323,41 @@ export function appStackRoutesHealthOnly(input: {
 }
 
 /**
- * ADR-0037: the saved addresses and options are not what the route file last published successfully holds, whatever
- * the health of the targets and whether ACME is on (neither is stored). Nothing published (no applied plan, no hash)
- * holds nothing back.
+ * ADR-0037: the fingerprint of the saved addresses and options a route publication is made from, bound to the routes
+ * hash it was published as (a writer of that hash that does not know the fingerprint leaves one that no longer
+ * matches). Neither the health of the targets nor a certificate is in it: only what the customer saves.
+ */
+export function appStackAddressesHash(domains: readonly AppStackDomainRow[], appliedRoutesHash: string | null): string {
+  const rows = [...domains]
+    .sort((a, b) => (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0))
+    .map((row) => [
+      row.hostname,
+      row.componentKey,
+      row.internalPort,
+      row.redirectToDomainId,
+      row.compression,
+      row.accessUsername,
+      row.accessPasswordHash,
+      [...row.pathRoutes]
+        .sort((a, b) => (a.pathPrefix < b.pathPrefix ? -1 : 1))
+        .map((path) => [path.pathPrefix, path.componentKey, path.port, path.stripPrefix]),
+    ]);
+  return createHash("sha256").update(JSON.stringify([appliedRoutesHash, rows])).digest("hex");
+}
+
+/**
+ * ADR-0037: the saved addresses and options differ from those the last successful route publication was made from,
+ * whatever the health of the targets then and now. Exact: it compares what was saved, not what a subset of healthy
+ * targets would publish. Nothing published (no routes hash, no fingerprint: never installed, stopped) holds nothing
+ * back; a fingerprint that is not known while routes are published counts as pending.
  */
 export function appStackRoutesPending(input: {
-  readonly plan: Pick<ApprovedStackPlan, "ingress"> | null;
   readonly domains: readonly AppStackDomainRow[];
-  readonly now: Date;
   readonly appliedRoutesHash: string | null;
+  readonly appliedAddressesHash: string | null;
 }): boolean {
-  const { plan } = input;
-  if (plan === null) return input.appliedRoutesHash !== null;
-  return ![false, true].some((acmeEnabled) => appStackRoutesHealthOnly({ ...input, plan, acmeEnabled }));
+  if (input.appliedRoutesHash === null && input.appliedAddressesHash === null) return false;
+  return input.appliedAddressesHash !== appStackAddressesHash(input.domains, input.appliedRoutesHash);
 }
 
 /** The observer's route refresh: a system stack.deploy under the routes key prefix (a customer request carries a user id). */

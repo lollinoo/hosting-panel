@@ -146,6 +146,7 @@ function insert(table: string, over: Record<string, string> = {}): string {
 // What a later migration adds to these tables; its own test checks it (0026: app-routing-options-database.test.ts).
 const LATER_COLUMNS: Record<string, string[]> = {
   app_stack_domains: ["access_password_hash", "access_username", "compression", "path_routes", "redirect_to_domain_id"],
+  app_stacks: ["applied_addresses_hash"],
 };
 const LATER_CONSTRAINTS = ["app_stack_domains.uq_app_stack_domains_stack_id", "app_stack_domains.fk_app_stack_domains_redirect"];
 

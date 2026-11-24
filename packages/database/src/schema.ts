@@ -401,6 +401,8 @@ export const appStacks = pgTable(
     appliedRevisionId: text("applied_revision_id"),
     resourceQuotaId: text("resource_quota_id").references(() => resourceQuotas.id, { onDelete: "set null" }),
     appliedRoutesHash: text("applied_routes_hash"),
+    // 0026 (ADR-0037): the addresses and options the routes of applied_routes_hash were published from; NULL = not known.
+    appliedAddressesHash: text("applied_addresses_hash"),
     idempotencyKey: text("idempotency_key"),
     requestHash: text("request_hash"),
     createdBy: text("created_by"),

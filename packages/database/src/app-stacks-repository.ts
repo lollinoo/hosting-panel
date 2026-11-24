@@ -613,6 +613,8 @@ export async function updateAppStackDeploymentTransactional(
     readonly stackStatus: AppStackStatus | null;
     readonly appliedRevisionId?: string;
     readonly appliedRoutesHash?: string | null;
+    /** Written with appliedRoutesHash only; a routes hash written without it clears it (not known). */
+    readonly appliedAddressesHash?: string;
   },
 ): Promise<AppStackRow> {
   const stack = await lockStack(db, input, false);
@@ -660,7 +662,9 @@ export async function updateAppStackDeploymentTransactional(
       ...(input.stackStatus !== null ? { status: input.stackStatus } : {}),
       ...(deleted ? { deletedAt: now } : {}),
       ...(input.appliedRevisionId !== undefined ? { appliedRevisionId: input.appliedRevisionId } : {}),
-      ...(input.appliedRoutesHash !== undefined ? { appliedRoutesHash: input.appliedRoutesHash } : {}),
+      ...(input.appliedRoutesHash !== undefined
+        ? { appliedRoutesHash: input.appliedRoutesHash, appliedAddressesHash: input.appliedAddressesHash ?? null }
+        : {}),
     })
     .where(eq(appStacks.id, stack.id))
     .returning();

@@ -323,7 +323,8 @@ administrator's console has no such action, and nobody writes proxy configuratio
    when a newer version was asked for and not installed (an upgrade that failed before it changed anything): the
    proxy reads the file again by itself and no container is restarted. An option change waits neither the five
    minutes of a health-only change nor the ten minutes after a failed action; after a failed refresh the periodic
-   check waits those ten minutes only for the addresses that refresh was queued with. A change either reaches every route
+   check waits those ten minutes only for the addresses that refresh was queued with (after a restart of the API, which
+   remembers no queued refresh, only when the saved addresses are those the last successful publication was made from). A change either reaches every route
    file of the stack that may be in place or is refused, so the panel never shows an option the live file lacks:
    - running or partly running, with no action in progress and the last action not a stop, or with only the panel's
      own route refresh queued or running (it reads the addresses when it runs; the check after it catches a change it
@@ -344,6 +345,13 @@ administrator's console has no such action, and nobody writes proxy configuratio
    what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
    next to every address that shows an option, never the option as active. The next successful start, restart or
    refresh publishes what is saved.
+   `routesPending` is exact: every successful publication stores, with the routes hash, a fingerprint of the addresses
+   and options it was made from (`app_stacks.applied_addresses_hash`), whatever the health of the targets, and the
+   field is true exactly while the saved ones differ from it. The same comparison decides whether a change queues the
+   refresh in its own request, so a path to a part that has no address of its own, a new address, or the first
+   address of an application queues it like any other change. A stop, a recovery or an older release that writes the
+   routes hash alone leaves the fingerprint unknown, which reads as pending while routes are published; with nothing
+   published (stopped, never installed) nothing is pending.
 2. **See the options of a stack** (read-only; the query leaves the verifier column out on purpose):
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, hostname, redirect_to_domain_id, compression, access_username, path_routes from app_stack_domains where stack_id = '<stackId>' order by hostname"

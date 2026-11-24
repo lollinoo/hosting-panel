@@ -13896,8 +13896,9 @@ components:
             routesPending:
               type: boolean
               description: >-
-                ADR-0037: the saved web addresses and their routing options are not what the route file last published
-                holds, whatever the health of the targets. While true the page shows no option of an address as active.
+                ADR-0037: the saved web addresses and their routing options differ from those the last successful route
+                publication was made from, whatever the health of the targets then or now. While true the page shows no
+                option of an address as active.
             cpuMilli:
               type: integer
               minimum: 0

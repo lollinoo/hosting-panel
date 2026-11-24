@@ -58,6 +58,7 @@ import {
   APP_STACK_ROUTE_REFRESH_BACKOFF_MS,
   APP_STACK_ROUTE_REFRESH_INTERVAL_MS,
   APP_STACK_ROUTES_KEY_PREFIX,
+  appStackAddressesHash,
   appStackHealthRows,
   appStackRoutePlan,
   appStackRoutesFollowAddresses,
@@ -80,6 +81,7 @@ interface StackRef {
 interface ManagedStack extends StackRef {
   readonly status: AppStackStatus;
   readonly appliedRoutesHash: string | null;
+  readonly appliedAddressesHash: string | null;
   readonly ipv4: string;
   readonly hasDomains: boolean;
   /** An operation runs: only failed orders are classified, nothing else moves. */
@@ -99,7 +101,7 @@ export class AppStackObserverService {
   #timer: NodeJS.Timeout | null = null;
   #serial: Promise<unknown> = Promise.resolve();
   readonly #certSeenAt = new Map<string, number>();
-  /** Stack id → when its last route refresh was queued, and the routes of its addresses with every target in then. */
+  /** Stack id → when its last route refresh was queued, and the fingerprint of its saved addresses and options then. */
   readonly #routesQueuedAt = new Map<string, { readonly at: number; readonly addresses: string }>();
 
   public constructor(
@@ -156,18 +158,15 @@ export class AppStackObserverService {
    */
   public async queueRoutesRefresh(
     tx: HostingPanelDatabase,
-    stack: Pick<AppStackRow, "id" | "organizationId" | "appliedRevisionId" | "appliedRoutesHash">,
+    stack: Pick<AppStackRow, "id" | "organizationId" | "appliedRevisionId" | "appliedRoutesHash" | "appliedAddressesHash">,
     now: Date,
   ): Promise<boolean> {
     if (this.config.runtimeBackend === "disabled" || stack.appliedRevisionId === null) return false;
     const ref = { organizationId: stack.organizationId, stackId: stack.id };
-    const revision = await getAppStackRevision(tx, { ...ref, revisionId: stack.appliedRevisionId });
-    const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
-    if (!parsed.success) return false;
     const domains = await listAppStackDomains(tx, ref);
-    if (!appStackRoutesPending({ plan: parsed.data, domains, now, appliedRoutesHash: stack.appliedRoutesHash })) return false;
+    if (!appStackRoutesPending({ ...stack, domains })) return false;
     await this.#enqueueRefresh(tx, { ...ref, appliedRevisionId: stack.appliedRevisionId });
-    this.#routesQueuedAt.set(stack.id, { at: now.getTime(), addresses: addressesKey(parsed.data, domains, now) });
+    this.#routesQueuedAt.set(stack.id, { at: now.getTime(), addresses: appStackAddressesHash(domains, null) });
     return true;
   }
 
@@ -193,6 +192,7 @@ export class AppStackObserverService {
         status: appStacks.status,
         appliedRevisionId: appStacks.appliedRevisionId,
         appliedRoutesHash: appStacks.appliedRoutesHash,
+        appliedAddressesHash: appStacks.appliedAddressesHash,
         ipv4: hosts.ipv4Address,
         hasDomains: hasDomainRows,
       })
@@ -457,14 +457,17 @@ export class AppStackObserverService {
     const plan = await this.#appliedPlan(stack);
     if (plan === null) return false;
     const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
-    // The routes with every target in move only with the addresses and their options, never with health.
-    const addresses = addressesKey(plan, routes.domains, now);
+    // The saved addresses and options: they move only when the customer changes them, never with health.
+    const addresses = appStackAddressesHash(routes.domains, null);
     const queued = this.#routesQueuedAt.get(stack.stackId);
-    // A change of the options is the customer's own request, made once, and addresses changed since the last refresh
-    // was queued are not a retry of it: neither waits out the pause after a failed action.
+    // Changed since the last refresh was queued or, when none was queued since the API started, since the last
+    // successful publication (the stored fingerprint).
+    const changed = queued !== undefined ? queued.addresses !== addresses : appStackRoutesPending({ ...stack, domains: routes.domains });
+    // A change of the options is the customer's own request, made once, and changed addresses are not a retry of the
+    // refresh that failed: neither waits out the pause after a failed action.
     if (
       !optionsChanged &&
-      (queued === undefined || queued.addresses === addresses) &&
+      !changed &&
       last?.status === "failed" &&
       last.completedAt &&
       now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS
@@ -547,13 +550,4 @@ export class AppStackObserverService {
       },
     });
   }
-}
-
-/**
- * The routes of the addresses with every target in, as the key the observer remembers with a queued refresh. ACME is
- * taken as on: it is not stored, and a request that queues a refresh in its own transaction cannot ask the executor.
- */
-function addressesKey(plan: Pick<ApprovedStackPlan, "ingress">, domains: readonly AppStackDomainRow[], now: Date): string {
-  const include = new Set(plan.ingress.map((r) => r.componentKey));
-  return appStackRoutesHash(appStackRoutePlan({ plan, domains, now, acmeEnabled: true, include }).entries);
 }

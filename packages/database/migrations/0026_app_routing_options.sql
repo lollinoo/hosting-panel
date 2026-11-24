@@ -43,3 +43,9 @@ ALTER TABLE app_stack_domains ADD CONSTRAINT ck_app_stack_domains_path_routes
 ALTER TABLE app_stack_domains DROP CONSTRAINT IF EXISTS ck_app_stack_domains_redirect_alone;
 ALTER TABLE app_stack_domains ADD CONSTRAINT ck_app_stack_domains_redirect_alone
   CHECK (redirect_to_domain_id IS NULL OR (access_username IS NULL AND path_routes = '[]'::jsonb));
+
+-- A fingerprint of the addresses and options the last successful route publication of the application was made from,
+-- whatever the health of its targets, bound to the applied_routes_hash written with it: the saved ones differ from it
+-- while a change is not published yet. NULL = not known (published by the previous release) or nothing published; a
+-- release that does not know this column and writes applied_routes_hash leaves a value that no longer matches.
+ALTER TABLE app_stacks ADD COLUMN IF NOT EXISTS applied_addresses_hash TEXT;
