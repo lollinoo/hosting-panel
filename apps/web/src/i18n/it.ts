@@ -3222,7 +3222,7 @@ x-hp-ingress:
       required: "Campo obbligatorio.",
       secretHint: "Valore riservato: non verrà mai mostrato, nemmeno a te.",
       secretKept: "Già inserito: lascia vuoto per mantenerlo.",
-      valueReserved: "Il valore non può contenere «HP_TERMINAL_SESSION=» o «HP_TASK_RUN=»: il pannello usa quel testo per riconoscere i propri programmi.",
+      valueReserved: "Il valore contiene un testo che il pannello riserva per sé: una parola che comincia con «HP_» seguita da «=». Toglila e riprova.",
       secretSet: "Impostato",
       secretUnset: "Non impostato",
       noDomains: "Questa applicazione non pubblica indirizzi web.",
@@ -3669,6 +3669,7 @@ x-hp-ingress:
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
       stop_unfinished: "L'applicazione non si è arrestata del tutto: premi di nuovo Arresta, oppure Riavvia, poi riprova.",
+      task_running: "Un'attività dell'applicazione è in corso: riprova fra qualche minuto.",
       confirmation_mismatch: "Il nome scritto non corrisponde.",
       no_data: "Questa applicazione non ha dati da salvare.",
       no_destination:

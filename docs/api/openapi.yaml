@@ -6561,7 +6561,10 @@ paths:
         The component and port must be an entry point of the application (`VALIDATION_ERROR`,
         `details[0].reason: unknown_ingress`); at most 8 web addresses (`details[0].field: domains`,
         `details[0].reason: STACK_QUOTA_EXCEEDED`). A hostname already on this application adds nothing and writes no
-        audit row. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        audit row. On a running application the route refresh is queued in the same request (ADR-0037); while a run
+        of a task of the application executes (ADR-0042, at most its time limit) the address is saved all the same and
+        nothing is queued: the application's `routesPending` stays true until the panel's first pass after the run
+        publishes it. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
         capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6619,7 +6622,10 @@ paths:
         route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
         answer is 409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status
         (`stop_unfinished` after a stop that did not finish, whose status reads running or degraded), and nothing is
-        written. The audit row holds the user name and whether a password was sent, never the password. No
+        written. While a run of a task of the application executes (ADR-0042, at most its time limit) the refresh
+        cannot be queued: a change that must reach the published route file is refused with the same 409, retryable,
+        `details[0].field: status` and `details[0].reason: task_running`, and nothing is written; it goes through once
+        the run has ended. The audit row holds the user name and whether a password was sent, never the password. No
         Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -6663,7 +6669,7 @@ paths:
         "409":
           description: >-
             The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
-            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status, or `task_running` while a run of a task executes)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6679,7 +6685,10 @@ paths:
         progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
         stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
         status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
-        address is kept. No Idempotency-Key.
+        address is kept. While a run of a task of the application executes (ADR-0042, at most its time limit) the
+        refresh cannot be queued: a removal that has to withdraw a published route is refused with the same 409,
+        retryable, `details[0].reason: task_running`, and the address is kept until the run has ended. No
+        Idempotency-Key.
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -6716,7 +6725,7 @@ paths:
         "409":
           description: >-
             A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
-            `details[0].reason` is the status); the address is kept
+            `details[0].reason` is the status, or `task_running` while a run of a task executes); the address is kept
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"

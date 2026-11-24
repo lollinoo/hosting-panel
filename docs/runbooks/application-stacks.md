@@ -233,7 +233,7 @@ names only the key of a task, and the command is read from the template version 
    the whole server run one after another, so a run may wait for its turn: while it waits it does not hold the
    application (a stop, an update or a delete is accepted; its operation holds the lock `stack:<id>:task`). It takes
    the application's lock `stack:<id>` when it begins, and from then until it ends the application cannot be changed
-   (`409 RESOURCE_LOCKED`). A run that finds the application busy or stopped when its turn comes does not start
+   (`409 RESOURCE_LOCKED`); a new web address is still saved and published after the run (§10). A run that finds the application busy or stopped when its turn comes does not start
    (`not_started`, problem `busy` or `component_not_running`); a scheduled one gives its time back instead (step 4).
 3. **See the runs of an application** (the last 20 per task are kept; the exit code is here and not on the page):
    ```bash
@@ -484,6 +484,13 @@ administrator's console has no such action, and nobody writes proxy configuratio
    queued or running (it may have read the address already) or a first install runs, it is refused with the same
    `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
    reads «In attesa» until a published file holds it.
+
+   While a run of a task executes (§4a, at most its time limit) it holds the application's lock, so no refresh can
+   be queued: a new address is saved, nothing is queued, `routesPending` is true, and the observer's first pass after
+   the run publishes it. A change of the options or a removal that has to reach the live file is refused with
+   `409 RESOURCE_LOCKED`, retryable, reason `task_running` (the page says to try again in a few minutes), and nothing
+   is saved. The panel tells this case from the others by the kind (`stack.task`) of the operation that holds
+   `stack:<id>`.
 
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
    what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»

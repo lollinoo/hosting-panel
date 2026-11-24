@@ -329,7 +329,11 @@ describe("AppWizard markup", () => {
     expect(refused.sets).toEqual([[5, { "param:title": t.valueReserved, "param:admin_password": t.valueReserved }]]);
     expect(JSON.stringify(refused.sets)).not.toContain("term_");
     // The sentence names every mark, so it stays true when the list changes.
-    for (const m of [en, itMsgs]) for (const mark of APP_STACK_PROCESS_MARKS) expect(m.apps.wizard.valueReserved).toContain(`${mark}=`);
+    // A customer page names no internal word of the panel (m5b-web-qa): the sentence says what to look for, not the marks.
+    for (const m of [en, itMsgs]) {
+      expect(m.apps.wizard.valueReserved).toContain("«HP_»");
+      for (const mark of APP_STACK_PROCESS_MARKS) expect(m.apps.wizard.valueReserved).not.toContain(mark);
+    }
   });
 
   it("Next accepts text that only looks like a mark: PHP settings, other HP_ text", () => {

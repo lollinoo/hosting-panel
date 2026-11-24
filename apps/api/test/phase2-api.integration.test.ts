@@ -420,6 +420,9 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     expect(adminTemplatesRes.status).toBe(200);
     expect(adminTemplatesRes.body.data.map((t) => [t.id, t.builtIn, t.enabled]).sort()).toEqual([
       ["atpl_http_cache", true, false],
+      ["atpl_mariadb", true, false],
+      ["atpl_postgresql", true, false],
+      ["atpl_valkey", true, false],
       ["atpl_wordpress_mariadb", true, false],
       ["atpl_worker_storage", true, false],
     ]);

@@ -3194,7 +3194,7 @@ x-hp-ingress:
       required: "Required field.",
       secretHint: "Private value: it will never be shown, not even to you.",
       secretKept: "Already entered: leave empty to keep it.",
-      valueReserved: "The value cannot contain «HP_TERMINAL_SESSION=» or «HP_TASK_RUN=»: the panel uses that text to recognise its own programs.",
+      valueReserved: "The value holds a text the panel keeps for itself: a word that starts with «HP_» followed by «=». Remove it and try again.",
       secretSet: "Set",
       secretUnset: "Not set",
       noDomains: "This application publishes no web address.",
@@ -3640,6 +3640,7 @@ x-hp-ingress:
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
       stop_unfinished: "The application did not stop completely: press Stop again, or Restart, then try again.",
+      task_running: "A task of the application is running: try again in a few minutes.",
       confirmation_mismatch: "The typed name does not match.",
       no_data: "This application has no data to save.",
       no_destination:
