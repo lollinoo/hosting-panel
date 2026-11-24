@@ -117,14 +117,24 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [createdStackId, setCreatedStackId] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string[]>([]);
   const secretValues = useRef(new Map<string, string>());
   const keys = useRef<Record<string, string>>({});
+  // Typed again after the application exists; an empty field keeps the value typed before.
+  const retyped = useRef(new Map<string, string>());
   useEffect(() => {
     const values = secretValues.current;
-    return () => values.clear();
+    const again = retyped.current;
+    return () => {
+      values.clear();
+      again.clear();
+    };
   }, []);
 
   const t = m.apps.wizard;
+  // Once the application exists what was sent is final: the earlier steps are closed and only the private values left are open.
+  const finishing = createdStackId !== null;
+  const view: WizardStep = finishing ? "install" : step;
   const params = entry.parameters.filter((p) => p.customer);
   const secretKeys = params.filter((p) => p.type === "secret").map((p) => p.key);
   const entries = buildAppParameterEntries(params, inputs);
@@ -137,6 +147,10 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     if (v) secretValues.current.set(key, v);
     else secretValues.current.delete(key);
     setTypedSecrets(secretKeys.filter((k) => (k === key ? v !== "" : typedSecrets.includes(k))));
+  };
+  const retypeSecret = (key: string, v: string) => {
+    if (v) retyped.current.set(key, v);
+    else retyped.current.delete(key);
   };
   const setRow = (i: number, row: DomainRow) => setDomains(domains.map((r, j) => (j === i ? row : r)));
 
@@ -194,16 +208,22 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     }
     const at = `${base}/${encodeURIComponent(id)}`;
     let remaining = typedSecrets;
+    let done = saved;
     for (const key of typedSecrets) {
-      const r = await post(keys.current, csrfToken, `secret:${key}`, `${at}/secrets`, { parameterKey: key, value: secretValues.current.get(key) });
+      const value = retyped.current.get(key) ?? secretValues.current.get(key);
+      const r = await post(keys.current, csrfToken, `secret:${key}`, `${at}/secrets`, { parameterKey: key, value });
       if (!r.ok) {
+        setFieldErrors({ [`param:${key}`]: appStackRefusalText(m, r.data?.error?.code ?? "", r.data?.error?.details?.[0]?.reason) });
         setError(t.secretFailed);
         setBusy(false);
         return;
       }
       secretValues.current.delete(key);
+      retyped.current.delete(key);
       remaining = remaining.filter((k) => k !== key);
+      done = [...done, key];
       setTypedSecrets(remaining);
+      setSaved(done);
     }
     const r = await post(keys.current, csrfToken, "deploy", `${at}/deploy`, {});
     if (!r.ok) {
@@ -212,6 +232,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       return;
     }
     secretValues.current.clear();
+    retyped.current.clear();
     router.push(detailHref(id));
   }
 
@@ -233,7 +254,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           autoComplete="new-password"
           spellCheck={false}
           maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
-          onChange={(e) => typeSecret(p.key, e.target.value)}
+          onChange={(e) => (finishing ? retypeSecret : typeSecret)(p.key, e.target.value)}
         />
       );
     } else {
@@ -276,20 +297,56 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   };
 
   const shownValue = (p: AppTemplateParameter) => {
-    if (p.type === "secret") return typedSecrets.includes(p.key) ? t.secretSet : t.secretUnset;
+    if (p.type === "secret") {
+      if (saved.includes(p.key)) return t.secretSaved;
+      if (!typedSecrets.includes(p.key)) return t.secretUnset;
+      return finishing ? t.secretPending : t.secretSet;
+    }
     const given = entries.find((e) => e.key === p.key);
     return given ? String(given.value) : format(t.defaultValue, { value: String(p.default) });
   };
 
+  const summary = (
+    <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
+      <dt className="font-medium">{t.name}</dt>
+      <dd>{name.trim()}</dd>
+      <dt className="font-medium">{m.apps.list.col.version}</dt>
+      <dd>{format(t.versionLine, { name: entry.name, n: entry.versionNumber })}</dd>
+      {params.map((p) => (
+        <Fragment key={p.key}>
+          <dt className="font-medium">{p.label}</dt>
+          <dd>{shownValue(p)}</dd>
+        </Fragment>
+      ))}
+      <dt className="font-medium">{m.apps.detail.section.domains}</dt>
+      <dd>
+        {domainEntries.length === 0 ? (
+          m.apps.list.noAddress
+        ) : (
+          <ul>
+            {domainEntries.map((d) => (
+              <li key={d.hostname}>
+                {d.hostname}
+                {entry.ingress.length > 1 ? ` · ${targetText(d)}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+      </dd>
+      <dt className="font-medium">{m.apps.detail.section.resources}</dt>
+      <dd>{format(m.apps.resources.total, { cpu: formatCpu(entry.cpuMilli), memory: formatMemory(entry.memoryBytes) })}</dd>
+    </dl>
+  );
+
   return (
     <div className="space-y-6">
-      <WizardSteps current={step} />
+      <WizardSteps current={view} />
       <h1 className="text-2xl font-bold tracking-tight">{entry.name}</h1>
       <section aria-labelledby="app-step-title" className="space-y-4">
         <h2 id="app-step-title" className="text-lg font-medium">
-          {t.step[step]}
+          {t.step[view]}
         </h2>
-        {step === "configure" && (
+        {view === "configure" && (
           <>
             <div className="space-y-2">
               <Label htmlFor="app-name">{t.name}</Label>
@@ -309,7 +366,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
             {params.map(parameterField)}
           </>
         )}
-        {step === "domains" &&
+        {view === "domains" &&
           (entry.ingress.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t.noDomains}</p>
           ) : (
@@ -366,39 +423,18 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
               )}
             </>
           ))}
-        {step === "review" && (
+        {view === "review" && (
           <>
-            <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
-              <dt className="font-medium">{t.name}</dt>
-              <dd>{name.trim()}</dd>
-              <dt className="font-medium">{m.apps.list.col.version}</dt>
-              <dd>{format(t.versionLine, { name: entry.name, n: entry.versionNumber })}</dd>
-              {params.map((p) => (
-                <Fragment key={p.key}>
-                  <dt className="font-medium">{p.label}</dt>
-                  <dd>{shownValue(p)}</dd>
-                </Fragment>
-              ))}
-              <dt className="font-medium">{m.apps.detail.section.domains}</dt>
-              <dd>
-                {domainEntries.length === 0 ? (
-                  m.apps.list.noAddress
-                ) : (
-                  <ul>
-                    {domainEntries.map((d) => (
-                      <li key={d.hostname}>
-                        {d.hostname}
-                        {entry.ingress.length > 1 ? ` · ${targetText(d)}` : ""}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </dd>
-              <dt className="font-medium">{m.apps.detail.section.resources}</dt>
-              <dd>{format(m.apps.resources.total, { cpu: formatCpu(entry.cpuMilli), memory: formatMemory(entry.memoryBytes) })}</dd>
-            </dl>
+            {summary}
             <p className="text-sm text-muted-foreground">{t.dataNote}</p>
             <p className="text-sm text-muted-foreground">{t.backupNote}</p>
+          </>
+        )}
+        {finishing && (
+          <>
+            <p className="text-sm">{t.created}</p>
+            {summary}
+            {params.filter((p) => typedSecrets.includes(p.key)).map(parameterField)}
           </>
         )}
       </section>
@@ -408,15 +444,14 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       {error && (
         <div role="alert" className="space-y-1 text-sm text-destructive">
           <p>{error}</p>
-          {createdStackId && (
-            <Link href={detailHref(createdStackId)} className="font-medium underline">
-              {t.openApp}
-            </Link>
-          )}
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {step === "configure" ? (
+        {finishing ? (
+          <Button asChild variant="outline">
+            <Link href={detailHref(createdStackId)}>{t.openApp}</Link>
+          </Button>
+        ) : view === "configure" ? (
           <Button asChild variant="outline">
             <Link href="/apps/new">{t.back}</Link>
           </Button>
@@ -425,7 +460,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
             {t.back}
           </Button>
         )}
-        {step === "review" ? (
+        {view === "review" ? (
           <Button
             type="button"
             disabled={busy}
@@ -436,7 +471,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           >
             {t.install}
           </Button>
-        ) : step === "install" ? (
+        ) : view === "install" ? (
           error && (
             <Button type="button" disabled={busy} onClick={install}>
               {t.retry}

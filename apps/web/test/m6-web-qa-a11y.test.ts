@@ -543,6 +543,13 @@ const SCENARIOS: Scenario[] = [
   { name: "wizard · review", render: (m) => wizard(m, { 0: "review", 1: "my-notes", 3: ["admin_password"], 4: [{ hostname: "Notes.Example.test", target: 1 }] }) },
   { name: "wizard · installing", render: (m) => wizard(m, { 0: "install", 1: "my-notes", 7: true }) },
   { name: "wizard · install failed after the stack exists", alerts: 1, render: (m) => wizard(m, { 0: "install", 1: "my-notes", 6: m.apps.wizard.secretFailed, 8: "stk_a1" }) },
+  {
+    name: "wizard · a private value left to save after the stack exists",
+    ids: ["app-param-admin_password"],
+    alerts: 1,
+    render: (m) =>
+      wizard(m, { 0: "install", 1: "my-notes", 3: ["admin_password"], 5: { "param:admin_password": m.errors.generic }, 6: m.apps.wizard.secretFailed, 8: "stk_a1", 9: ["api_token"] }),
+  },
   ...WIZARD_STEPS.map((step) => ({ name: `wizard steps · ${step}`, render: (m: Messages) => withState(WizardSteps, { current: step }, m) })),
   // ---- detail page parts
   { name: "actions", render: (m) => withState(AppStackActions, actionProps, m) },
@@ -876,12 +883,14 @@ describe("wizard", () => {
     expect(controls(wizard(m, {})).filter((c) => c.attrs["aria-invalid"])).toEqual([]);
   });
 
-  it.each(LOCALES)("%s · a created stack that failed to finish offers a link inside the alert", (_l, m) => {
+  it.each(LOCALES)("%s · a created stack that failed to finish says so in the alert and offers its page beside Retry, never Back", (_l, m) => {
     const h = wizard(m, { 0: "install", 6: m.apps.wizard.secretFailed, 8: "stk_a1" });
     const alert = [...h.matchAll(/<div\b[^>]*role="alert"[^>]*>([\s\S]*?)<\/div>/g)][0]![1]!;
     expect(alert).toContain(m.apps.wizard.secretFailed);
-    expect(alert).toContain('href="/apps/stk_a1"');
-    expect(strip(alert)).toContain(m.apps.wizard.openApp);
+    expect(h).toContain(m.apps.wizard.created);
+    expect(inner(h, "a")).toEqual([m.apps.wizard.openApp]);
+    expect(h).toContain('href="/apps/stk_a1"');
+    expect(inner(h, "button")).toEqual([m.apps.wizard.retry]);
   });
 });
 

@@ -4,7 +4,7 @@ import * as React from "react";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppTemplateParameter, CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import { APP_STACK_SECRET_ENV_LIMITS, type AppTemplateParameter, type CustomerAppTemplateDto } from "@hosting-panel/contracts";
 
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
 const fetchUpstream = vi.hoisted(() => vi.fn());
@@ -28,7 +28,7 @@ vi.mock("next/navigation", () => ({
 
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
-import type { Messages } from "@/i18n";
+import { format, type Messages } from "@/i18n";
 import { I18nProvider } from "@/i18n/provider";
 import AppWizardPage from "@/app/apps/new/[templateId]/page";
 import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
@@ -504,6 +504,124 @@ describe("AppWizard install", () => {
     const { tree, sets } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1" });
     await click(tree, t.retry);
     expect(sets).toContainEqual([6, en.apps.reasons.draftUnpublished]);
+  });
+});
+
+describe("AppWizard after the application is created", () => {
+  const ready = { 0: "review", 1: " team-notes ", 2: { port: "9000" }, 3: ["admin_password", "api_token"], 4: [{ hostname: "Notes.Example.test", target: 0 }] };
+  const AT = `${BASE}/stk_a1`;
+  /** What the customer can press or follow, in page order. */
+  const actions = (tree: ReactNode) => els(tree).filter((e) => typeof e.props.onClick === "function" || typeof e.props.href === "string").map(textOf);
+  const editable = (tree: ReactNode) => els(tree).filter((e) => typeof e.props.onChange === "function").map((e) => e.props.id);
+  const hrefOf = (tree: ReactNode, label: string) => els(tree).find((e) => typeof e.props.href === "string" && textOf(e) === label)?.props.href;
+
+  it("a private value lost to a server error: no way back to the earlier steps, the screen shows what was sent, Retry sends only what is left", async () => {
+    answer({ [BASE]: [accepted(201)], [`${AT}/secrets`]: [refusal(503, "UPSTREAM_UNAVAILABLE")] });
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const first = wizard(ready, { 0: values });
+    await click(first.tree, t.install);
+    expect(calls().map((c) => c.url)).toEqual([BASE, `${AT}/secrets`]);
+    expect(calls()[0]!.body.name).toBe("team-notes");
+    const lost = appStackRefusalText(en, "UPSTREAM_UNAVAILABLE");
+    expect(first.sets).toContainEqual([8, "stk_a1"]);
+    expect(first.sets).toContainEqual([6, t.secretFailed]);
+    expect(first.sets.filter(([k]) => k === 0)).toEqual([[0, "install"]]);
+
+    // An open earlier step would take a changed name into the summary and never send it: whatever step the state names, none opens.
+    const failed = { ...ready, 0: "install", 5: { "param:admin_password": lost }, 6: t.secretFailed, 8: "stk_a1" };
+    for (const step of ["install", "review", "domains", "configure"]) {
+      const { tree } = wizard({ ...failed, 0: step }, { 0: values });
+      expect(actions(tree), step).toEqual([t.openApp, t.retry]);
+      expect(hrefOf(tree, t.openApp), step).toBe("/apps/stk_a1");
+      expect(editable(tree), step).toEqual(["app-param-admin_password", "app-param-api_token"]);
+      const out = html(tree);
+      expect(out, step).toMatch(/aria-current="step"[^>]*>Install/);
+      expect(out, step).toContain(t.created);
+      expect(out, step).toMatch(/Application name<\/dt><dd[^>]*>team-notes</);
+      expect(out, step).toMatch(/Listen port<\/dt><dd[^>]*>9000</);
+      expect(out, step).toMatch(/<li>notes\.example\.test · web on port 8080<\/li>/);
+      expect(out, step).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${t.secretPending}<`));
+      expect(out, step).toMatch(/id="app-param-admin_password"[^>]*aria-invalid="true"/);
+      expect(out, step).toMatch(new RegExp(`id="app-param-admin_password-note"[^>]*>${lost}<`));
+      expect(out, step).toMatch(new RegExp(`id="app-param-api_token-note"[^>]*>${t.secretHint} ${t.secretKept}<`));
+      expect(out, step).not.toContain(PLANTED);
+    }
+    expect(first.sets).toContainEqual([5, { "param:admin_password": lost }]);
+
+    fetchMock.mockReset();
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    const retry = wizard(failed, { 0: values });
+    await click(retry.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([`${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "admin_password", value: PLANTED }, { parameterKey: "api_token", value: `${PLANTED}-2` }, {}]);
+    expect(retry.sets).toContainEqual([9, ["admin_password", "api_token"]]);
+    expect(values.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it("a private value refused as too long: its field states the limit, the saved one reads «Saved» and is not sent again, Retry sends the value typed again", async () => {
+    const tooLong = refusal(400, "VALIDATION_ERROR", [{ field: "value", reason: "value_too_long" }]);
+    answer({ [BASE]: [accepted(201)], [`${AT}/secrets`]: [secretSaved("admin_password"), tooLong] });
+    const values = secretsRef({ admin_password: PLANTED, api_token: "x".repeat(5000) });
+    const first = wizard(ready, { 0: values });
+    await click(first.tree, t.install);
+    const limit = format(en.apps.reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
+    expect(first.sets).toContainEqual([5, { "param:api_token": limit }]);
+    expect(first.sets).toContainEqual([6, t.secretFailed]);
+    expect(first.sets).toContainEqual([3, ["api_token"]]);
+    expect(first.sets).toContainEqual([9, ["admin_password"]]);
+    expect([...values.current.keys()]).toEqual(["api_token"]);
+
+    const failed = { ...ready, 0: "install", 3: ["api_token"], 6: t.secretFailed, 8: "stk_a1", 9: ["admin_password"] };
+    for (const m of [en, itMsgs]) {
+      const text = appStackRefusalText(m, "VALIDATION_ERROR", "value_too_long");
+      expect(text).toContain(String(APP_STACK_SECRET_ENV_LIMITS.secretBytes));
+      const { tree } = wizard({ ...failed, 5: { "param:api_token": text }, 6: m.apps.wizard.secretFailed }, { 0: values }, ENTRY, m);
+      expect(editable(tree)).toEqual(["app-param-api_token"]);
+      const out = html(tree, m);
+      expect(out).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${m.apps.wizard.secretSaved}<`));
+      expect(out).not.toContain(m.apps.wizard.required);
+      expect(out).toMatch(/id="app-param-api_token"[^>]*aria-invalid="true"/);
+      expect(out).toContain(`id="app-param-api_token-note" class="text-xs text-destructive">${text}<`);
+    }
+
+    const retyped = { current: new Map<string, string>() };
+    const again = wizard(failed, { 0: values, 2: retyped });
+    const input = els(again.tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "short" } });
+    expect(again.sets).toEqual([]);
+    expect(retyped.current.get("api_token")).toBe("short");
+    fetchMock.mockReset();
+    answer({ [`${AT}/secrets`]: [secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(again.tree, t.retry);
+    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "api_token", value: "short" }, {}]);
+    expect(values.current.size).toBe(0);
+    expect(retyped.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it("a field left empty keeps the value typed before; typing then clearing it goes back to that value", async () => {
+    const values = secretsRef({ api_token: "kept" });
+    const retyped = { current: new Map<string, string>() };
+    const { tree } = wizard({ ...ready, 0: "install", 3: ["api_token"], 6: t.secretFailed, 8: "stk_a1", 9: ["admin_password"] }, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    for (const value of ["k", "ke", "k", ""]) (input.props.onChange as (e: unknown) => void)({ target: { value } });
+    answer({ [`${AT}/secrets`]: [secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()[0]!.body).toEqual({ parameterKey: "api_token", value: "kept" });
+  });
+
+  it("a refused install after every value is saved: nothing is sent again but the install, the page says the application exists", async () => {
+    answer({ [`${AT}/deploy`]: [refusal(409, "RESOURCE_LOCKED")] });
+    const { tree, sets } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1", 9: ["admin_password", "api_token"] });
+    expect(editable(tree)).toEqual([]);
+    const out = html(tree);
+    expect(out).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${t.secretSaved}<`));
+    expect(out).toMatch(new RegExp(`API token</dt><dd[^>]*>${t.secretSaved}<`));
+    expect(out).toContain(t.created);
+    await click(tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([`${AT}/deploy`]);
+    expect(sets).toContainEqual([6, en.apps.codes.RESOURCE_LOCKED]);
   });
 });
 
