@@ -24,6 +24,7 @@ import type {
   AppStackComponentHealth,
   AppStackDeploymentStatus,
   AppStackDomainPathRoute,
+  AppStackLinkState,
   AppStackRestoreStatus,
   AppStackRetentionPolicy,
   AppStackStatus,
@@ -592,6 +593,27 @@ export const appStackDomains = pgTable(
   ],
 );
 
+/** A database's only component attached to the private network of another application of the same customer (ADR-0039). */
+export const appStackLinks = pgTable(
+  "app_stack_links",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    consumerStackId: text("consumer_stack_id").notNull(),
+    providerStackId: text("provider_stack_id").notNull(),
+    state: text("state").$type<AppStackLinkState>().notNull().default("pending"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_links_pair").on(t.consumerStackId, t.providerStackId),
+    stackOrg("fk_app_stack_links_consumer_org", { stackId: t.consumerStackId, organizationId: t.organizationId }),
+    stackOrg("fk_app_stack_links_provider_org", { stackId: t.providerStackId, organizationId: t.organizationId }),
+    index("idx_app_stack_links_provider").on(t.providerStackId),
+  ],
+);
+
 export const appStackDeployments = pgTable(
   "app_stack_deployments",
   {
@@ -604,6 +626,10 @@ export const appStackDeployments = pgTable(
     problem: text("problem"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    // 0032: the desired revision a request that wrote a new one replaced; null when it replaced none.
+    replacedRevisionId: text("replaced_revision_id"),
+    // 0032: the stack status the request replaced; null for the first deploy of a create and for the start after a backup.
+    replacedStatus: text("replaced_status").$type<AppStackStatus>(),
   },
   (t) => [
     unique("uq_app_stack_deployments_operation").on(t.operationId),
@@ -612,6 +638,11 @@ export const appStackDeployments = pgTable(
       columns: [t.revisionId, t.stackId],
       foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
       name: "fk_app_stack_deployments_revision",
+    }),
+    foreignKey({
+      columns: [t.replacedRevisionId, t.stackId],
+      foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
+      name: "fk_app_stack_deployments_replaced_revision",
     }),
     index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
   ],

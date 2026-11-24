@@ -56,6 +56,7 @@ import type {
   AppStackDeploymentDto,
   AppStackDomainDto,
   AppStackBackupsDto,
+  AppStackLinksDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -377,4 +378,10 @@ export async function fetchServerOrgAppStackDomains(orgId: string, stackId: stri
 export async function fetchServerOrgAppStackBackups(orgId: string, stackId: string): Promise<AppStackBackupsDto | null> {
   if (!segments(stackId)) return null;
   return orNull(await serverGet<AppStackBackupsDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/backups`));
+}
+
+/** The databases an application uses, or the applications that use a database. */
+export async function fetchServerOrgAppStackLinks(orgId: string, stackId: string): Promise<AppStackLinksDto | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackLinksDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/links`));
 }

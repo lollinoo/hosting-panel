@@ -1,7 +1,14 @@
-import { MAX_APP_STACK_DOMAINS, type AppTemplateIssue, type ErrorDetail } from "@hosting-panel/contracts";
+import {
+  MAX_APP_STACK_DOMAINS,
+  MAX_APP_STACK_LINKS_PER_APPLICATION,
+  MAX_APP_STACK_LINKS_PER_DATABASE,
+  type AppTemplateIssue,
+  type ErrorDetail,
+} from "@hosting-panel/contracts";
 import {
   AppStackBackupRepositoryError,
   AppStackDomainError,
+  AppStackLinkError,
   AppStackRepositoryError,
   AppStackSecretError,
   TlsCoverageError,
@@ -73,6 +80,34 @@ function mapRepositoryError(err: AppStackRepositoryError): ControlPlaneError {
     case "PATH_IN_USE": {
       const message = "A path of a web address still points at a part this version removes. Remove the path first.";
       return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "path_target_removed" });
+    }
+    case "DATABASE_IN_USE": {
+      const message = "Applications still use this database. Disconnect them first.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "links", message, reason: "database_in_use" });
+    }
+  }
+}
+
+function mapLinkError(err: AppStackLinkError): ControlPlaneError {
+  switch (err.code) {
+    case "NOT_FOUND":
+      return appNotFound();
+    case "STACK_BUSY": {
+      const status = err.status ?? "unknown";
+      const message = `This action is not possible while the application is ${status}.`;
+      return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: status }, false);
+    }
+    case "LINK_EXISTS": {
+      const message = "The application is already connected to this database.";
+      return appRefusal("ALREADY_EXISTS", message, { field: "databaseStackId", message, reason: "link_exists" });
+    }
+    case "LINK_LIMIT_APPLICATION": {
+      const message = `An application can be connected to at most ${String(MAX_APP_STACK_LINKS_PER_APPLICATION)} databases.`;
+      return appRefusal("VALIDATION_ERROR", message, { field: "links", message, reason: "STACK_QUOTA_EXCEEDED" });
+    }
+    case "LINK_LIMIT_DATABASE": {
+      const message = `A database can be connected to at most ${String(MAX_APP_STACK_LINKS_PER_DATABASE)} applications.`;
+      return appRefusal("VALIDATION_ERROR", message, { field: "links", message, reason: "STACK_QUOTA_EXCEEDED" });
     }
   }
 }
@@ -160,6 +195,7 @@ export function mapAppStackError(err: unknown): unknown {
   if (err instanceof AppStackRepositoryError) return mapRepositoryError(err);
   if (err instanceof AppStackBackupRepositoryError) return mapBackupError(err);
   if (err instanceof AppStackDomainError) return mapDomainError(err);
+  if (err instanceof AppStackLinkError) return mapLinkError(err);
   if (err instanceof AppStackSecretError) return mapSecretError(err);
   if (err instanceof TlsCoverageError) return coverageError(err);
   if (isHostnameClaimViolation(err)) return new ControlPlaneError("DOMAIN_CONFLICT", APP_DOMAIN_CONFLICT);

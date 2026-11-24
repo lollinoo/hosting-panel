@@ -857,7 +857,8 @@ describe("B3: application web addresses touch only the application's own route f
       const row = await appRow();
       expect(row.status).toBe("running");
       expect(row.appliedRevisionId).not.toBeNull();
-      expect(row.desiredRevisionId).not.toBe(row.appliedRevisionId);
+      // Issue #92: what the upgrade's request wrote is taken back, so revision 1 is again the one asked for.
+      expect(row.desiredRevisionId).toBe(row.appliedRevisionId);
     });
 
     it("a password set now is in the next route request of the revision that runs, and in the file", async () => {
@@ -882,7 +883,7 @@ describe("B3: application web addresses touch only the application's own route f
         protection: { username: "guest", passwordHash: verifier },
       });
       expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${verifier}"`);
-      // The refresh installed nothing and names the revision that runs; the newer one is still the one asked for.
+      // The refresh installed nothing and names the revision that runs.
       const refreshes = (
         await dbClient.db
           .select({ key: operations.idempotencyKey, revisionId: appStackDeployments.revisionId, status: appStackDeployments.status })

@@ -56,6 +56,7 @@ const stack = (id: string, name: string, over: Partial<AppStackSummaryDto> = {})
   templateId: "atpl_notes",
   templateName: "Notes",
   templateVersionNumber: 2,
+  installed: null,
   componentCount: 2,
   unhealthyCount: 0,
   primaryHostname: "notes.example.test",
@@ -101,6 +102,12 @@ describe("the list of both kinds", () => {
     expect(r[1]![3]).toBe("notes.example.test");
     expect(r[2]![3]).toBe(DASH);
     expect(r[0]![4]).toBe(`<time dateTime="${NOW}">${new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(NOW))}</time>`);
+  });
+
+  it("a stack whose last change was not installed shows the version that runs", () => {
+    const failed = stack("stk_f", "Notes board", { status: "failed", templateVersionNumber: 3, installed: { revisionNumber: 2, templateVersionNumber: 2 } });
+    expect(rows(list({ stacks: [failed] }))[0]![2]).toBe("Notes, version 2");
+    expect(rows(list({ stacks: [failed] }, itMsgs))[0]![2]).toBe("Notes, versione 2");
   });
 
   it("a site of no known kind shows a dash as its kind; ids are encoded in the site's link", () => {

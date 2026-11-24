@@ -25,7 +25,7 @@ describe("application stack statuses", () => {
       unknown: ["running", "degraded", "stopped", "failed", "starting", "stopping", "updating", "deleting"],
       stopping: ["stopped", "running", "degraded", "failed", "unknown", "deleting"],
       stopped: ["starting", "updating", "deleting"],
-      starting: ["running", "degraded", "failed", "unknown", "deleting"],
+      starting: ["running", "degraded", "failed", "unknown", "stopped", "deleting"],
       updating: ["running", "degraded", "failed", "unknown", "deleting"],
       deleting: ["deleted", "delete_failed"],
       delete_failed: ["deleting"],
@@ -51,6 +51,8 @@ describe("application stack statuses", () => {
       ["stopped", "stopping", false],
       ["stopping", "running", true],
       ["stopping", "failed", true],
+      ["starting", "stopped", true],
+      ["updating", "stopped", false],
       ["delete_failed", "deleting", true],
       ["deleting", "deleted", true],
     ];

@@ -109,6 +109,8 @@ export async function chargeAppStackQuota(
     readonly resourceQuotaId: string | null;
     readonly previous: AppStackQuotaTotals | null;
     readonly next: AppStackQuotaTotals | null;
+    /** Taking back a charge to what runs: never refused, even past a maximum lowered since. */
+    readonly restore?: boolean;
   },
 ): Promise<{ resourceQuotaId: string | null }> {
   const { organizationId, stackId, previous, next } = input;
@@ -132,13 +134,14 @@ export async function chargeAppStackQuota(
   const memoryBytes = BigInt(next?.memoryBytes ?? 0) - BigInt(previous?.memoryBytes ?? 0);
   const usedMemory = BigInt(quota.usedMemoryBytes);
   const maxMemory = BigInt(quota.maxMemoryBytes);
-  if (components > 0 && quota.usedServices + components > quota.maxServices) {
+  const enforced = input.restore !== true;
+  if (enforced && components > 0 && quota.usedServices + components > quota.maxServices) {
     throw new AppStackQuotaError("components", quota.usedServices, quota.maxServices);
   }
-  if (cpuMilli > 0 && quota.usedCpuMilli + cpuMilli > quota.maxCpuMilli) {
+  if (enforced && cpuMilli > 0 && quota.usedCpuMilli + cpuMilli > quota.maxCpuMilli) {
     throw new AppStackQuotaError("cpuMilli", quota.usedCpuMilli, quota.maxCpuMilli);
   }
-  if (memoryBytes > 0n && usedMemory + memoryBytes > maxMemory) {
+  if (enforced && memoryBytes > 0n && usedMemory + memoryBytes > maxMemory) {
     throw new AppStackQuotaError("memoryBytes", Number(usedMemory), Number(maxMemory));
   }
 

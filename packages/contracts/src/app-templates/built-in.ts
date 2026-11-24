@@ -250,5 +250,154 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
   ].join("\n"),
 });
 
-/** The two seeds of the first format (ADR-0035), then the WordPress one of the extended format (ADR-0036). */
-export const APP_BUILT_IN_TEMPLATES: readonly AppBuiltInTemplate[] = Object.freeze([httpCache, workerStorage, wordpressMariadb]);
+// ---- databases (ADR-0039): one component, one port, no address; reachable only by the applications linked to it ----
+
+const MARIADB_DESCRIPTION =
+  "Un database MariaDB con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Database e utente si chiamano app.";
+
+const POSTGRESQL_DESCRIPTION =
+  "Un database PostgreSQL con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Database e utente si chiamano app.";
+
+const VALKEY_DESCRIPTION =
+  "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Non ha password.";
+
+const DATABASE_LIMITS = ["    deploy:", "      resources:", "        limits:", '          cpus: "1.0"', "          memory: 512M"];
+const tcpHealth = (port: number) => ["    healthcheck:", "      kind: tcp", `      port: ${port}`, "      intervalSeconds: 10", "      timeoutSeconds: 3"];
+const databasePassword = ["  - key: database_password", '    label: "Password del database"', "    type: secret", "    required: true", "    customer: true"];
+
+const mariadb: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_mariadb",
+  versionId: "atv_mariadb_1",
+  slug: "mariadb",
+  name: "Database MariaDB",
+  category: "database",
+  description: MARIADB_DESCRIPTION,
+  descriptionEn:
+    "A MariaDB database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  source: [
+    "x-hp-stack:",
+    "  schemaVersion: 1",
+    '  name: "Database MariaDB"',
+    "  category: database",
+    `  description: "${MARIADB_DESCRIPTION}"`,
+    "x-hp-parameters:",
+    ...databasePassword,
+    "  - key: admin_password",
+    '    label: "Password di amministrazione"',
+    "    type: secret",
+    "    required: true",
+    "    customer: true",
+    "services:",
+    "  db:",
+    "    image: docker.io/library/mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
+    // Socket and pid file under /tmp: the root file system is read-only.
+    '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]',
+    "    environment:",
+    "      - name: MARIADB_DATABASE",
+    "        value: app",
+    "      - name: MARIADB_USER",
+    "        value: app",
+    // The administrator account logs in from inside the component only.
+    "      - name: MARIADB_ROOT_HOST",
+    "        value: localhost",
+    "      - name: MARIADB_PASSWORD_FILE",
+    "        secret: database_password",
+    "      - name: MARIADB_ROOT_PASSWORD_FILE",
+    "        secret: admin_password",
+    "    volumes:",
+    "      - data:/var/lib/mysql",
+    "    expose:",
+    "      - 3306",
+    ...tcpHealth(3306),
+    ...DATABASE_LIMITS,
+    "volumes:",
+    "  data: {}",
+    "",
+  ].join("\n"),
+});
+
+const postgresql: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_postgresql",
+  versionId: "atv_postgresql_1",
+  slug: "postgresql",
+  name: "Database PostgreSQL",
+  category: "database",
+  description: POSTGRESQL_DESCRIPTION,
+  descriptionEn:
+    "A PostgreSQL database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  source: [
+    "x-hp-stack:",
+    "  schemaVersion: 1",
+    '  name: "Database PostgreSQL"',
+    "  category: database",
+    `  description: "${POSTGRESQL_DESCRIPTION}"`,
+    "x-hp-parameters:",
+    ...databasePassword,
+    "services:",
+    "  db:",
+    "    image: docker.io/library/postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1",
+    '    command: ["postgres"]',
+    "    environment:",
+    "      - name: POSTGRES_DB",
+    "        value: app",
+    "      - name: POSTGRES_USER",
+    "        value: app",
+    "      - name: POSTGRES_PASSWORD_FILE",
+    "        secret: database_password",
+    "    volumes:",
+    "      - data:/var/lib/postgresql",
+    "    expose:",
+    "      - 5432",
+    ...tcpHealth(5432),
+    ...DATABASE_LIMITS,
+    "volumes:",
+    "  data: {}",
+    "",
+  ].join("\n"),
+});
+
+const valkey: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_valkey",
+  versionId: "atv_valkey_1",
+  slug: "valkey",
+  name: "Archivio Valkey",
+  category: "database",
+  description: VALKEY_DESCRIPTION,
+  descriptionEn:
+    "A Valkey key-value store, compatible with Redis, that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
+  source: [
+    "x-hp-stack:",
+    "  schemaVersion: 1",
+    '  name: "Archivio Valkey"',
+    "  category: database",
+    `  description: "${VALKEY_DESCRIPTION}"`,
+    "services:",
+    "  db:",
+    "    image: valkey/valkey:9.2.0-alpine3.24@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882",
+    '    command: ["valkey-server", "--appendonly", "yes", "--dir", "/data", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--protected-mode", "no"]',
+    "    volumes:",
+    "      - data:/data",
+    "    expose:",
+    "      - 6379",
+    ...tcpHealth(6379),
+    "    deploy:",
+    "      resources:",
+    "        limits:",
+    '          cpus: "0.5"',
+    "          memory: 384M",
+    "volumes:",
+    "  data: {}",
+    "",
+  ].join("\n"),
+});
+
+/** The two seeds of the first format (ADR-0035), the WordPress one of the extended format (ADR-0036), then the three
+ *  databases (ADR-0039). */
+export const APP_BUILT_IN_TEMPLATES: readonly AppBuiltInTemplate[] = Object.freeze([
+  httpCache,
+  workerStorage,
+  wordpressMariadb,
+  mariadb,
+  postgresql,
+  valkey,
+]);

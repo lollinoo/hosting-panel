@@ -5,10 +5,12 @@
 import { describe, expect, it } from "vitest";
 import {
   APP_BUILT_IN_TEMPLATES,
+  APP_DATABASE_TEMPLATE_CATEGORY,
   ApprovedStackPlanSchema,
   appStackComponentProfile,
   appStackComponentSecretEnvironment,
   appStackComponentSecretRefs,
+  appStackLinkTarget,
   appStackPlanImageProblems,
   appStackPlanSecretRefs,
   appTemplateHiddenSecretKeys,
@@ -28,11 +30,14 @@ const seed = (slug: string): AppBuiltInTemplate => {
   if (!found) throw new Error(`no built-in template ${slug}`);
   return found;
 };
-const compile = (t: AppBuiltInTemplate, parameters: readonly AppTemplateParameterEntry[] = []) =>
+/** The reserved values each database asks the customer for; every other seed asks for none. */
+const SECRET_KEYS: Readonly<Record<string, readonly string[]>> = { mariadb: ["admin_password", "database_password"], postgresql: ["database_password"] };
+const isDatabase = (t: AppBuiltInTemplate) => t.category === APP_DATABASE_TEMPLATE_CATEGORY;
+const compile = (t: AppBuiltInTemplate, parameters: readonly AppTemplateParameterEntry[] = [], withSecrets = true) =>
   compileAppStackPlan({
     source: t.source,
     parameters,
-    secretVersions: new Map(),
+    secretVersions: new Map(withSecrets ? (SECRET_KEYS[t.slug] ?? []).map((key) => [key, 1]) : []),
     ids: {
       stackId: "stk_0123456789abcdef0123456789abcdef",
       organizationId: "org_acme",
@@ -60,7 +65,7 @@ describe("the built-in application templates", () => {
     const refused = validateAppTemplateSource(t.source, { allowlist: [] });
     if (refused.ok) throw new Error("expected the empty allowlist to refuse");
     const imagePaths = [...t.source.matchAll(/^ {2}([a-z][a-z0-9_-]*):\n {4}image: /gm)].map((m) => `services.${m[1]}.image`);
-    expect(imagePaths).toHaveLength(2);
+    expect(imagePaths).toHaveLength(isDatabase(t) ? 1 : 2);
     expect(refused.errors.filter((e) => e.reason === "STACK_IMAGE_NOT_ALLOWED").map((e) => e.path).sort()).toEqual(imagePaths.sort());
   });
 
@@ -69,7 +74,71 @@ describe("the built-in application templates", () => {
     expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
     expect(appStackPlanImageProblems(plan)).toEqual([]);
     expect(verifyAppStackPlanHash(plan)).toBe(true);
-    expect(plan.components.every((c) => c.secretFiles.length === 0)).toBe(true);
+    expect(plan.components.flatMap((c) => c.secretFiles.map((f) => f.parameterKey)).sort()).toEqual([...(SECRET_KEYS[t.slug] ?? [])]);
+  });
+
+  it("mariadb: one component as 999:999, socket and pid file under /tmp, passwords as files, no address", () => {
+    const plan = planOf(seed("mariadb"));
+    expect(plan.components.map((c) => c.key)).toEqual(["db"]);
+    const db = component(plan, "db");
+    expect(db?.image).toBe("docker.io/library/mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3");
+    expect(db?.runAsUser).toBe("999:999");
+    expect(db?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]);
+    expect(db?.environment).toEqual([
+      { name: "MARIADB_DATABASE", value: "app" },
+      { name: "MARIADB_ROOT_HOST", value: "localhost" },
+      { name: "MARIADB_USER", value: "app" },
+    ]);
+    expect(db?.secretFiles).toEqual([
+      { envName: "MARIADB_PASSWORD_FILE", parameterKey: "database_password", version: 1 },
+      { envName: "MARIADB_ROOT_PASSWORD_FILE", parameterKey: "admin_password", version: 1 },
+    ]);
+    expect(db?.volumes).toEqual([{ volumeKey: "data", containerPath: "/var/lib/mysql", readOnly: false }]);
+    expect(db?.expose).toEqual([3306]);
+    expect(db?.healthcheck).toMatchObject({ kind: "tcp", port: 3306 });
+    expect(plan.ingress).toEqual([]);
+    expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 1000, memoryBytes: "536870912" });
+  });
+
+  it("postgresql: one component as 999:999, the password as a file, no address", () => {
+    const plan = planOf(seed("postgresql"));
+    expect(plan.components.map((c) => c.key)).toEqual(["db"]);
+    const db = component(plan, "db");
+    expect(db?.image).toBe("docker.io/library/postgres@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1");
+    expect(db?.runAsUser).toBe("999:999");
+    expect(db?.argv).toEqual(["postgres"]);
+    expect(db?.environment).toEqual([
+      { name: "POSTGRES_DB", value: "app" },
+      { name: "POSTGRES_USER", value: "app" },
+    ]);
+    expect(db?.secretFiles).toEqual([{ envName: "POSTGRES_PASSWORD_FILE", parameterKey: "database_password", version: 1 }]);
+    expect(db?.volumes).toEqual([{ volumeKey: "data", containerPath: "/var/lib/postgresql", readOnly: false }]);
+    expect(db?.expose).toEqual([5432]);
+    expect(plan.ingress).toEqual([]);
+    expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 1000, memoryBytes: "536870912" });
+  });
+
+  it("valkey: one component as 999:1000, bounded memory below the limit, nothing asked to the customer", () => {
+    const plan = planOf(seed("valkey"));
+    expect(plan.components.map((c) => c.key)).toEqual(["db"]);
+    const db = component(plan, "db");
+    expect(db?.runAsUser).toBe("999:1000");
+    expect(db?.argv).toEqual(["valkey-server", "--appendonly", "yes", "--dir", "/data", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--protected-mode", "no"]);
+    expect(db?.environment).toEqual([]);
+    expect(db?.secretFiles).toEqual([]);
+    expect(db?.volumes).toEqual([{ volumeKey: "data", containerPath: "/data", readOnly: false }]);
+    expect(db?.expose).toEqual([6379]);
+    expect(plan.ingress).toEqual([]);
+    expect(sumAppStackPlanResources(plan)).toEqual({ components: 1, cpuMilli: 500, memoryBytes: "402653184" });
+  });
+
+  it.each(["mariadb", "postgresql"])("%s does not compile until the customer has set its passwords", (slug) => {
+    const result = compile(seed(slug), [], false);
+    expect(result.ok ? [] : result.issues.map((i) => [i.path, i.code])).toEqual((SECRET_KEYS[slug] ?? []).map((key) => [`parameters.${key}`, "SECRET_MISSING"]));
+  });
+
+  it.each(APP_BUILT_IN_TEMPLATES.filter(isDatabase).map((t) => [t.slug, t] as const))("%s is something an application can be linked to", (_slug, t) => {
+    expect(appStackLinkTarget(planOf(t).components)).toEqual({ componentKey: "db", port: planOf(t).components[0]?.expose[0] });
   });
 
   it("http-cache: cache before web, memcached argv, bounded memory, web is the only ingress", () => {

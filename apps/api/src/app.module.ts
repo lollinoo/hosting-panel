@@ -10,6 +10,8 @@ import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine"
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
 import { AppStackBackupsService } from "./app-stacks/app-stack-backups.service.js";
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
+import { AppStackLinksApplier } from "./app-stacks/app-stack-links-applier.js";
+import { AppStackLinksService } from "./app-stacks/app-stack-links.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
@@ -33,6 +35,7 @@ import { AdminAppStacksController } from "./controllers/admin-app-stacks.control
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
+import { AppStackLinksController } from "./controllers/app-stack-links.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -186,6 +189,7 @@ export class AppModule {
         AppTemplatesController,
         AppStacksController,
         AppStackDomainsController,
+        AppStackLinksController,
         AdminNotificationsController,
         NotificationsController,
       ],
@@ -269,6 +273,8 @@ export class AppModule {
         AppStacksService,
         AppStackBackupsService,
         AppStackDomainsService,
+        AppStackLinksApplier,
+        AppStackLinksService,
         AppStackRuntime,
         AppStackObserverService,
         NotificationSenderService,
