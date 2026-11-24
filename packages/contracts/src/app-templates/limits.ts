@@ -38,6 +38,12 @@ export const APP_STACK_SECRET_ENV_LIMITS = Object.freeze({
   expandedBytes: 32_768,
 });
 
+/** `details[0].limit` of a `value_too_long` refusal of a private value the customer types: the bound it passed. A value the
+ *  application reads from its environment is held to `APP_STACK_SECRET_ENV_LIMITS.secretBytes`, which a page states; any
+ *  other to what the store keeps (24 576 UTF-8 bytes), which a page cannot turn into a number of characters. */
+export const APP_STACK_SECRET_VALUE_LIMITS = ["environment", "store"] as const;
+export type AppStackSecretValueLimit = (typeof APP_STACK_SECRET_VALUE_LIMITS)[number];
+
 export const APP_TEMPLATE_LIMITS = {
   sourceBytes: 65_536, // = TEMPLATE_SOURCE_MAX_BYTES (parser)
   depth: 16, // = YAML_MAX_DEPTH

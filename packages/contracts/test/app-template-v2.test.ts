@@ -15,6 +15,7 @@ import {
   APP_STACK_PLAN_SCHEMA_VERSION_2,
   APP_STACK_RUN_PROFILES,
   APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_VALUE_LIMITS,
   APP_STACK_STANDARD_PIDS_LIMIT,
   APP_TEMPLATE_LIMITS,
   APP_TEMPLATE_SPEC_VERSION,
@@ -58,6 +59,7 @@ import {
   AppStackPlanIpcRequestSchema,
 } from "../src/app-templates/stack-ipc.js";
 import { appStackSecretEnvironmentNameProblem } from "../src/app-templates/text.js";
+import { ErrorDetailSchema } from "../src/errors.js";
 import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys, findUnsafeDockerInputFields } from "../src/resources.js";
 
 const fixture = (name: string): unknown =>
@@ -168,6 +170,14 @@ describe("HCP-STACK/v2 constants", () => {
     const { referencesPerValue, pieces, secretBytes, expandedBytes } = APP_STACK_SECRET_ENV_LIMITS;
     expect(pieces).toBe(2 * referencesPerValue + 1);
     expect(referencesPerValue * secretBytes + 3 * APP_TEMPLATE_LIMITS.envValueLength).toBeLessThanOrEqual(expandedBytes);
+  });
+
+  it("names the two bounds a private value the customer types can pass, a closed value of the refusal's detail", () => {
+    expect(APP_STACK_SECRET_VALUE_LIMITS).toEqual(["environment", "store"]);
+    const detail = { field: "value", message: "too long", reason: "value_too_long" };
+    for (const limit of APP_STACK_SECRET_VALUE_LIMITS) expect(ErrorDetailSchema.parse({ ...detail, limit })).toEqual({ ...detail, limit });
+    expect(ErrorDetailSchema.safeParse({ ...detail, limit: "file" }).success).toBe(false);
+    expect(ErrorDetailSchema.parse(detail)).toEqual(detail);
   });
 
   it("gives the three new validator codes the template reason", () => {
