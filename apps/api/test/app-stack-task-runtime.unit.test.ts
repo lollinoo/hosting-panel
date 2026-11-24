@@ -306,8 +306,9 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
     expect(await opsOf()).toBe(before);
 
     // The scheduler queues no operation that could only fail: the time stays owed and is written as missed after its window.
-    const changedAt = new Date("2026-11-22T12:00:00.000Z");
-    const slot = new Date("2026-11-23T03:00:00.000Z");
+    // Its own time: the test above queued a run at 03:00 of the 23rd, and a time that has a run is never written as missed.
+    const changedAt = new Date("2026-11-23T12:00:00.000Z");
+    const slot = new Date("2026-11-24T03:00:00.000Z");
     const schedule = { organizationId: h.a.orgId, stackId, taskKey: "save" };
     await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "daily", hourUtc: 3 }, changedBy: null, now: changedAt });
     const worker = h.app.nestApp.get(OutboxWorkerService);
