@@ -262,20 +262,17 @@ export class AppStackBackupRuntime {
         }
         const read = await this.#read(copy.jobId);
         if ("err" in read) return unread(read.err);
-        if (read.job.state === "running") {
-          reads?.answered(op.id);
-          return "pending";
-        }
+        // Every read that answers starts the count again, also one that a job ended before a later read fails.
+        reads?.answered(op.id);
+        if (read.job.state === "running") return "pending";
         await settleAppStackBackupCopy(db, copy.id, copyOutcome(read.job));
       }
     }
     if (sent) {
       const read = await this.#read(`${op.id}-apply`);
       if ("err" in read) return unread(read.err);
-      if (read.job.state === "running") {
-        reads?.answered(op.id);
-        return "pending";
-      }
+      reads?.answered(op.id);
+      if (read.job.state === "running") return "pending";
       applied = read.job;
     }
 
@@ -298,6 +295,7 @@ export class AppStackBackupRuntime {
         await parkAppStackOperationUnknown(db, op, null);
         return unread(err);
       }
+      reads?.answered(op.id);
     }
 
     const aggregate = backup ? await settleAppStackBackupAggregate(db, backup.id) : null;

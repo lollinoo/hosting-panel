@@ -1415,6 +1415,38 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect((await unconfirmed(op.id))[0]!.details).toMatchObject({ minutesWaited: 30, failure: "error_code" });
     });
 
+    it("a readable answer that a job ended starts the count again, even when the next read of the pass fails", async () => {
+      // Two destinations: the first copy's job is held, the second's was never sent.
+      await setPolicyTargets(db(), policyId, [LOCAL, remote]);
+      const { op, backup } = await parkedCopy();
+      const failing = new Set([op.id, `${op.id}-t2`]);
+      before = (req) => {
+        if (req.action === "status" && failing.has(req.jobId)) throw coded("INTERNAL_ERROR");
+      };
+      const reads = bound();
+      const pass = async () => runtime().recover(await opOf(op.id), reads);
+
+      expect(await pass()).toBe("pending");
+      clock.advance(20 * MINUTE);
+      failing.delete(op.id);
+      sim.finishHeld();
+      expect(await pass()).toBe("pending");
+      expect((await copiesOf(backup.id)).map((c) => c.status)).toEqual(["succeeded", "running"]);
+      clock.advance(15 * MINUTE);
+      expect(await pass()).toBe("pending");
+      expect((await opOf(op.id)).status).toBe("unknown");
+      expect(await unconfirmed(op.id)).toHaveLength(0);
+
+      clock.advance(15 * MINUTE);
+      expect(await pass()).toBe("unconfirmed");
+      expect((await unconfirmed(op.id))[0]!.details).toMatchObject({ minutesWaited: 30 });
+      // The copy saved before stays saved.
+      expect((await copiesOf(backup.id)).map((c) => [c.status, c.problem])).toEqual([
+        ["succeeded", null],
+        ["failed", "interrupted"],
+      ]);
+    });
+
     it("a restore whose job cannot be read once sent is closed as not confirmed: the data may be half written, nothing starts, nothing is sent again", async () => {
       const { stackId, source } = await withBackup();
       const { operation: op, backup: safety } = await request(stackId, "stack.restore", source.id);
