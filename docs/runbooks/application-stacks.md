@@ -205,6 +205,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    server has confirmed. With `--allow-feature-loss` the older release does not know the links: a database stays
    attached only until its container is replaced, nothing attaches it again, and an application cannot be deleted
    while a running database is still attached to its private network (`STACK_NAMESPACE_CONFLICT`).
+10. **Addresses being removed (issue #112).** Before installing an older release, wait until no address is being
+    removed (the query in procedure 10, step 1 lists none): an older release reads such an address as a live one and
+    publishes it again. No gate checks it, as the state lasts one route refresh (about a minute, ten after a failed
+    one).
 
 ## 5. Restore the panel on a new server
 
