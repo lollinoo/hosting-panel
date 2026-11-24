@@ -1335,9 +1335,9 @@ export const appStackBackups = pgTable(
     restoreStatus: text("restore_status").$type<AppStackRestoreStatus>(),
     restoreProblem: text("restore_problem"),
     restoredAt: timestamp("restored_at", { withTimezone: true }),
-    /** A safety backup of data a failed restore had left half written (ADR-0038 K5). */
+    /** A safety backup of data an earlier restore had left half written (ADR-0038 K5). */
     incompleteData: boolean("incomplete_data").notNull().default(false),
-    /** A safety backup whose own restore failed and left the data half written. */
+    /** A safety backup whose own restore left the data half written: it failed so, or wrote back a copy of such data. */
     leftIncomplete: boolean("left_incomplete").notNull().default(false),
   },
   (t) => [

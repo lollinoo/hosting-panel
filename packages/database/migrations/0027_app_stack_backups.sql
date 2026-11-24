@@ -24,9 +24,10 @@ CREATE TABLE IF NOT EXISTS app_stack_backups (
   restore_status TEXT CHECK (restore_status IS NULL OR restore_status IN ('running','succeeded','failed')),
   restore_problem TEXT CHECK (restore_problem IS NULL OR restore_problem ~ '^[A-Za-z][A-Za-z0-9_]{0,63}$'),
   restored_at TIMESTAMPTZ,
-  -- pre_restore rows only. incomplete_data: the data it copied had been left half written by a restore that failed.
-  -- left_incomplete: its own restore failed leaving the data so (while writing, or before writing data that already
-  -- were). While the newest safety backup has left_incomplete, the newest one of whole data is never removed (K7).
+  -- pre_restore rows only. incomplete_data: the data it copied had been left half written by an earlier restore.
+  -- left_incomplete: its own restore left the data so (it failed while writing, or before writing data that already
+  -- were, or it wrote back a copy of such data). While the newest operation of the application other than a backup or
+  -- a clean-up is a restore whose safety backup has left_incomplete, the newest one of whole data is never removed (K7).
   incomplete_data BOOLEAN NOT NULL DEFAULT FALSE,
   left_incomplete BOOLEAN NOT NULL DEFAULT FALSE,
   CONSTRAINT uq_app_stack_backups_operation UNIQUE (operation_id)

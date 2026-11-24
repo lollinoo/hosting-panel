@@ -973,6 +973,22 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(kept).toEqual(expect.arrayContaining(safety.slice(1)));
     });
 
+    it("a restore that succeeds in writing back a copy of half written data keeps the safety backup of whole data", async () => {
+      const { stackId, source } = await withBackup();
+      const safety = await failedRestores(stackId, source.id, 4);
+
+      // The customer writes back the newest safety backup, a copy of half written data, and it succeeds.
+      const { operation: op, backup: last } = await request(stackId, "stack.restore", safety.at(-1)!);
+      expect(await apply(op)).toBeUndefined();
+      expect(await backupOf(last.id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect((await stackOf(stackId)).status).toBe("stopped");
+
+      // The data are still half written: the page points back, and the fifth newest safety backup stays.
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
+      expect(await apply(await prune(stackId))).toBeUndefined();
+      expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).toContain(safety[0]);
+    });
+
     it("data a failed restore left are whole again once the application ran, and stay half written after a restore refused before writing", async () => {
       const { stackId, source } = await withBackup();
       const { operation: first, backup: firstSafety } = await request(stackId, "stack.restore", source.id);

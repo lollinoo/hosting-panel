@@ -573,6 +573,37 @@ describe("@hosting-panel/database — application backups", () => {
       expect((await restore()).backup.incompleteData).toBe(false);
     });
 
+    it("a restore that succeeded leaves the data as whole as the backup it wrote back", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const restore = async (sourceBackupId: string, outcome: "succeeded" | "failed") => {
+        const written = await request(stack, { kind: "stack.restore", sourceBackupId });
+        await finish(written);
+        await settleAppStackRestore(db(), {
+          operationId: written.operation.id,
+          status: outcome,
+          problem: outcome === "failed" ? "no_space" : null,
+          mayHaveWritten: true,
+        });
+        await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+        return written.backup.id;
+      };
+
+      const whole = await restore(source.backup.id, "failed");
+      const broken = await restore(source.backup.id, "failed");
+      expect(await backupOf(broken)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(broken);
+
+      // Writing back a copy of half written data leaves them half written: the mark moves to this restore.
+      const again = await restore(broken, "succeeded");
+      expect(await backupOf(again)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(again);
+      // Writing back the copy of whole data makes them whole.
+      const back = await restore(whole, "succeeded");
+      expect(await backupOf(back)).toMatchObject({ incompleteData: true, leftIncomplete: false });
+      expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
+    });
+
     it("takes the data as they are once anything but a backup or a clean-up is asked of the application", async () => {
       const stack = await installed();
       const source = await goodBackup(stack);

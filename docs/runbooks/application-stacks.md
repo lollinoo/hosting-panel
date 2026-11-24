@@ -307,7 +307,8 @@ approval.
    incomplete. The **Backup** section then names, by its date and time, the backup to restore: the newest
    «Prima di un ripristino» backup taken from whole data. It is not always the newest of its kind: a restore asked
    while the data were still half written saves a safety backup of those half written data, and the list marks it
-   («Questa copia è stata fatta dopo un ripristino non finito»). Do not press **Avvia** first unless losing the state
+   («Questa copia è stata fatta dopo un ripristino non finito»). Restoring such a marked copy succeeds but brings the
+   half written data back: the section goes on naming the backup of whole data. Do not press **Avvia** first unless losing the state
    before the restore is acceptable: a start, or any other action asked of the application except a backup, takes the
    data as they are, and from then on the section names no backup to go back to. The data are half written **now**
    only while the newest operation of the application other than a backup or a clean-up is a restore whose safety

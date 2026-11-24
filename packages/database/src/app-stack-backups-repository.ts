@@ -419,8 +419,9 @@ export async function settleAppStackBackupAggregate(db: DatabaseExecutor, backup
 }
 
 /**
- * Ends the restore an operation started on the backup it reads; false when it already ended. A failed restore marks
- * its safety backup when it left the data half written, or left them as half written as they already were.
+ * Ends the restore an operation started on the backup it reads; false when it already ended. Its safety backup says
+ * whether it left the data half written: a failed one when it may have written, or left them as half written as they
+ * already were; a successful one when the backup it wrote back was itself a copy of half written data.
  */
 export async function settleAppStackRestore(
   db: DatabaseExecutor,
@@ -436,20 +437,19 @@ export async function settleAppStackRestore(
     .update(appStackBackups)
     .set({ restoreStatus: input.status, restoreProblem: input.status === "succeeded" ? null : input.problem, restoredAt: new Date() })
     .where(and(eq(appStackBackups.restoreOperationId, input.operationId), eq(appStackBackups.restoreStatus, "running")))
-    .returning({ id: appStackBackups.id });
-  if (updated.length === 0) return false;
-  if (input.status === "failed") {
-    const wrote =
-      input.mayHaveWritten === undefined
-        ? sql`${appStackBackups.status} IN ('succeeded', 'partial')`
-        : input.mayHaveWritten
-          ? sql`TRUE`
-          : sql`FALSE`;
-    await db
-      .update(appStackBackups)
-      .set({ leftIncomplete: sql`(${wrote} OR ${appStackBackups.incompleteData})` })
-      .where(and(eq(appStackBackups.operationId, input.operationId), eq(appStackBackups.kind, "pre_restore")));
-  }
+    .returning({ id: appStackBackups.id, incompleteData: appStackBackups.incompleteData });
+  const [source] = updated;
+  if (source === undefined) return false;
+  const wrote =
+    input.mayHaveWritten === undefined
+      ? sql`${appStackBackups.status} IN ('succeeded', 'partial')`
+      : input.mayHaveWritten
+        ? sql`TRUE`
+        : sql`FALSE`;
+  await db
+    .update(appStackBackups)
+    .set({ leftIncomplete: input.status === "succeeded" ? source.incompleteData : sql`(${wrote} OR ${appStackBackups.incompleteData})` })
+    .where(and(eq(appStackBackups.operationId, input.operationId), eq(appStackBackups.kind, "pre_restore")));
   return true;
 }
 
