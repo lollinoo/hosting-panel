@@ -671,6 +671,27 @@ describe("AppWizard after the application is created", () => {
     expect(router.push).toHaveBeenCalledTimes(1);
   });
 
+  it("a private value typed again with a text the panel keeps for itself is not sent: its field says why, as on the first step (ADR-0041)", async () => {
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const retyped = { current: new Map<string, string>() };
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const { tree, sets } = wizard(state, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "pw HP_TERMINAL_SESSION=term_" } });
+    // What the web server answers for it: a refusal with no reason a page can show.
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), refusal(400, "VALIDATION_ERROR")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()).toEqual([]);
+    expect(sets).toContainEqual([5, { "param:api_token": t.valueReserved }]);
+    expect(sets).toContainEqual([6, t.secretFailed]);
+    expect(sets).toContainEqual([7, false]);
+    expect(JSON.stringify(sets)).not.toContain("term_");
+    expect(router.push).not.toHaveBeenCalled();
+    const out = html(wizard({ ...state, 5: { "param:api_token": t.valueReserved } }, { 0: values, 2: retyped }).tree);
+    expect(out).toContain(`id="app-param-api_token-note" class="text-xs text-destructive">${t.valueReserved}<`);
+    expect(actions(wizard(state, { 0: values, 2: retyped }).tree)).toEqual([t.openApp, t.retry]);
+  });
+
   it("while a request runs the private values left cannot be typed into: a value typed meanwhile would be sent half-typed", () => {
     const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
     const tag = (out: string, key: string) => out.match(new RegExp(`<input[^>]*id="app-param-${key}"[^>]*>`))![0];

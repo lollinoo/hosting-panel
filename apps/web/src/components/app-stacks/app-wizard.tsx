@@ -246,6 +246,14 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       setCreatedStackId(id);
       if (body.deploy) return router.push(detailHref(id));
     }
+    // A value typed again gets the check Next gave the first one: the server refuses a platform mark with no reason a page can show.
+    const reserved = typedSecrets.filter((k) => APP_STACK_PROCESS_MARK_PATTERN.test(retyped.current.get(k) ?? ""));
+    if (reserved.length > 0) {
+      setFieldErrors(Object.fromEntries(reserved.map((k) => [`param:${k}`, t.valueReserved])));
+      setError(t.secretFailed);
+      setBusy(false);
+      return;
+    }
     const at = `${base}/${encodeURIComponent(id)}`;
     let remaining = typedSecrets;
     let done = saved;
