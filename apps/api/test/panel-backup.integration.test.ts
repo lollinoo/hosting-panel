@@ -43,9 +43,14 @@ import { AppModule } from "../src/app.module.js";
 import { BackupPoliciesService } from "../src/backups/backup-policies.service.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
-import { PANEL_BACKUP_STEPS, PANEL_BUSY_RETRY_MS, PANEL_BUSY_WAIT_MS } from "../src/backups/panel-backup-applier.js";
+import { PANEL_BACKUP_STEPS } from "../src/backups/panel-backup-applier.js";
 import { PanelDumpError, type PanelDumpCommand } from "../src/backups/panel-dump.js";
-import { BACKUP_POLL_DEADLINE_MS, SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
+import {
+  BACKUP_BUSY_RETRY_MS,
+  BACKUP_BUSY_WAIT_MS,
+  BACKUP_POLL_DEADLINE_MS,
+  SiteBackupsApplier,
+} from "../src/backups/site-backups-applier.js";
 import { setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 
@@ -237,8 +242,8 @@ describe("nightly panel copy (panel.backups.create)", () => {
     applier.pollGiveUpMs = 0;
     applier.pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
     applier.panel.dump = fakeDump;
-    applier.panel.busyRetryMs = PANEL_BUSY_RETRY_MS;
-    applier.panel.busyWaitMs = PANEL_BUSY_WAIT_MS;
+    applier.busyRetryMs = BACKUP_BUSY_RETRY_MS;
+    applier.busyWaitMs = BACKUP_BUSY_WAIT_MS;
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(outboxEvents);
     await dbClient.db.delete(operationSteps);
@@ -656,7 +661,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
   }
 
   it("Busy: a copy refused while the executor runs two jobs already is asked again the same night, under the same operation", async () => {
-    applier.panel.busyRetryMs = 1;
+    applier.busyRetryMs = 1;
     const restore = refuseAsBusy(2);
     try {
       const opId = await queuePanel();
@@ -677,8 +682,8 @@ describe("nightly panel copy (panel.backups.create)", () => {
   });
 
   it("Busy: a copy still refused when the wait is over fails like any other refusal", async () => {
-    applier.panel.busyRetryMs = 1;
-    applier.panel.busyWaitMs = 30;
+    applier.busyRetryMs = 1;
+    applier.busyWaitMs = 30;
     const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
     try {
       const opId = await queuePanel();
@@ -696,8 +701,8 @@ describe("nightly panel copy (panel.backups.create)", () => {
   it("Busy: with two destinations the copy has one wait, not one per destination", async () => {
     const { id: localId } = await insertLocalTarget(dbClient.db, { name: "Server", customerSelectable: false, actorId: null });
     await setPanelTargets([LEGACY_BACKUP_TARGET_ID, localId]);
-    applier.panel.busyRetryMs = 1;
-    applier.panel.busyWaitMs = 30;
+    applier.busyRetryMs = 1;
+    applier.busyWaitMs = 30;
     const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
     try {
       const opId = await queuePanel();

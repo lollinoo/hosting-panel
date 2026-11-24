@@ -7,16 +7,19 @@ import {
   type BackupJobStatus,
   type BackupKind,
   type BackupProblem,
+  type BackupsIpcRequest,
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import {
   and,
   appendAuditEvent,
   asc,
+  backupPolicies,
   deleteEmptySiteBackups,
   deleteSiteBackupCopies,
   eq,
   getPolicy,
+  isNull,
   listRetentionCopies,
   listSiteBackupCopies,
   listSiteBackups,
@@ -63,6 +66,23 @@ export const BACKUP_POLL_GIVE_UP_MS = 120_000;
  */
 export const BACKUP_POLL_DEADLINE_MS = 6 * 3_600_000;
 export const SITE_BACKUPS_INTERRUPTED = "This backup was interrupted before it finished.";
+/**
+ * The executor runs two backup jobs at a time for the whole server: the nightly clean-ups of applications and the
+ * backups and restores customers ask for can hold both. A nightly copy (of a site, or of the panel) refused as busy is
+ * asked again this often, under the same operation, so its night keeps its one backup (ADR-0038)...
+ */
+export const BACKUP_BUSY_RETRY_MS = 60_000;
+/**
+ * ...for at most this long after the first refusal of its wait, then the refusal stands like any other. One wait for
+ * every destination of the panel copy, one for all the nightly backups of the sites in a run: twenty sites refused one
+ * after the other hold the backup lane two hours, not forty.
+ */
+export const BACKUP_BUSY_WAIT_MS = 2 * 3_600_000;
+
+/** A wait for a free job slot of the executor: its end is set by its first refusal. */
+export interface BusyWait {
+  until: number | null;
+}
 
 export type BackupOperationRef = Pick<
   typeof operations.$inferSelect,
@@ -143,6 +163,10 @@ export class SiteBackupsApplier {
   public pollMs = BACKUP_POLL_MS;
   public pollGiveUpMs = BACKUP_POLL_GIVE_UP_MS;
   public pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
+  public busyRetryMs = BACKUP_BUSY_RETRY_MS;
+  public busyWaitMs = BACKUP_BUSY_WAIT_MS;
+  /** The wait the nightly backups of the sites share, and the run (its date) it belongs to. */
+  #nightlyWait: { run: string | null; wait: BusyWait } | null = null;
   public readonly sftp: SiteSftpService | null;
   public readonly panel: PanelBackupApplier;
 
@@ -400,7 +424,7 @@ export class SiteBackupsApplier {
     await this.safeUpdateStep(op.id, "backup", "running", "Backing up site files and databases");
 
     try {
-      const backupId = await this.#ensureBackupRowStillRunning(op.id);
+      const { id: backupId, kind } = await this.#ensureBackupRowStillRunning(op.id);
 
       const [site] = await db
         .select({
@@ -427,14 +451,23 @@ export class SiteBackupsApplier {
         site,
       );
 
+      // A nightly backup refused because the executor's job slots are taken is asked again within the one wait of its
+      // run; one a person asked for, or the one before a WordPress update, is refused at once.
+      const busyWait = kind === "nightly" ? await this.#nightlyBusyWait() : null;
       const failures: CopyFailure[] = [];
       for (const copy of (await this.#copiesOf(backupId)).filter((c) => c.status === "running")) {
         await this.#ensureBackupRowStillRunning(op.id);
-        const failure = await this.#runCopy(op, backupId, copy, {
-          siteId: site.id,
-          serviceInstanceId,
-          siteType,
-        });
+        const failure = await this.#runCopy(
+          op,
+          backupId,
+          copy,
+          {
+            siteId: site.id,
+            serviceInstanceId,
+            siteType,
+          },
+          busyWait,
+        );
         if (failure) {
           failures.push(failure);
         }
@@ -487,6 +520,7 @@ export class SiteBackupsApplier {
     backupId: string,
     copy: CopyRow,
     job: { siteId: string; serviceInstanceId: string; siteType: NonNullable<ReturnType<typeof siteTypeKeyOf>> },
+    busyWait: BusyWait | null,
   ): Promise<CopyFailure | null> {
     const target = await resolveDispatchTarget(this.dbClient.db, this.config.secretsMasterKey, copy.targetId);
     if (!target) {
@@ -500,7 +534,8 @@ export class SiteBackupsApplier {
     let statusRes: BackupJobStatus;
     try {
       const jobId = copy.jobId ?? op.id;
-      const startRes = await this.dockerExecutor.backups({ action: "start", jobId, ...job, target });
+      const req: Extract<BackupsIpcRequest, { action: "start" }> = { action: "start", jobId, ...job, target };
+      const startRes = busyWait === null ? await this.dockerExecutor.backups(req) : await this.startWhenFree(op.id, req, busyWait);
       statusRes = await this.pollJobStatus(op.id, jobId, startRes);
     } catch (err) {
       if (isAmbiguousError(err)) {
@@ -539,10 +574,10 @@ export class SiteBackupsApplier {
     });
   }
 
-  /** Fails the operation as interrupted when its backup row is gone or no longer running; returns the row id. */
-  async #ensureBackupRowStillRunning(operationId: string): Promise<string> {
+  /** Fails the operation as interrupted when its backup row is gone or no longer running; returns the row's id and kind. */
+  async #ensureBackupRowStillRunning(operationId: string): Promise<{ id: string; kind: BackupKind }> {
     const [backupRow] = await this.dbClient.db
-      .select({ id: siteBackups.id, status: siteBackups.status })
+      .select({ id: siteBackups.id, status: siteBackups.status, kind: siteBackups.kind })
       .from(siteBackups)
       .where(eq(siteBackups.operationId, operationId))
       .limit(1);
@@ -551,7 +586,38 @@ export class SiteBackupsApplier {
       await this.#failStepAndOperation(operationId, SITE_BACKUPS_INTERRUPTED, err.code, err.message);
       throw new BackupSettledFailure(err);
     }
-    return backupRow.id;
+    return { id: backupRow.id, kind: backupRow.kind };
+  }
+
+  /** The one wait of the nightly backups of the sites in a run; the run is named by its date (the default_site policy's). */
+  async #nightlyBusyWait(): Promise<BusyWait> {
+    const [policy] = await this.dbClient.db
+      .select({ run: backupPolicies.lastNightlyRunOn })
+      .from(backupPolicies)
+      .where(and(eq(backupPolicies.scope, "default_site"), isNull(backupPolicies.siteId)))
+      .limit(1);
+    const run = policy?.run ?? null;
+    if (this.#nightlyWait === null || this.#nightlyWait.run !== run) this.#nightlyWait = { run, wait: { until: null } };
+    return this.#nightlyWait.wait;
+  }
+
+  /** @internal A job start, asked again under a renewed lease while the executor refuses it as busy, until the wait is over. */
+  public async startWhenFree(
+    operationId: string,
+    req: Extract<BackupsIpcRequest, { action: "start" | "panelStart" }>,
+    wait: BusyWait,
+  ): Promise<BackupJobStatus> {
+    for (;;) {
+      try {
+        return await this.dockerExecutor.backups(req);
+      } catch (err) {
+        if (extractKnownErrorCode(err) !== "RESOURCE_LOCKED") throw err;
+        wait.until ??= Date.now() + this.busyWaitMs;
+        if (Date.now() >= wait.until) throw err;
+      }
+      await renewOperationLease(this.dbClient.db, operationId, this.leaseMs);
+      await this.#delay(this.busyRetryMs);
+    }
   }
 
   async #applyPrune(op: BackupOperationRef): Promise<void> {

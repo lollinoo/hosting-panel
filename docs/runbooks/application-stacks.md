@@ -335,8 +335,14 @@ approval.
    The executor runs two backup jobs at a time: the panel's own nightly copy, queued in the same run, may find them
    taken by a clean-up and an application's backup. It then asks again every minute, under the same operation, for
    at most two hours in all, also with two destinations (meanwhile the sites' backups and restores wait in the same
-   worker lane), and only then fails;
-   each night has at most one panel copy.
+   worker lane), and only then fails; each night has at most one panel copy. The sites' nightly backups, in the same
+   worker lane, may find both jobs taken by an application's backup or restore and another job (the copy before a
+   WordPress update, a clean-up): a refused one is asked again every minute under its own operation, but the whole run
+   has one wait, two hours from its first refusal. After it, each refused site fails at once as before (`site_busy`)
+   and gets its next backup the next night; twenty refused sites hold the lane two hours, not forty. A site that waits
+   is locked as during its backup (its actions answer `409 RESOURCE_LOCKED`). The wait is kept in memory: restarting
+   `hp-api` during the run starts another one. A backup a person asks for, and the one before a WordPress update, are
+   refused at once.
 8. **Where the copies are** (server administrator). One encrypted repository per application per destination, next to
    the sites' ones and with their key: on a local destination the folder `stacks/<stackId>` under that destination's
    folder (`/var/lib/hosting-panel/local-repos/<targetId>` unless `HP_BACKUP_LOCAL_ROOT` says otherwise), on S3 the
