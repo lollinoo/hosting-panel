@@ -390,6 +390,12 @@ names only the key of a task, and the command is read from the template version 
    ```bash
    node infra/linux/accept-app-stack-wordpress.mjs --imported
    ```
+   The built-in run is made for the newest version of the template (procedure 15). With
+   `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where `address-follows-host` and `uploads-limit` fail
+   (`no-redirect-loop` is expected to fail too): that run reproduces what version 2 fixes:
+   ```bash
+   HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs
+   ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
    prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
@@ -781,3 +787,33 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
     refused after the update: the application's page answers an error and a start is refused. Applications were first
     switched on in release 0.10.0, so none is expected. If one exists, correct the value (the customer replaces a
     private value from the application's page), or stop the application or delete it (procedure 3).
+
+## 15. WordPress: upgrade installed applications to version 2
+
+Version 2 of the built-in «WordPress in contenitore» template (`atv_wordpress_mariadb_2`, `ADR-0036` §8.3) fixes two
+faults of version 1 (`atv_wordpress_mariadb_1`). WordPress keeps the address it was installed from, so another web
+address of the application answers with pages, styles and a login form that point to the first one. And uploads stop
+at 2 MB.
+
+1. **What changes.** Only the WordPress component. It takes the address from each request (`WP_HOME` and
+   `WP_SITEURL`, set in `wp-config.php` through `WORDPRESS_CONFIG_EXTRA`), and its web server accepts uploads and forms
+   of up to 64 MB. The database component, the data areas, the web addresses and the generated passwords stay as they
+   are. Version 1 itself is not changed.
+2. **When it arrives.** The first start of `hp-api` after the update adds version 2 and makes it the template's default,
+   unless an administrator had made a version of their own the default: that choice stays, until an administrator
+   presses **Rendi predefinita** on version 2 in **Modelli**. When an administrator had already added a version 2 of
+   their own, the built-in one is number 3. The template's description changes only if nobody edited it. Check:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select t.default_version_id, v.id, v.version_number from app_templates t join app_template_versions v on v.template_id = t.id where t.id = 'atpl_wordpress_mariadb' order by v.version_number"
+   ```
+3. **Installed applications need the upgrade.** An application installed with version 1 keeps it until a customer
+   owner or a hosting administrator of its organisation presses **Aggiorna alla versione 2** (or the number above) on
+   the application's page and confirms. Nothing upgrades it automatically, and that button is the only notice the customer gets. The review
+   shows the WordPress component modified and restarted, nothing else changed and no value to enter; the application
+   does not answer for a few moments while WordPress restarts. **Torna alla versione 1** brings the old behaviour back.
+   The applications still on version 1:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where template_version_id = 'atv_wordpress_mariadb_1' and status <> 'deleted' order by id"
+   ```
+4. **What it does not change.** Addresses written inside posts and pages (links, images) keep the old name: WordPress
+   stores them in the content. The customer changes them in WordPress.
