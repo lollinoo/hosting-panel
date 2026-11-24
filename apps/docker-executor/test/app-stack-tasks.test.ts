@@ -272,6 +272,29 @@ describe("runAppStackTask on the Docker Engine", () => {
     for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
   });
 
+  it("returns nothing of a command that never started, whatever the engine wrote: no process, or an exec it dropped", async () => {
+    // The component stopped between the creation and the start of the exec: the engine's text carries a Docker id.
+    const dockerId = "4f".repeat(32);
+    const plans: MockExecPlan[] = [
+      { frames: [[1, `container ${dockerId} is not running\r\n`]], exitCode: 126, pid: 0 },
+      { frames: [[1, `No such exec instance: ${dockerId}\r\n`]], exitCode: null, forgotten: true },
+      // A command whose process started keeps what it printed, whatever its exit code.
+      { frames: [[1, "my own error\n"]], exitCode: 126, pid: 4242 },
+      { frames: [[2, "printed by the task\n"]], exitCode: null, pid: 4243 },
+    ];
+    const { adapter } = await setup({ command: () => plans.shift() });
+    const results = [];
+    for (let n = 1; n <= 4; n += 1) results.push(await adapter.runAppStackTask(request(n)));
+    expect(results.map((r) => [r.outcome, r.exitCode, r.output])).toEqual([
+      ["failed", 126, ""],
+      ["failed", null, ""],
+      ["failed", 126, "my own error"],
+      ["failed", null, "printed by the task"],
+    ]);
+    expect(JSON.stringify(results)).not.toContain(dockerId);
+    for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+  });
+
   it("masks the secrets of the component in what the command printed", async () => {
     const { adapter, secretsRootDir } = await setup({
       command: () => ({ frames: [[1, `key=${CANARY}\n`], [2, `again ${CANARY} here\n`], [1, "clean\n"]] }),

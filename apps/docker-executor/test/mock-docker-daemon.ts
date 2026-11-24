@@ -80,6 +80,10 @@ export interface MockExecPlan {
   readonly raw?: Buffer;
   /** What GET /exec/<id>/json answers once the exec ended (default: the daemon's `execExitCode`); null = not told. */
   readonly exitCode?: number | null;
+  /** The `Pid` GET /exec/<id>/json answers (0: the engine never started the process); not set = no `Pid`. */
+  readonly pid?: number;
+  /** Once the exec ended, GET /exec/<id>/json answers 404: the engine dropped it (its container stopped). */
+  readonly forgotten?: boolean;
   /** The stream stays open and the exec stays running until `endExec`. */
   readonly stayOpen?: boolean;
   /** The exec start answers 500 instead of the stream. */
@@ -271,8 +275,14 @@ export async function startMockDockerDaemon(options?: {
       if (execMatch && ((method === "POST" && execMatch[2] === "start") || method === "GET")) {
         const planned = execMatch[2] === "json" ? execPlans.get(decodeURIComponent(execMatch[1] ?? "")) : undefined;
         if (planned !== undefined) {
+          if (planned.ended && planned.plan.forgotten === true) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: "No such exec instance" }));
+            return;
+          }
+          const pid = planned.plan.pid === undefined ? {} : { Pid: planned.plan.pid };
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(planned.ended ? { Running: false, ExitCode: planned.exitCode } : { Running: true, ExitCode: null }));
+          res.end(JSON.stringify(planned.ended ? { Running: false, ExitCode: planned.exitCode, ...pid } : { Running: true, ExitCode: null, ...pid }));
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });

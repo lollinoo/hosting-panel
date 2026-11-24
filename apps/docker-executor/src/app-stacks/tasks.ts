@@ -10,7 +10,7 @@ import {
   type AppStackTaskRunIpcResult,
 } from "@hosting-panel/contracts";
 import type { StackTaskExecutorPort } from "@hosting-panel/executor-contracts";
-import { inspectExecExitCode, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
+import { inspectExecState, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
 import { ExecutorCodedError } from "../traefik-config.js";
 import { ownComponentKey } from "./engine.js";
 import { AppStackExecutorError } from "./errors.js";
@@ -369,10 +369,13 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     exec.socket.destroy();
     // What the command left behind ends before the answer; then the engine tells how the command itself ended.
     await this.cleanUp(containerId, req.runId);
-    const exit = await inspectExecExitCode(this.target, exec.execId).catch(() => ({ exitCode: null }));
-    const exitCode =
-      exit.exitCode !== null && Number.isInteger(exit.exitCode) && exit.exitCode >= 0 && exit.exitCode <= 255 ? exit.exitCode : null;
-    return this.finished(req, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail);
+    const state = await inspectExecState(this.target, exec.execId).catch(() => undefined);
+    const raw = state?.exitCode ?? null;
+    const exitCode = raw !== null && Number.isInteger(raw) && raw >= 0 && raw <= 255 ? raw : null;
+    // No process (pid 0), or an exec the engine dropped (it drops one that never ran when its container stops): the
+    // command never started, and what came back is the engine's own text, which can carry a Docker id.
+    const started = state !== null && state?.pid !== 0;
+    return this.finished(req, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
   }
 
   /** Resolves when the output ended, when the connection broke, or at the time limit. The command gets no input. */
@@ -436,14 +439,16 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     exitCode: number | null,
     startedAt: Date,
     tail: TaskOutputTail,
+    started = true,
   ): Promise<AppStackTaskRunIpcResult> {
     const kept = tail.lines();
-    // The program never ran: what is there is the engine's message, not something the task printed. The exit code tells,
-    // or is not known (the engine did not tell it, or reading it failed).
+    // The program never ran: what is there is the engine's message, not something the task printed. The engine tells it
+    // (no process); else, as a second net, its own prefix with an exit code of 126 or 127 or none known.
     const engineError =
-      (exitCode === null || exitCode === 126 || exitCode === 127) &&
-      !kept.cut &&
-      kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true;
+      !started ||
+      ((exitCode === null || exitCode === 126 || exitCode === 127) &&
+        !kept.cut &&
+        kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true);
     const { lines, cut } = engineError ? { lines: [], cut: false } : kept;
     const values = await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey);
     const masked = maskAppStackLogLines(
