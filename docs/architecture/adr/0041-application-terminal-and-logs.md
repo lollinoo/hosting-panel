@@ -47,7 +47,7 @@ Come per i siti, l'amministratore non ha bisogno di una visita di assistenza: le
 - gira **come l'utente del componente**: l'esecutore non indica nessun utente e nessuna cartella, quindi Docker usa quelli con cui il container è stato creato. La shell eredita anche tutto il resto: nessuna capability, `no-new-privileges`, file system di base in sola lettura, i limiti di memoria e di processi del componente, le sole reti e i soli volumi del componente. **Ha i poteri del componente e non uno di più**;
 - non c'è una cartella di partenza imposta: è quella dell'immagine.
 
-Un'immagine senza `/bin/sh` non ha un terminale: la sessione si apre e finisce subito (`shell_exited`), con la riga di errore di Docker come unico testo. Non c'è un motivo di rifiuto nuovo per questo.
+Un'immagine senza `/bin/sh` non ha un terminale: la sessione si apre e finisce subito (`shell_exited`), con la riga di errore di Docker come unico testo. Non c'è un motivo di rifiuto nuovo per questo. Anche lo script di pulizia (T7) è `/bin/sh`: in un'immagine così il motore lo rifiuta con il suo messaggio (`OCI runtime exec failed…`) e il codice 127 o 126, e l'esecutore conta la pulizia come fatta, alla fine di una sessione, alla chiusura chiesta dalla passata dell'API e nella pulizia all'avvio, perché lì nessuna shell di una sessione ha mai girato. Un 126 o un 127 senza quel messaggio viene dallo script, che non stampa niente, e resta un fallimento. Il terminale dei siti non cambia.
 
 ### T5 — Aprire
 
@@ -188,7 +188,7 @@ Non provato:
 
 - Le tre pagine viste da una persona in un browser vero.
 - Il limite dei 30 minuti su Docker vero: è provato solo nei test dell'esecutore, con un orologio finto.
-- Un'immagine senza `/bin/sh`. Tutte le immagini dell'elenco ammesso di questo ramo sono basate su Alpine e ne hanno una: il comportamento scritto in T4 è quello atteso da Docker, non uno osservato.
+- Un'immagine senza `/bin/sh`. Tutte le immagini dell'elenco ammesso di questo ramo sono basate su Alpine e ne hanno una: il comportamento scritto in T4 è quello atteso da Docker, non uno osservato. Che la pulizia rifiutata dal motore conti come fatta, e che un 126 o un 127 senza il suo messaggio resti un fallimento, è provato solo contro il motore finto (`apps/docker-executor/test/app-stack-terminal.test.ts`).
 - Un processo che lascia la sessione di proposito e toglie il segno dal proprio ambiente (`env -i setsid …`): è il limite dichiarato al §3, non una prova.
 - Un ritorno alla release precedente con una shell rimasta in un componente (T11).
 

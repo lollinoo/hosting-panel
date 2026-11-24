@@ -199,6 +199,85 @@ describe("openAppStackTerminal on the Docker Engine", () => {
   });
 });
 
+describe("a component whose image has no /bin/sh (ADR-0041 T4)", () => {
+  // What the engine writes, then its exit code, when it cannot start /bin/sh: 127 when it is not there, 126 when it
+  // cannot be run. The clean-up is itself /bin/sh, so it meets the same refusal; the script alone prints nothing.
+  const ENGINE = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory: unknown\r\n';
+  const NO_SHELL: Array<[string, Array<[1 | 2, string]>, number]> = [
+    ["127 with the engine's message", [[1, ENGINE]], 127],
+    ["126 with the engine's message on stderr", [[2, ENGINE.replace("no such file or directory", "permission denied")]], 126],
+  ];
+
+  it.each(NO_SHELL)("a shell that could not start ends as shell_exited and the API's next pass drops it (%s)", async (_name, frames, exitCode) => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.openAppStackTerminal(REQ);
+    // Every clean-up in this container meets the same refusal.
+    mockDaemon.execReplies.push({ frames, exitCode }, { frames, exitCode });
+    mockDaemon.execStreams[0]!.socket.end(ENGINE); // the TTY stream carries the engine's message and ends
+    const first = await adapter.readTerminal({ sessionId: SID, cursor: 0 });
+    const ended = first.ended ?? (await adapter.readTerminal({ sessionId: SID, cursor: first.cursor })).ended;
+    expect(ended).toMatchObject({ reason: "shell_exited" });
+    await vi.waitFor(() => expect(appKills(mockDaemon)).toHaveLength(1));
+    // The sweep of the API closes an ended record: with nothing left in the container, the executor lets it go.
+    await expect(adapter.closeTerminal({ sessionId: SID })).resolves.toMatchObject({ reason: "shell_exited" });
+    await expect(adapter.listTerminals()).resolves.toEqual([]);
+    expect(appKills(mockDaemon)).toHaveLength(1);
+  });
+
+  it.each(NO_SHELL)("a close counts the clean-up as done (%s)", async (_name, frames, exitCode) => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.openAppStackTerminal(REQ);
+    mockDaemon.execReplies.push({ frames, exitCode });
+    await expect(adapter.closeTerminal({ sessionId: SID })).resolves.toMatchObject({ reason: "closed" });
+    await expect(adapter.listTerminals()).resolves.toEqual([]);
+  });
+
+  const FAILED: Array<[string, Array<[1 | 2, string]>, number]> = [
+    ["127 with no output", [], 127],
+    ["126 with no output", [], 126],
+    ["127 with another text", [[2, "sh: kill: not found\n"]], 127],
+    ["126 with the engine's message after other text", [[1, `x\n${ENGINE}`]], 126],
+    ["the engine's message with another exit code", [[1, ENGINE]], 1],
+  ];
+  it.each(FAILED)("%s is a failure of the clean-up: the record stays until one works", async (_name, frames, exitCode) => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.openAppStackTerminal(REQ);
+    mockDaemon.execReplies.push({ frames, exitCode });
+    await expect(adapter.closeTerminal({ sessionId: SID })).resolves.toMatchObject({ reason: "closed" });
+    await expect(adapter.listTerminals()).resolves.toMatchObject([{ sessionId: SID, ended: { reason: "closed" } }]);
+    await expect(adapter.closeTerminal({ sessionId: SID })).resolves.toMatchObject({ reason: "closed" }); // tried again, and works
+    await expect(adapter.listTerminals()).resolves.toEqual([]);
+    expect(appKills(mockDaemon)).toHaveLength(2);
+  });
+
+  it("the start-up pass counts a component without a shell as done, and a failure of the script as a failure", async () => {
+    const { adapter, mockDaemon } = await setup();
+    const target = (adapter as unknown as { execTarget: DockerExecTarget }).execTarget;
+    add(mockDaemon, component("web", { execIds: ["e1"] }));
+    for (const [, frames, exitCode] of NO_SHELL) {
+      mockDaemon.execReplies.push({ frames, exitCode });
+      await expect(reapAppStackTerminalShells(target)).resolves.toBeUndefined();
+    }
+    for (const [, frames, exitCode] of FAILED) {
+      mockDaemon.execReplies.push({ frames, exitCode });
+      await expect(reapAppStackTerminalShells(target)).rejects.toMatchObject({ code: "INTERNAL_ERROR", message: "The terminal clean-up did not finish" });
+    }
+    expect(appKills(mockDaemon)).toHaveLength(NO_SHELL.length + FAILED.length);
+  });
+
+  it("the terminal of a site is unchanged: the same answer to its clean-up is a failure", async () => {
+    const mockDaemon = await startMockDockerDaemon({ execUpgrade: true });
+    cleanup.push(() => mockDaemon.close());
+    const siteLabels = { [MANAGED_DOCKER_LABELS.siteId]: "site_a", [MANAGED_DOCKER_LABELS.serviceInstanceId]: "svc_site_a" };
+    add(mockDaemon, { ...component("site", { execIds: ["e0"] }), id: "hp_site_a_id", name: "hp_site_a", labels: siteLabels });
+    const adapter = new DockerEngineSocketAdapter({ dockerSocketPath: mockDaemon.socketPath });
+    mockDaemon.execReplies.push({ frames: [[1, ENGINE]], exitCode: 127 });
+    await expect(adapter.reapTerminalShells()).rejects.toMatchObject({ code: "INTERNAL_ERROR", message: "The terminal clean-up did not finish" });
+    expect(siteKills(mockDaemon)).toHaveLength(1);
+    expect(appKills(mockDaemon)).toEqual([]);
+  });
+});
+
 describe("the clean-up script of a component", () => {
   // The text is pinned: a change here must be tried again in real containers (infra/linux/accept-app-terminal.mjs).
   const PINNED =

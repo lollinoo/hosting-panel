@@ -1,4 +1,4 @@
-import { type DockerExecTarget, runDockerExec, startDockerExec } from "./docker-exec.js";
+import { type DockerExecResult, type DockerExecTarget, runDockerExec, startDockerExec } from "./docker-exec.js";
 import type { ExecutorSiteType } from "./site-types/types.js";
 import type { TerminalShell, TerminalShellSink } from "./terminal-sessions.js";
 import { ExecutorCodedError } from "./traefik-config.js";
@@ -28,8 +28,8 @@ export const APP_STACK_TERMINAL_KILL_SCRIPT =
 
 const SITE_LABEL = "io.hostingpanel.site_id"; // MANAGED_DOCKER_LABELS.siteId; not imported to keep this file free of the adapter
 const APP_COMPONENT_LABEL = "io.hostingpanel.app_component"; // APP_STACK_LABELS.component, for the same reason
-
-type KillResult = ReturnType<typeof runDockerExec>;
+/** How the engine's own message begins when it cannot start the program of an exec (exit 127 or 126). */
+const ENGINE_EXEC_FAILED = "OCI runtime exec failed";
 
 /** What differs between a shell in a site and one in a component of an application. */
 interface ShellKind {
@@ -37,7 +37,8 @@ interface ShellKind {
   readonly as: { readonly user?: string; readonly workingDir?: string };
   readonly notRunning: string;
   readonly inspectFailed: string;
-  readonly kill: (containerId: string, sessionId: string) => KillResult;
+  /** Runs the clean-up script: true when nothing the session started is left; rejects as runDockerExec does. */
+  readonly kill: (containerId: string, sessionId: string) => Promise<boolean>;
 }
 
 interface Inspected {
@@ -59,7 +60,7 @@ async function inspect(target: DockerExecTarget, containerId: string, failed: st
 }
 
 /** Runs the kill script as the type's file owner; sessionId "" kills every marked process. */
-function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string, t: ExecutorSiteType): KillResult {
+function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string, t: ExecutorSiteType): Promise<DockerExecResult> {
   return runDockerExec(
     target,
     { container: containerId, cmd: ["/bin/sh", "-c", TERMINAL_KILL_SCRIPT, "sh", sessionId], user: t.def.files.owner },
@@ -67,27 +68,38 @@ function runKillScript(target: DockerExecTarget, containerId: string, sessionId:
   );
 }
 
-/** Runs the builtin-only kill script as the user the component runs as (no user is named); "" kills every marked process. */
-function runAppStackKillScript(target: DockerExecTarget, containerId: string, sessionId: string): KillResult {
+/**
+ * Runs the builtin-only kill script as the user the component runs as (no user is named); "" kills every marked process.
+ * Only the start of the output is read: the script prints nothing, the engine its message when it cannot start /bin/sh.
+ */
+function runAppStackKillScript(target: DockerExecTarget, containerId: string, sessionId: string): Promise<DockerExecResult> {
   return runDockerExec(
     target,
     { container: containerId, cmd: ["/bin/sh", "-c", APP_STACK_TERMINAL_KILL_SCRIPT, "sh", sessionId] },
-    { timeoutMs: TERMINAL_KILL_TIMEOUT_MS, maxOutputBytes: 0 },
+    { timeoutMs: TERMINAL_KILL_TIMEOUT_MS, maxOutputBytes: ENGINE_EXEC_FAILED.length },
   );
+}
+
+/**
+ * The engine could not start /bin/sh (127: not there, 126: not runnable), so no shell of a session ever ran in this
+ * image and none left anything (ADR-0041 T4). The script's own exit never carries the engine's message.
+ */
+function hasNoShell(done: DockerExecResult): boolean {
+  return (done.exitCode === 126 || done.exitCode === 127) && [done.stdout, done.stderr].some((out) => out.toString("utf8").startsWith(ENGINE_EXEC_FAILED));
 }
 
 const siteKind = (target: DockerExecTarget, t: ExecutorSiteType): ShellKind => ({
   as: { user: t.def.files.owner, workingDir: t.def.files.mountPath },
   notRunning: "The site container is not running",
   inspectFailed: "Failed to inspect the site container",
-  kill: (containerId, sessionId) => runKillScript(target, containerId, sessionId, t),
+  kill: (containerId, sessionId) => runKillScript(target, containerId, sessionId, t).then((done) => done.exitCode === 0),
 });
 
 const appStackKind = (target: DockerExecTarget): ShellKind => ({
   as: {},
   notRunning: "The component is not running",
   inspectFailed: "Failed to inspect the component's container",
-  kill: (containerId, sessionId) => runAppStackKillScript(target, containerId, sessionId),
+  kill: (containerId, sessionId) => runAppStackKillScript(target, containerId, sessionId).then((done) => done.exitCode === 0 || hasNoShell(done)),
 });
 
 /** /bin/sh with a TTY in a running container; NOT_FOUND when the container is missing or stopped. */
@@ -109,9 +121,8 @@ async function startShell(
     tty: true,
     consoleSize: TERMINAL_CONSOLE_SIZE,
   });
-  // Worked: exit 0, or the container is gone or stopped (nothing is left to kill).
-  const kill = () => kind.kill(containerId, sessionId).then(
-    (done) => done.exitCode === 0,
+  // Worked: the script found nothing left, or the container is gone or stopped (nothing is left to kill).
+  const kill = () => kind.kill(containerId, sessionId).catch(
     (err: unknown) => err instanceof ExecutorCodedError && err.code === "NOT_FOUND",
   );
   let over = false; // the stream ended, or the manager asked for the end
@@ -187,8 +198,7 @@ async function reap(target: DockerExecTarget, label: string, listFailed: string,
     try {
       const seen = await inspect(target, Id, kind.inspectFailed);
       if (seen?.State?.Running !== true || !seen.ExecIDs?.length) continue;
-      const done = await kind.kill(Id, "");
-      if (done.exitCode !== 0) throw new ExecutorCodedError("The terminal clean-up did not finish", "INTERNAL_ERROR");
+      if (!(await kind.kill(Id, ""))) throw new ExecutorCodedError("The terminal clean-up did not finish", "INTERNAL_ERROR");
     } catch (err) {
       failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The terminal clean-up failed", "INTERNAL_ERROR");
     }

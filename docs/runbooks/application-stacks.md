@@ -288,7 +288,9 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
    restarted, upgraded, rolled back or deleted while the session was open: open a new one with a new code),
    `executor_gone` (the executor stopped or was restarted), `not_started` (the executor refused the open). At every
    end where the container is still there, the executor kills what the session started, also what was left in the
-   background with `&`, `nohup` or `setsid`; it never touches the component's own processes.
+   background with `&`, `nohup` or `setsid`; it never touches the component's own processes. In an image with no
+   `/bin/sh` the engine refuses that clean-up too (`OCI runtime exec failed`, exit 127 or 126): no shell ever ran
+   there, so the executor counts it as done and logs no `terminal_kill_failed`.
 7. **What is recorded.** `admin.terminal.open` and one `admin.terminal.close` per session, on the application, with the
    component, the container's name, the duration and the reason; `admin.terminal.denied` for every refused code.
    Nothing typed and nothing printed is stored or logged anywhere. The sessions and their audit rows:
