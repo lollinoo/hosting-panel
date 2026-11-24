@@ -3581,7 +3581,7 @@ x-hp-ingress:
         output: "Cosa ha scritto",
         noOutput: "Non ha scritto nulla.",
         notKept:
-          "Questa esecuzione ha scritto qualcosa, ma non è stato conservato. Succede quando quello che ha scritto è una sola riga molto lunga, oppure quando il pannello non ha potuto leggere i valori riservati dell'applicazione per nasconderli. Se succede di nuovo, riavvia l'applicazione ed esegui di nuovo l'attività.",
+          "Questa esecuzione ha scritto qualcosa, ma non è stato conservato. Succede quando quello che ha scritto è una sola riga molto lunga, oppure quando il pannello non ha potuto leggere i valori riservati dell'applicazione per nasconderli. Se succede di nuovo, riavvia l'applicazione ed esegui di nuovo l'attività; se succede ancora dopo il riavvio, rivolgiti all'amministratore del server.",
         truncated: "Sono mostrate solo le ultime righe.",
       },
     },

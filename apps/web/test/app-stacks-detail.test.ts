@@ -1629,10 +1629,11 @@ describe("scheduled tasks", () => {
     }
     // The sentence tells both causes and what to do, in the words the page uses for them.
     expect(en.apps.tasks.runs.notKept).toBe(
-      "This run printed something, but it was not kept. This happens when the output is one very long line, or when the panel could not read the application's private values to hide them. If it happens again, restart the application and run the task again.",
+      "This run printed something, but it was not kept. This happens when the output is one very long line, or when the panel could not read the application's private values to hide them. If it happens again, restart the application and run the task again; if it still happens after a restart, ask your server administrator.",
     );
     expect(itMsgs.apps.tasks.runs.notKept).toMatch(/valori riservati/);
     expect(itMsgs.apps.tasks.runs.notKept).toMatch(/riavvia l'applicazione/);
+    expect(itMsgs.apps.tasks.runs.notKept).toMatch(/rivolgiti all'amministratore del server\.$/);
     expect(itMsgs.apps.tasks.runs.notKept.split(". ")).toHaveLength(3);
   });
 
