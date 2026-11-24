@@ -29,6 +29,7 @@ import {
   failRunningAppStackBackupCopies,
   getAppStackBackup,
   getAppStackBackupByOperation,
+  getAppStackIncompleteDataMark,
   getAppStackRestoreSource,
   getPolicy,
   hostAllocations,
@@ -570,6 +571,38 @@ describe("@hosting-panel/database — application backups", () => {
       // A restore of a running application never copies half written data.
       await db().update(appStacks).set({ status: "running" }).where(eq(appStacks.id, stack.id));
       expect((await restore()).backup.incompleteData).toBe(false);
+    });
+
+    it("takes the data as they are once anything but a backup or a clean-up is asked of the application", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const failed = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
+      await finish(failed);
+      await settleAppStackRestore(db(), { operationId: failed.operation.id, status: "failed", problem: "no_space", mayHaveWritten: true });
+      await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(failed.backup.id);
+      const operation = (kind: "stack.prune" | "stack.start", status: "succeeded" | "queued") =>
+        db().insert(operations).values({
+          id: `op_${hex(`${kind} mark`).slice(0, 24)}`,
+          organizationId: orgA,
+          kind,
+          resourceType: "stack",
+          resourceId: stack.id,
+          status,
+          lockKey: `stack:${stack.id}`,
+          idempotencyKey: `sb-${kind}-mark`,
+        });
+
+      // A backup and a clean-up of the stopped application change nothing.
+      await goodBackup(await stackOf(stack.id));
+      await operation("stack.prune", "succeeded");
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(failed.backup.id);
+
+      // A start takes them as they are from the moment it is asked; a later safety backup copies whole data.
+      await operation("stack.start", "queued");
+      expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
+      await db().update(operations).set({ status: "succeeded" }).where(eq(operations.idempotencyKey, "sb-stack.start-mark"));
+      expect((await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id })).backup.incompleteData).toBe(false);
     });
 
     it("accepts a partial backup: one good copy is enough", async () => {

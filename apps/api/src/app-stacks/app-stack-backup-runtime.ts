@@ -19,6 +19,7 @@ import {
   failRunningAppStackBackupCopies,
   getAppStack,
   getAppStackBackupByOperation,
+  getAppStackIncompleteDataMark,
   getAppStackRestoreSource,
   isNull,
   listAppStackBackupCopies,
@@ -537,7 +538,8 @@ export class AppStackBackupRuntime {
       .from(appStacks)
       .where(and(eq(appStacks.id, stackId), isNull(appStacks.deletedAt)));
     const retentionDays = await appStackBackupRetentionDays(db);
-    const expired = expiredAppStackBackups(backups, copies, new Date(clock.now()), retentionDays, live !== undefined);
+    const incomplete = (await getAppStackIncompleteDataMark(db, stackId)) !== null;
+    const expired = expiredAppStackBackups(backups, copies, new Date(clock.now()), retentionDays, live !== undefined, incomplete);
     if (expired.length === 0) return true;
 
     const withoutSnapshot: string[] = [];

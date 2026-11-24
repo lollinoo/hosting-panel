@@ -209,24 +209,8 @@ export async function enqueueAppStackBackupTransactional(
       throw new AppStackBackupRepositoryError("NO_DESTINATION", "No backup destination is configured on this server.");
     }
 
-    // The safety backup copies incomplete data when a restore that failed left the application stopped with them, and
-    // nothing but backups and clean-ups ran on it since (ADR-0038 K5).
-    let incompleteData = false;
-    if (source && stack.status === "stopped") {
-      const [last] = await tx
-        .select({ id: operations.id, kind: operations.kind })
-        .from(operations)
-        .where(and(eq(operations.lockKey, lockKey), notInArray(operations.kind, ["stack.backup", "stack.prune"])))
-        .orderBy(desc(operations.submittedAt), desc(operations.id))
-        .limit(1);
-      if (last?.kind === "stack.restore") {
-        const [previous] = await tx
-          .select({ leftIncomplete: appStackBackups.leftIncomplete })
-          .from(appStackBackups)
-          .where(eq(appStackBackups.operationId, last.id));
-        incompleteData = previous?.leftIncomplete ?? false;
-      }
-    }
+    // The safety backup copies incomplete data while a restore that failed has left them so (ADR-0038 K5).
+    const incompleteData = source !== null && (await getAppStackIncompleteDataMark(tx, stack.id)) !== null;
 
     const backupId = newAppEntityId("sbak");
     const { operation } = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
@@ -467,6 +451,28 @@ export async function settleAppStackRestore(
       .where(and(eq(appStackBackups.operationId, input.operationId), eq(appStackBackups.kind, "pre_restore")));
   }
   return true;
+}
+
+/**
+ * The safety backup of the restore that left an application's data half written, while they still are (ADR-0038 K5):
+ * that restore is the newest operation asked of the application that is not a backup or a clean-up, and its safety
+ * backup says it left them so. Anything else asked since, a start above all, takes the data as they are. Null while
+ * the data are whole. The one test of "the data are half written now": the mark on a new safety backup, the retention
+ * rule and the page all ask it.
+ */
+export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackId: string): Promise<AppStackBackupRow | null> {
+  const [last] = await db
+    .select({ id: operations.id, kind: operations.kind })
+    .from(operations)
+    .where(and(eq(operations.lockKey, appStackLockKey(stackId)), notInArray(operations.kind, ["stack.backup", "stack.prune"])))
+    .orderBy(desc(operations.submittedAt), desc(operations.id))
+    .limit(1);
+  if (last?.kind !== "stack.restore") return null;
+  const [safety] = await db
+    .select()
+    .from(appStackBackups)
+    .where(and(eq(appStackBackups.operationId, last.id), eq(appStackBackups.kind, "pre_restore"), eq(appStackBackups.leftIncomplete, true)));
+  return safety ?? null;
 }
 
 /** The backup a restore operation reads. */

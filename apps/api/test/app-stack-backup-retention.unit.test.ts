@@ -28,7 +28,8 @@ interface Spec {
   readonly leftIncomplete?: boolean;
 }
 
-function expired(specs: readonly Spec[], live = true): string[] {
+/** `incomplete`: the application's data are half written now (getAppStackIncompleteDataMark found a restore). */
+function expired(specs: readonly Spec[], live = true, incomplete = false): string[] {
   const backups = specs.map(
     (s, n) =>
       ({
@@ -46,7 +47,7 @@ function expired(specs: readonly Spec[], live = true): string[] {
       return [s.id, Array.from({ length: good }, () => ({ snapshotId: SNAP }) as AppStackBackupCopyRow)];
     }),
   );
-  return expiredAppStackBackups(backups, copies, NOW, DAYS, live).sort();
+  return expiredAppStackBackups(backups, copies, NOW, DAYS, live, incomplete).sort();
 }
 const many = (count: number, over: Omit<Spec, "id" | "age">, prefix: string, age = 1): Spec[] =>
   Array.from({ length: count }, (_, n) => ({ id: `${prefix}${String(n + 1)}`, age, ...over }));
@@ -107,21 +108,23 @@ describe("retention of application backups", () => {
     expect(expired(rows, false)).toEqual(["f_old", "half_old", "m_old", "p_old"]);
   });
 
-  it("while the last restore left the data half written, the newest safety backup of whole data stays past the count", () => {
+  it("while the data are half written, the newest safety backup of whole data stays past the count", () => {
     const broken = many(APP_STACK_PRE_RESTORE_BACKUPS_KEPT, { kind: "pre_restore", incompleteData: true, leftIncomplete: true }, "p");
     const older = [
       { id: "p_whole", kind: "pre_restore", age: 2, leftIncomplete: true },
       { id: "p_older", kind: "pre_restore", age: 3 },
     ] as const;
-    expect(expired([...broken, ...older])).toEqual(["p_older"]);
+    expect(expired([...broken, ...older], true, true)).toEqual(["p_older"]);
     // Once a restore leaves the data whole again, the count applies to it like to any other.
-    expect(expired([{ id: "p_back", kind: "pre_restore", age: 0, incompleteData: true }, ...broken, ...older])).toEqual([
+    expect(expired([{ id: "p_back", kind: "pre_restore", age: 0, incompleteData: true }, ...broken, ...older], true, false)).toEqual([
       "p3",
       "p_older",
       "p_whole",
     ]);
+    // So it does once the application was started with its data as they are, whatever the newest safety backup says.
+    expect(expired([...broken, ...older], true, false)).toEqual(["p_older", "p_whole"]);
     // A deleted application has nothing to go back to: its backups go with the retention period.
-    expect(expired([...broken, ...older].map((s) => ({ ...s, age: s.age + DAYS + 1 })), false)).toEqual([
+    expect(expired([...broken, ...older].map((s) => ({ ...s, age: s.age + DAYS + 1 })), false, true)).toEqual([
       "p1",
       "p2",
       "p3",

@@ -49,11 +49,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  appStackBackupToGoBackTo,
-  enqueueAppStackPrune,
-  listAppStackPruneCandidates,
-} from "../src/app-stacks/app-stack-backup-retention.js";
+import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../src/app-stacks/app-stack-backup-retention.js";
 import {
   APP_STACK_BACKUP_FAILED_TEXT,
   APP_STACK_BACKUP_POLL_GIVE_UP_MS,
@@ -61,6 +57,7 @@ import {
   APP_STACK_BACKUP_STEP_DONE_TEXT,
   APP_STACK_BACKUP_STEP_NOT_NEEDED_TEXT,
 } from "../src/app-stacks/app-stack-backup-runtime.js";
+import { AppStackBackupsService } from "../src/app-stacks/app-stack-backups.service.js";
 import { AppStackRuntime } from "../src/app-stacks/app-stack-runtime.js";
 import {
   APP_STACK_FAILURE,
@@ -330,6 +327,32 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
     }
     return ids;
   }
+
+  /**
+   * `count` restores that fail while writing, one hour apart before START: the first from `sourceId`, the next ones
+   * from the first safety backup, as the page advises. Returns the safety backups, oldest first.
+   */
+  async function failedRestores(stackId: string, sourceId: string, count: number): Promise<string[]> {
+    const safety: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const { operation: op, backup } = await request(stackId, "stack.restore", i === 0 ? sourceId : safety[0]!);
+      await db()
+        .update(appStackBackups)
+        .set({ startedAt: new Date(START - (count - i) * HOUR) })
+        .where(eq(appStackBackups.id, backup.id));
+      before = (req) => {
+        if (req.action === "stackRestore") sim.failNext("no_space");
+      };
+      expectFailed(await apply(op), "INTERNAL_ERROR", "stack.restore");
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      safety.push(backup.id);
+    }
+    before = null;
+    return safety;
+  }
+
+  /** What the Backup section of the application's page reads. */
+  const page = async (stackId: string) => new AppStackBackupsService(dbClient, config, fake).list(await stackOf(stackId));
 
   /** The nightly request for one application. */
   async function prune(stackId: string): Promise<OperationRow> {
@@ -911,22 +934,8 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
 
     it("restores that keep failing while writing never let the safety backup of the original data go", async () => {
       const { stackId, source } = await withBackup();
-      const safety: string[] = [];
-      for (let i = 0; i < 4; i += 1) {
-        // After the first failure the customer goes back to the safety backup of the original data.
-        const { operation: op, backup } = await request(stackId, "stack.restore", i === 0 ? source.id : safety[0]!);
-        await db()
-          .update(appStackBackups)
-          .set({ startedAt: new Date(START - (4 - i) * HOUR) })
-          .where(eq(appStackBackups.id, backup.id));
-        before = (req) => {
-          if (req.action === "stackRestore") sim.failNext("no_space");
-        };
-        expectFailed(await apply(op), "INTERNAL_ERROR", "stack.restore");
-        expect((await stackOf(stackId)).status).toBe("stopped");
-        safety.push(backup.id);
-      }
-      before = null;
+      // After the first failure the customer goes back to the safety backup of the original data.
+      const safety = await failedRestores(stackId, source.id, 4);
 
       expect(await apply(await prune(stackId))).toBeUndefined();
 
@@ -935,15 +944,33 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       // Only the first one copied whole data; every one of them left the data half written.
       expect(await backupOf(safety[0]!)).toMatchObject({ incompleteData: false, leftIncomplete: true });
       for (const id of safety.slice(1)) expect(await backupOf(id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
-      expect(appStackBackupToGoBackTo(await listAppStackBackupsForRetention(db(), stackId))?.id).toBe(safety[0]);
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
 
       // Going back succeeds: the data are whole again, and the rule lets the oldest safety backup go.
       const { operation: back, backup: last } = await request(stackId, "stack.restore", safety[0]!);
       expect(await apply(back)).toBeUndefined();
       expect(await backupOf(last.id)).toMatchObject({ incompleteData: true, leftIncomplete: false });
-      expect(appStackBackupToGoBackTo(await listAppStackBackupsForRetention(db(), stackId))).toBeNull();
+      expect((await page(stackId)).goBackTo).toBeNull();
       expect(await apply(await prune(stackId))).toBeUndefined();
       expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).not.toContain(safety[0]);
+    });
+
+    it("a start after a restore that failed while writing takes the data as they are: weeks later nothing points back to before", async () => {
+      const { stackId, source } = await withBackup();
+      const safety = await failedRestores(stackId, source.id, 4);
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
+
+      // The customer starts the application with its data as they are, and it runs for weeks.
+      await lifecycle(stackId, "stack.start");
+      clock.advance(21 * DAY);
+      expect((await page(stackId)).goBackTo).toBeNull();
+
+      // The safety backup of the data before the failed restore counts like any other: the fourth newest goes.
+      expect(await listAppStackPruneCandidates(db(), new Date(clock.now()))).toContain(stackId);
+      expect(await apply(await prune(stackId))).toBeUndefined();
+      const kept = (await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id);
+      expect(kept).not.toContain(safety[0]);
+      expect(kept).toEqual(expect.arrayContaining(safety.slice(1)));
     });
 
     it("data a failed restore left are whole again once the application ran, and stay half written after a restore refused before writing", async () => {

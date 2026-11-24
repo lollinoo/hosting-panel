@@ -7,6 +7,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   enqueueOperationTransactional,
+  getAppStackIncompleteDataMark,
   getPolicy,
   listAppStackBackupCopies,
   listAppStackBackupRetentionScopes,
@@ -26,18 +27,19 @@ const newestFirst = (a: AppStackBackupRow, b: AppStackBackupRow): number =>
   b.startedAt.getTime() - a.startedAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
 /**
- * While the last restore of an application left its data half written (its safety backup says so), the newest good
- * safety backup of whole data: the one the page tells the customer to restore. Null otherwise (ADR-0038 K5).
+ * While the application's data are half written (`dataIncomplete`: getAppStackIncompleteDataMark found the restore that
+ * left them so, and nothing else was asked of the application since), the newest good safety backup of whole data: the
+ * one the page tells the customer to restore. Null otherwise (ADR-0038 K5).
  */
-export function appStackBackupToGoBackTo(backups: readonly AppStackBackupRow[]): AppStackBackupRow | null {
+export function appStackBackupToGoBackTo(backups: readonly AppStackBackupRow[], dataIncomplete: boolean): AppStackBackupRow | null {
+  if (!dataIncomplete) return null;
   const safety = backups.filter((b) => b.kind === "pre_restore").sort(newestFirst);
-  if (!safety[0]?.leftIncomplete) return null;
   return safety.find((b) => !b.incompleteData && (b.status === "succeeded" || b.status === "partial")) ?? null;
 }
 
 /**
  * The backups of one application that the retention rule lets go. While the data of a live application are half
- * written, the safety backup to go back to stays whatever the count of newer ones (ADR-0038 K7).
+ * written (`dataIncomplete`), the safety backup to go back to stays whatever the count of newer ones (ADR-0038 K7).
  */
 export function expiredAppStackBackups(
   backups: readonly AppStackBackupRow[],
@@ -45,6 +47,7 @@ export function expiredAppStackBackups(
   now: Date,
   retentionDays: number,
   live: boolean,
+  dataIncomplete: boolean,
 ): string[] {
   const rows: RetentionRow[] = backups.map((b) => ({
     id: b.id,
@@ -55,7 +58,7 @@ export function expiredAppStackBackups(
     startedAt: b.startedAt,
   }));
   const { forget, drop } = selectExpired(rows, now, retentionDays, live);
-  const kept = live ? appStackBackupToGoBackTo(backups)?.id : undefined;
+  const kept = live ? appStackBackupToGoBackTo(backups, dataIncomplete)?.id : undefined;
   return [...forget, ...drop].map((row) => row.id).filter((id) => id !== kept);
 }
 
@@ -77,7 +80,10 @@ export async function listAppStackPruneCandidates(db: DatabaseExecutor, now: Dat
       backups.map((b) => b.id),
     );
     const open = backups.some((b) => b.status === "running" || b.restoreStatus === "running");
-    if (open || expiredAppStackBackups(backups, copies, now, retentionDays, scope.live).length > 0) candidates.push(scope.stackId);
+    const incomplete = (await getAppStackIncompleteDataMark(db, scope.stackId)) !== null;
+    if (open || expiredAppStackBackups(backups, copies, now, retentionDays, scope.live, incomplete).length > 0) {
+      candidates.push(scope.stackId);
+    }
   }
   return candidates;
 }

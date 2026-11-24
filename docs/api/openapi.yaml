@@ -13838,8 +13838,8 @@ components:
         incompleteData:
           type: boolean
           description: >-
-            A `pre_restore` backup taken while a restore that failed had left the application stopped with its data
-            half written (nothing but backups ran on it since); always `false` for a `manual` backup
+            A `pre_restore` backup taken while the application's data were half written (see `goBackTo`); always
+            `false` for a `manual` backup
 
     AppStackBackupsDto:
       type: object
@@ -13860,9 +13860,10 @@ components:
             - $ref: "#/components/schemas/AppEntityId"
           nullable: true
           description: >-
-            While the last restore of the application left its data half written: the newest good `pre_restore` backup
-            of whole data, the one to restore to go back (the nightly clean-up never removes it meanwhile); `null`
-            otherwise
+            While the application's data are half written, that is while the newest action asked of it other than a
+            backup or a clean-up is a restore that left them so: the newest good `pre_restore` backup of whole data,
+            the one to restore to go back (the nightly clean-up never removes it meanwhile). `null` otherwise, and
+            from the moment any other action, a start above all, is asked: it takes the data as they are
 
     AppStackDomainDto:
       type: object

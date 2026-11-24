@@ -7,6 +7,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   enqueueAppStackBackupTransactional,
+  getAppStackIncompleteDataMark,
   listAppStackBackupCopies,
   listAppStackBackups,
   listAppStackVolumes,
@@ -49,7 +50,11 @@ export class AppStackBackupsService {
   public async list(stack: AppStackRow): Promise<AppStackBackupsDto> {
     const db = this.dbClient.db;
     const scope = { organizationId: stack.organizationId, stackId: stack.id };
-    const [rows, volumes] = await Promise.all([listAppStackBackups(db, scope), listAppStackVolumes(db, scope)]);
+    const [rows, volumes, incomplete] = await Promise.all([
+      listAppStackBackups(db, scope),
+      listAppStackVolumes(db, scope),
+      getAppStackIncompleteDataMark(db, stack.id),
+    ]);
     const copies = await listAppStackBackupCopies(
       db,
       rows.map((row) => row.id),
@@ -58,7 +63,7 @@ export class AppStackBackupsService {
     return {
       backups: rows.map((row) => appStackBackupDto(row, copies.get(row.id) ?? [], present)),
       unavailableReason: await this.#unavailableReason(present.size),
-      goBackTo: appStackBackupToGoBackTo(rows)?.id ?? null,
+      goBackTo: appStackBackupToGoBackTo(rows, incomplete !== null)?.id ?? null,
     };
   }
 
