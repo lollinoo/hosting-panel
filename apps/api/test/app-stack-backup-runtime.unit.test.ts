@@ -483,6 +483,15 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(fake.stack(stackId).routes).toHaveLength(1);
     });
 
+    it("the stop names the applied plan's components in plan order, so a database goes down after what uses it (#100)", async () => {
+      const { stackId } = await running();
+      const { operation: op } = await request(stackId);
+
+      expect(await apply(op)).toBeUndefined();
+
+      expect(fake.calls.find((c) => c.method === "stopAppStack")?.request).toEqual({ stackId, organizationId: ORG, order: ["web"] });
+    });
+
     it("a stopped application stays stopped: nothing is withdrawn, stopped or queued", async () => {
       const { stackId } = await stopped();
       const { operation: op, backup, stack } = await request(stackId);
@@ -763,6 +772,15 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await stepsOf(op.id)).toEqual(done("stack.restore"));
       await resume(op.id);
       expect((await stackOf(stackId)).status).toBe("running");
+    });
+
+    it("stops the application in the applied plan's order too (#100)", async () => {
+      const { stackId, source } = await withBackup();
+      const { operation: op } = await request(stackId, "stack.restore", source.id);
+
+      expect(await apply(op)).toBeUndefined();
+
+      expect(fake.calls.find((c) => c.method === "stopAppStack")?.request).toEqual({ stackId, organizationId: ORG, order: ["web"] });
     });
 
     it("a stopped application is restored and stays stopped", async () => {

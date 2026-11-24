@@ -1256,6 +1256,66 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await opOf(queued!.operation.id)).status).toBe("failed");
     });
 
+    describe("the order the executor stops and removes in (#100)", () => {
+      const requestOf = (method: string) => fake.calls.find((c) => c.method === method)?.request as Record<string, unknown>;
+
+      it("a stop and a delete tell it the applied plan's components in plan order", async () => {
+        const { stackId } = await running();
+        const ref = { stackId, organizationId: ORG };
+        const order = ["cache", "web"];
+
+        expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).toEqual({ ...ref, order });
+        expect(requestOf("unpublishAppStackRoutes")).toEqual(ref);
+
+        fake.calls.length = 0;
+        const gone = await running();
+        const goneRef = { stackId: gone.stackId, organizationId: ORG };
+        expect(await run(await enqueue(gone.stackId, "stack.delete"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).toEqual({ ...goneRef, order });
+        expect(requestOf("removeAppStack")).toEqual({ ...goneRef, removeVolumes: false, order });
+        expect(requestOf("unpublishAppStackRoutes")).toEqual(goneRef);
+      });
+
+      it("an application whose first deploy never applied a revision is stopped and deleted without one", async () => {
+        const { stackId, write } = await create([CACHE, WEB]);
+        fake.failNext("createAppStackComponents", "definite");
+        expect((await run(write)) as ControlPlaneError).toBeInstanceOf(ControlPlaneError);
+        expect(await stackOf(stackId)).toMatchObject({ appliedRevisionId: null });
+        fake.calls.length = 0;
+
+        expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).toEqual({ stackId, organizationId: ORG });
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+
+        fake.calls.length = 0;
+        expect(await run(await enqueue(stackId, "stack.delete"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+        expect(requestOf("removeAppStack")).not.toHaveProperty("order");
+        expect(requestOf("removeAppStack")).toMatchObject({ removeVolumes: false });
+      });
+
+      it("an applied revision whose plan no longer checks is stopped and deleted without one, as before", async () => {
+        const { stackId, rev } = await running();
+        const other = await running();
+        // Revisions are immutable: only this test can give one a hash its plan does not have.
+        await db().execute(sql`ALTER TABLE app_stack_revisions DISABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+        await db().update(appStackRevisions).set({ planHash: hex("not the plan") }).where(eq(appStackRevisions.id, rev.revisionId));
+        await db().update(appStackRevisions).set({ planHash: hex("not the plan") }).where(eq(appStackRevisions.id, other.rev.revisionId));
+        await db().execute(sql`ALTER TABLE app_stack_revisions ENABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+
+        expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+        expect((await stackOf(stackId)).status).toBe("stopped");
+
+        fake.calls.length = 0;
+        expect(await run(await enqueue(other.stackId, "stack.delete"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+        expect(requestOf("removeAppStack")).not.toHaveProperty("order");
+        expect((await stackOf(other.stackId)).status).toBe("deleted");
+      });
+    });
+
     it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {
       const { stackId } = await running();
       fake.failNext("stopAppStack", "definite");

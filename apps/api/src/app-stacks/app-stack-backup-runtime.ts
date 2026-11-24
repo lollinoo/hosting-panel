@@ -52,7 +52,7 @@ import {
 } from "../runtime/recovery-read-bound.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { appStackBackupRetentionDays, expiredAppStackBackups } from "./app-stack-backup-retention.js";
-import type { AppStackRuntimeDeps } from "./app-stack-runtime.js";
+import { appStackStopOrder, readAppStackPlan, type AppStackRuntimeDeps } from "./app-stack-runtime.js";
 import {
   APP_STACK_FAILURE,
   APP_STACK_STEP_FAILED_TEXT,
@@ -422,7 +422,7 @@ export class AppStackBackupRuntime {
     const { db } = this.#deps;
     const { op, kind } = ctx;
     const scope = { organizationId: op.organizationId, stackId: op.resourceId };
-    const { backup, source, port, wasStopped } = await this.#step(ctx, "validate", async () => {
+    const { backup, source, port, wasStopped, order } = await this.#step(ctx, "validate", async () => {
       const row = await getAppStackBackupByOperation(db, op.id);
       st.backup = row;
       const from = kind === "stack.restore" ? await getAppStackRestoreSource(db, op.id) : null;
@@ -431,7 +431,9 @@ export class AppStackBackupRuntime {
       if (stack.status !== "stopping" && stack.status !== "stopped") throw new BackupStepFailure("site_busy");
       const executor = this.#port();
       if (!executor) throw new BackupStepFailure("tool_unavailable", "NOT_SUPPORTED");
-      return { backup: row, source: from, port: executor, wasStopped: stack.status === "stopped" };
+      // The applied plan's order, so a database goes down after what uses it even when an upgrade shifted positions.
+      const applied = stack.status === "stopped" ? null : await readAppStackPlan(db, scope, stack.appliedRevisionId);
+      return { backup: row, source: from, port: executor, wasStopped: stack.status === "stopped", order: appStackStopOrder(applied) };
     });
 
     if (wasStopped) {
@@ -445,7 +447,7 @@ export class AppStackBackupRuntime {
         st.unpublished = true;
       });
       await this.#step(ctx, "stop", async () => {
-        await port.stopAppStack(scope);
+        await port.stopAppStack({ ...scope, ...order });
         await db.transaction((tx) => settleAppStackBackupStopTransactional(tx, { ...scope, to: "stopped", routesWithdrawn: true }));
       });
     }

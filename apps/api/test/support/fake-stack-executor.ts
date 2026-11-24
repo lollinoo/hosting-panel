@@ -25,6 +25,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ErrorCode,
 } from "@hosting-panel/contracts";
@@ -199,7 +200,7 @@ export class FakeStackExecutor implements StackExecutorPort {
     return this.#call("restartAppStackComponent", req, () => this.#start(req, true), req.componentKey);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.#call("stopAppStack", req, () => ({
       components: [...this.stack(req.stackId).components.entries()].reverse().map(([componentKey, c]) => {
         const running = c.state === "running" || c.state === "restarting";
