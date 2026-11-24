@@ -23,7 +23,7 @@ import {
   upsertBackupSettings,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -554,6 +554,33 @@ describe("admin backup targets API", () => {
       expect(res.status).toBe(200);
       expect(res.body.data.local.initializedAt).toBeNull();
       expect(res.body.data.lastTest).toMatchObject({ outcome: "failed", problem: "local_target_unmounted" });
+    });
+
+    // A lost connection, and an answer that cannot be read after the request was sent (#182).
+    it.each([
+      ["a lost connection", () => Object.assign(new Error("socket closed"), { code: "OPERATION_AMBIGUOUS", ambiguousOutcome: true })],
+      [
+        "an unreadable answer",
+        () =>
+          new ExecutorIpcClientError(
+            "Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON",
+            "OPERATION_AMBIGUOUS",
+            502,
+            true,
+          ),
+      ],
+    ])("answers an unknown outcome after %s, asks once and records neither a test nor the marker", async (_, lost) => {
+      const local = (await create({ kind: "local", name: "L" })).body.data as Json;
+      const auditsBefore = (await auditsOf("admin.backup_target.initialize")).length;
+      initAnswer = () => {
+        throw lost();
+      };
+      const res = await admin("POST", `${BASE}/${local.id}/initialize`, { body: {} });
+      expect([res.status, res.body.error.code]).toEqual([502, "OPERATION_AMBIGUOUS"]);
+      expect(calls).toEqual([{ action: "localInit", target: { kind: "local", targetId: local.id } }]);
+      const after = (await admin("GET", BASE)).body.data.targets.find((x: Json) => x.id === local.id);
+      expect([after.local.initializedAt, after.lastTest]).toEqual([null, null]);
+      expect(await auditsOf("admin.backup_target.initialize")).toHaveLength(auditsBefore);
     });
 
     it("refuses an S3 target, an archived local target, a body and an unknown id", async () => {
