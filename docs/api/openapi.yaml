@@ -14956,6 +14956,9 @@ components:
                     nullable: true
             volumes:
               type: array
+              description: >-
+                A volume that was never created (`pending`) is listed only when the version that runs has it: an upgrade
+                that was taken back leaves its row, which a later attempt reuses, but the page does not show it.
               items:
                 type: object
                 required: [key, status, retentionPolicy]

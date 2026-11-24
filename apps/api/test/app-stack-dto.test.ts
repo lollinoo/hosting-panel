@@ -16,6 +16,7 @@ import type {
   AppStackDomainRow,
   AppStackRevisionRow,
   AppStackRow,
+  AppStackVolumeRow,
   AppStackWriteResult,
 } from "@hosting-panel/database";
 import { compileAppStackPlan, validateAppTemplateSource } from "@hosting-panel/policy-engine";
@@ -346,6 +347,43 @@ describe("appStackDetailDto", () => {
     expect(of(withIngress([app]), withIngress([app, cache]))).toMatchObject({ ingress: [app], pathTargets: [app] });
     expect(appStackDetailDto(deployed([])).pathTargets).toEqual(PLAN.ingress);
     expect(appStackDetailDto(detailInput())).toMatchObject({ ingress: [app], pathTargets: [app] });
+  });
+
+  describe("the volumes it lists (#111)", () => {
+    const volume = (volumeKey: string, status: AppStackVolumeRow["status"]): AppStackVolumeRow => ({
+      stackId: STACK,
+      organizationId: ORG,
+      volumeKey,
+      retentionPolicy: "retain",
+      status,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const keys = (input: Parameters<typeof appStackDetailDto>[0]) => appStackDetailDto(input).volumes.map((v) => [v.key, v.status]);
+    // The revision that runs has `data`; an upgrade that was taken back asked for `cache` too, and its row stayed.
+    const appliedWithData: ApprovedStackPlan = { ...PLAN, volumes: [{ key: "data" }] };
+
+    it("does not list a volume that was never created: its row is pending and the revision that runs does not have it", () => {
+      expect(keys(deployed([], { appliedPlan: appliedWithData, volumes: [volume("cache", "pending"), volume("data", "present")] }))).toEqual([["data", "present"]]);
+    });
+
+    it("lists a pending volume the revision that runs has, and every volume that is not pending", () => {
+      expect(keys(deployed([], { appliedPlan: appliedWithData, volumes: [volume("data", "pending")] }))).toEqual([["data", "pending"]]);
+      for (const status of ["present", "missing", "retained", "removed"] as const) {
+        expect(keys(deployed([], { appliedPlan: { ...PLAN, volumes: [] }, volumes: [volume("old", status)] })), status).toEqual([["old", status]]);
+      }
+    });
+
+    it("lists none of the volumes of an application whose revision was never applied while they are all pending", () => {
+      expect(keys(detailInput({ appliedPlan: null, volumes: [volume("data", "pending")] }))).toEqual([]);
+      expect(keys(detailInput({ appliedPlan: null, volumes: [volume("data", "present")] }))).toEqual([["data", "present"]]);
+    });
+
+    it("reads the plan that runs from the desired revision when that is the one applied", () => {
+      const applied = { ...PLAN, volumes: [{ key: "data" }] };
+      const input = deployed([], { desired: { revision, plan: applied }, appliedPlan: null, volumes: [volume("data", "pending"), volume("cache", "pending")] });
+      expect(keys(input)).toEqual([["data", "pending"]]);
+    });
   });
 
   it("passes volumes, the active operation, the platform's work, upgrade and rollback through", () => {
