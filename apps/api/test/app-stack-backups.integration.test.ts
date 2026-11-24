@@ -26,7 +26,6 @@ import {
   setPolicyTargets,
   users,
 } from "@hosting-panel/database";
-import { ExecutorIpcClientError } from "@hosting-panel/docker-executor";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { enqueueAppStackPrune } from "../src/app-stacks/app-stack-backup-retention.js";
 import { BackupSchedulerService, ensurePlatformOpsOrg } from "../src/backups/backup-scheduler.service.js";
@@ -35,6 +34,22 @@ import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness, type Ha
 
 // ADR-0038 through HTTP, on the backend where backups exist: the three routes, the real worker and the executor
 // simulator. What each step of the worker does is in app-stack-backup-runtime.unit.test.ts.
+
+/** The next `failures` renewals of an operation's lease throw, as a lost database connection would. */
+const lease = vi.hoisted(() => ({ failures: 0 }));
+vi.mock("@hosting-panel/database", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@hosting-panel/database")>();
+  return {
+    ...actual,
+    renewOperationLease: async (...args: Parameters<typeof actual.renewOperationLease>) => {
+      if (lease.failures > 0) {
+        lease.failures -= 1;
+        throw new Error("connection terminated");
+      }
+      return actual.renewOperationLease(...args);
+    },
+  };
+});
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Reply = Awaited<ReturnType<AppStackHarness["call"]>>;
@@ -304,7 +319,7 @@ describe("application backups HTTP API (ADR-0038)", () => {
     expect(Object.keys(audit!.details as Json).sort()).toEqual(["backupId", "operationId", "outcome", "requestId", "sourceBackupId", "status"]);
   });
 
-  it("a restore whose answer is lost holds the application until its job's end is read: no start in the panel or in the executor", async () => {
+  it("a restore whose lease renewal fails while its job writes holds the application until the job's end is read: no start in the panel or in the executor", async () => {
     const starts = vi.spyOn(h.sim.appStacks, "startAppStackComponent");
     const stackId = await running("in-sospeso");
     const startReq = starts.mock.calls.map(([req]) => req).find((req) => req.plan.stackId === stackId)!;
@@ -314,13 +329,15 @@ describe("application backups HTTP API (ADR-0038)", () => {
     const runningNow = () => Object.values(h.sim.appStacks.getAppStackSnapshot(stackId)?.containers ?? {}).filter((c) => c.state === "running");
     const worker = h.app.nestApp.get(OutboxWorkerService);
 
-    // The executor accepts the write-back and goes on writing; its answer never reaches the panel.
+    // The executor accepts the write-back and goes on writing; the next renewal of the lease, while the worker follows
+    // the job, meets a lost database connection.
     const real = h.sim.backups;
     h.sim.backups = (async (req: Parameters<typeof real>[0]) => {
       if (req.action !== "stackRestore") return real.call(h.sim, req);
       h.sim.backupState.holdJobs();
-      await real.call(h.sim, req);
-      throw new ExecutorIpcClientError("no answer", "OPERATION_AMBIGUOUS", 502, true);
+      const started = await real.call(h.sim, req);
+      lease.failures = 1;
+      return started;
     }) as typeof real;
     try {
       const res = await restore(stackId, backupId, "in-sospeso");
@@ -348,7 +365,9 @@ describe("application backups HTTP API (ADR-0038)", () => {
       expect(writes).toHaveLength(1);
       const source = ((await list(stackId)).body.data.backups as Json[]).find((b) => b.id === backupId)!;
       expect(source.restore).toMatchObject({ status: "succeeded", problem: null });
+      expect(lease.failures).toBe(0);
     } finally {
+      lease.failures = 0;
       h.sim.backups = real;
       h.sim.backupState.finishHeld();
     }
