@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_COMPONENT_ROLE,
   APP_STACK_LABELS,
+  APP_STACK_TASK_KILL_PASSES,
   APP_STACK_TASK_KILL_SCRIPT,
   APP_STACK_TASK_MARK,
   APP_STACK_TASK_READ_TIMEOUT_MS,
@@ -148,10 +149,23 @@ describe("the clean-up script of tasks", () => {
     for (const program of ["ps ", "pkill", "pgrep", "grep", "awk", "sed ", "cut ", "xargs", "cat ", "tr "]) {
       expect(APP_STACK_TASK_KILL_SCRIPT, program).not.toContain(program);
     }
-    // Every kill is guarded by "the pid is above 1"; the script always ends with code 0.
-    expect(APP_STACK_TASK_KILL_SCRIPT.match(/kill -KILL/g)).toHaveLength(2);
-    expect(APP_STACK_TASK_KILL_SCRIPT.match(/\[ "\$\{p#\/proc\/\}" -gt 1 \]/g)).toHaveLength(2);
-    expect(APP_STACK_TASK_KILL_SCRIPT.endsWith("exit 0")).toBe(true);
+    // One kill, guarded by "the pid is above 1"; the scan of the sessions never looks at pid 1 either.
+    expect(APP_STACK_TASK_KILL_SCRIPT.match(/kill -KILL/g)).toHaveLength(1);
+    expect(APP_STACK_TASK_KILL_SCRIPT).toContain('hit() { [ "$1" -gt 1 ] || return 0; kill -KILL "$1" 2>/dev/null;');
+    expect(APP_STACK_TASK_KILL_SCRIPT).toContain('[ "${p#/proc/}" -gt 1 ] || continue;');
+    expect(APP_STACK_TASK_KILL_SCRIPT.match(/hit "\$\{p#\/proc\/\}"/g)).toHaveLength(2);
+  });
+
+  it("repeats its pass until one finds no process it had not killed yet, and fails when the last one still does", () => {
+    // A process forked while a pass ran is found by the next one; one already killed but not gone yet does not count.
+    expect(APP_STACK_TASK_KILL_SCRIPT).toContain('case "$k" in *" $1 "*) ;; *) k="$k$1 "; f=1;; esac;');
+    expect(APP_STACK_TASK_KILL_SCRIPT).toContain("pass() { f=0;");
+    expect(APP_STACK_TASK_KILL_SCRIPT).toContain(`n=0; while [ "$n" -lt ${String(APP_STACK_TASK_KILL_PASSES)} ]; do pass; [ "$f" = 0 ] && exit 0; n=$((n+1)); done; exit 1`);
+    expect(APP_STACK_TASK_KILL_PASSES).toBeGreaterThanOrEqual(3);
+    expect(APP_STACK_TASK_KILL_PASSES).toBeLessThanOrEqual(10);
+    // The one exit 0 is a pass that found nothing new; at the bound the clean-up did not finish (the retry path).
+    expect(APP_STACK_TASK_KILL_SCRIPT.match(/exit 0/g)).toHaveLength(1);
+    expect(APP_STACK_TASK_KILL_SCRIPT.endsWith("exit 1")).toBe(true);
   });
 });
 

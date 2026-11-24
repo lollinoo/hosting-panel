@@ -34,19 +34,25 @@ export const APP_STACK_TASK_CLEANUP_RETRY_MS = 5_000;
  */
 export const APP_STACK_TASK_ENGINE_ERROR_PREFIX = "OCI runtime exec failed";
 
+/** Passes of the clean-up script: it ends with a failure when its last pass still finds a process it had not killed. */
+export const APP_STACK_TASK_KILL_PASSES = 5;
+
 /**
  * Kills, in one container, every process whose environment carries the mark of a run ($1 = the run id; empty = any
  * run) and every process of their sessions; never pid 1. Only `/proc` and what a POSIX shell has built in, so it runs
  * in any image that has `/bin/sh`. It is tried before the command of a run: where it cannot run, no task starts.
+ * A pass can miss a process forked while it ran, so passes repeat until one finds no process it had not killed yet
+ * (one killed but not gone yet does not count); exit 1 when the last pass still found one: the clean-up did not finish.
  */
 export const APP_STACK_TASK_KILL_SCRIPT =
-  `m="${APP_STACK_TASK_MARK}=\${1:-srun_}"; s=" "; ` +
+  `m="${APP_STACK_TASK_MARK}=\${1:-srun_}"; s=" "; k=" "; ` +
   'marked() { while IFS= read -r x || [ -n "$x" ]; do case "$x" in *"$m"*) return 0;; esac; done 2>/dev/null <"$1/environ"; return 1; }; ' +
   'sid() { l=""; while IFS= read -r x || [ -n "$x" ]; do l=$x; done 2>/dev/null <"$1/stat"; l=${l##*) }; set -- $l; i=${4:-0}; }; ' +
-  'for p in /proc/[0-9]*; do marked "$p" || continue; sid "$p"; [ "$i" -gt 1 ] 2>/dev/null && s="$s$i "; ' +
-  '[ "${p#/proc/}" -gt 1 ] && kill -KILL "${p#/proc/}" 2>/dev/null; done; ' +
-  'for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] || continue; sid "$p"; ' +
-  'case "$s" in *" $i "*) kill -KILL "${p#/proc/}" 2>/dev/null;; esac; done; exit 0';
+  'hit() { [ "$1" -gt 1 ] || return 0; kill -KILL "$1" 2>/dev/null; case "$k" in *" $1 "*) ;; *) k="$k$1 "; f=1;; esac; }; ' +
+  'pass() { f=0; for p in /proc/[0-9]*; do marked "$p" || continue; sid "$p"; ' +
+  '[ "$i" -gt 1 ] 2>/dev/null && case "$s" in *" $i "*) ;; *) s="$s$i ";; esac; hit "${p#/proc/}"; done; ' +
+  'for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] || continue; sid "$p"; case "$s" in *" $i "*) hit "${p#/proc/}";; esac; done; }; ' +
+  `n=0; while [ "$n" -lt ${String(APP_STACK_TASK_KILL_PASSES)} ]; do pass; [ "$f" = 0 ] && exit 0; n=$((n+1)); done; exit 1`;
 
 export interface AppStackTaskLimits {
   /** Milliseconds in one second of a time limit (tests shorten it). */
