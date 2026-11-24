@@ -374,8 +374,9 @@ names only the key of a task, and the command is read from the template version 
 2. Nothing replaces a running container by itself. The update, a host reboot, **Avvia** and **Riavvia** leave every
    container as it is, with its old settings. Only the next **Reinstalla** (deploy), upgrade or return to a previous
    version of each application replaces its older containers, **once**: each one stops, is removed and is created
-   again, with the short interruption a replacement has. The volumes and the data in them stay. A later deploy with
-   nothing changed replaces nothing.
+   again, with the short interruption a replacement has. The application's volumes and the data in them stay; what a
+   container kept outside them is lost: the files it wrote in its own file system, and a folder its image declares
+   that the template does not mount (issue #98). A later deploy with nothing changed replaces nothing.
 3. The panel does not show which applications still run older containers. List the containers and their version
    (an empty version is a container built before the label existed):
    ```bash
