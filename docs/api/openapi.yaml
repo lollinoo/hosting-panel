@@ -1802,8 +1802,9 @@ paths:
         administrator with no support visit or a closed one, gets 404 with no audit row; a server administrator
         whose visit ran out gets 403 `PERMISSION_DENIED`; a member with the permission who is not a server
         administrator gets 403 `PERMISSION_DENIED`. `initialDomain` is normalised and checked as the
-        `domain` of `createManagedSite`: a name that is not a valid domain gets 400 `VALIDATION_ERROR`, and one
-        another site or a server already uses gets 409 `DOMAIN_CONFLICT`.
+        `domain` of `createManagedSite`: a name that is not a valid domain gets 400 `VALIDATION_ERROR`, one
+        another site, an application or a server already uses gets 409 `DOMAIN_CONFLICT`, and one a manual
+        certificate captures gets that route's 409 (`DOMAIN_CONFLICT` or `CERTIFICATE_IN_USE`).
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
@@ -1837,7 +1838,8 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: >-
-            `initialDomain` is already another site's or a server's name or address (`DOMAIN_CONFLICT`), a slug
+            `initialDomain` is already another site's, an application's or a server's name or address
+            (`DOMAIN_CONFLICT`) or a manual certificate captures it (`CERTIFICATE_IN_USE`), a slug
             conflict, or the customer's site limit is reached
             (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"

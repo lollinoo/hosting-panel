@@ -112,8 +112,7 @@ import {
 } from "../common/control-plane.error.js";
 import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
-import { assertNewSiteAddressesFree, shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
-import { siteLimitError } from "../sites/site-limit.js";
+import { assertNewSiteAddressesFree, newSiteError, shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -1052,7 +1051,8 @@ export class OrganizationsController {
       initialDomain: body.initialDomain,
       actorId: auth.user.id,
     }).catch((err: unknown) => {
-      throw siteLimitError(err);
+      // The typed route's answers: the site limit, an address an application took (the trigger), a manual certificate.
+      throw newSiteError(err);
     });
 
     const domainList: DomainDto[] = result.domain ? [mapDomainToDto(result.domain)] : [];

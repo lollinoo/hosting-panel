@@ -1,4 +1,9 @@
 import {
+  appStackComponents,
+  appStackDomains,
+  appStacks,
+  appTemplates,
+  appTemplateVersions,
   auditEvents,
   DEMO_IDS,
   domains,
@@ -211,6 +216,43 @@ describe("generic service routes and invitations are for the server administrato
       const res = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-taken", initialDomain });
       expect([initialDomain, res.status, res.body.error?.code, res.body.error?.message]).toEqual([initialDomain, 409, "DOMAIN_CONFLICT", TAKEN]);
     }
+    expect(await stored()).toEqual(before);
+  });
+
+  it("refuses an administrator's first domain that is an application's address with the typed route's 409, not a 500 (L43)", async () => {
+    const db = app.dbClient.db;
+    await db.insert(appTemplates).values({ id: "atpl_admin_only", slug: "admin-only-app", name: "App", category: "web" });
+    await db.insert(appTemplateVersions).values({
+      id: "atv_admin_only",
+      templateId: "atpl_admin_only",
+      versionNumber: 1,
+      source: "x",
+      specVersion: 1,
+      compiledSchema: {},
+      specHash: "a".repeat(64),
+    });
+    await db.insert(appStacks).values({
+      id: "stk_admin_only",
+      organizationId: ORG,
+      hostAllocationId: DEMO_IDS.allocations.acme,
+      templateId: "atpl_admin_only",
+      templateVersionId: "atv_admin_only",
+      name: "App",
+    });
+    await db.insert(appStackComponents).values({ stackId: "stk_admin_only", organizationId: ORG, componentKey: "web" });
+    await db.insert(appStackDomains).values({
+      id: "sdom_admin_only",
+      stackId: "stk_admin_only",
+      organizationId: ORG,
+      componentKey: "web",
+      internalPort: 8080,
+      hostname: "app.example.test",
+      status: "active",
+    });
+    const before = await stored();
+    // The database trigger refuses it (SQLSTATE 23505) after the check of other sites and the servers.
+    const res = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-app", initialDomain: "App.Example.TEST" });
+    expect([res.status, res.body.error?.code, res.body.error?.message]).toEqual([409, "DOMAIN_CONFLICT", TAKEN]);
     expect(await stored()).toEqual(before);
   });
 
