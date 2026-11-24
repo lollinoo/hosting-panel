@@ -58,7 +58,7 @@ Un'esecuzione finisce da sola oppure allo scadere del suo limite di tempo. Alla 
 
 Lo script ha bisogno di `/bin/sh` nell'immagine. Per questo l'esecutore **lo prova prima** di lanciare il comando: se non riesce, l'attività non parte e l'esecuzione lo dice («questo componente non può eseguire attività»). Un comando che il pannello non saprebbe fermare non viene lanciato.
 
-All'avvio l'esecutore fa la stessa pulizia, per qualunque esecuzione, in ogni container di applicazione in esecuzione che ha ancora un comando aperto: un'attività rimasta da una vita precedente dell'esecutore non sopravvive al suo riavvio.
+All'avvio l'esecutore fa la stessa pulizia, per qualunque esecuzione, in ogni container di componente in esecuzione, anche in quelli dove il motore non elenca più comandi aperti (il motore toglie un comando dall'elenco quando il comando finisce, e ciò che ha lasciato in fondo resta): un'attività rimasta da una vita precedente dell'esecutore non sopravvive al suo riavvio.
 
 ### A5 — L'esecutore controlla, non si fida
 
@@ -175,7 +175,7 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 - Di ciò che il comando stampa l'esecutore tiene gli ultimi 64 KiB mentre gira; poi maschera i segreti del componente e taglia a 200 righe e 16 KiB. Una riga spezzata dal taglio iniziale viene tolta.
 - L'esecutore ricorda le ultime 200 esecuzioni finite, in memoria. Dopo un suo riavvio non ne conosce nessuna.
 - Se la pulizia dopo un'esecuzione fallisce viene ritentata 5 volte a 5 secondi di distanza; poi l'esecutore scrive nel suo registro `app_task_cleanup_failed` con un codice e nient'altro. La pulizia all'inizio dell'esecuzione successiva e quella all'avvio dell'esecutore sono le altre due reti.
-- All'avvio l'esecutore fa la pulizia in ogni componente in esecuzione che ha ancora un comando aperto (`app_task_reap_failed` se non riesce). Un componente senza shell non ha mai eseguito attività e non è un errore.
+- All'avvio l'esecutore fa la pulizia in ogni componente in esecuzione, con o senza comandi aperti (`app_task_reap_failed` se non riesce). Un componente senza shell non ha mai eseguito attività e non è un errore.
 
 **API (`apps/api`).**
 
@@ -214,7 +214,7 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 - al limite di tempo (5 secondi) la risposta arriva dopo 5,2 secondi e nel componente non resta il comando; lo stesso per un comando lanciato da un altro programma (`timeout … sleep`) e per uno che lascia la sessione (`setsid sleep`): in quel caso l'esecuzione finisce come il comando e il processo rimasto viene chiuso subito;
 - una seconda attività nella stessa applicazione è rifiutata mentre la prima gira, un'altra applicazione no; la stessa esecuzione chiesta due volte non manda un secondo comando; un altro cliente legge «non conosciuta»;
 - sei container messi sotto il nome di un componente con etichette sbagliate sono rifiutati prima di qualunque comando, come il cliente sbagliato, il componente fermo e l'applicazione che non esiste;
-- un esecutore chiuso con `SIGKILL` lascia il comando in esecuzione; la pulizia all'avvio dell'esecutore successivo lo chiude, senza riavviare componenti e senza toccare quelli che non avevano comandi aperti;
+- un esecutore chiuso con `SIGKILL` lascia il comando in esecuzione; la pulizia all'avvio dell'esecutore successivo lo chiude, senza riavviare componenti e senza toccare quelli che non avevano comandi aperti (prova del 2026-11-23: da allora la pulizia all'avvio passa in ogni componente in esecuzione, e il passo della prova è stato riscritto così, ma non ancora rieseguito);
 - il cancello ha visto solo le due forme previste (il comando con il suo segno, la pulizia) e non ha negato nulla.
 
 **Controllo complessivo**: build, lint, controllo dei tipi e i test collegati alla modifica passano in locale; il controllo completo è quello della CI sulla PR.

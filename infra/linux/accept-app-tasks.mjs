@@ -269,6 +269,7 @@ const containerState = async (name) => {
   return {
     name,
     state: `${String(c.State.StartedAt)} ${String(c.State.Pid)} ${String(c.State.Running)} ${String(c.RestartCount)}`,
+    running: c.State.Running === true,
     execs: (c.ExecIDs ?? []).length,
   };
 };
@@ -1189,8 +1190,11 @@ async function main() {
       assert(left.length === 0, "the clean-up at start leaves nothing of the dead executor's run", `${String(left.length)} process(es)`);
       assert(asked.length > 0 && asked.every((e) => e.form === "kill"), "it asked only for the clean-up script, never for a command", asked.map((e) => e.form).join(",") || "nothing");
       assert(asked.some((e) => e.container === name), "it ran the clean-up in the component that had the run", asked.map((e) => e.container).join(","));
-      const touched = [...new Set(asked.map((e) => e.container).filter((n) => idle.includes(n) || !COMPONENTS.includes(n)))];
-      assert(touched.length === 0, "no exec was asked in a container that had none", touched.join(","));
+      // The engine drops an exec once its command ends, so the clean-up runs in every running component, exec or not.
+      const missed = listed.filter((c) => c.running && !asked.some((e) => e.container === c.name)).map((c) => c.name);
+      assert(missed.length === 0, "it ran the clean-up in every running component, also those with no exec listed", missed.join(","));
+      const outside = [...new Set(asked.map((e) => e.container).filter((n) => !COMPONENTS.includes(n)))];
+      assert(outside.length === 0, "and in no container that is not a component of this run", outside.join(","));
       const now = await Promise.all(COMPONENTS.map(containerState));
       const restarted = listed.filter((c, i) => c.state !== now[i].state).map((c) => c.name);
       assert(restarted.length === 0, "no component was restarted", restarted.join(","));

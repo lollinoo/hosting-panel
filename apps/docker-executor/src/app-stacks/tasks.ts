@@ -70,7 +70,6 @@ interface TaskContainerInspect {
   readonly Name?: string;
   readonly Config?: { readonly Labels?: Readonly<Record<string, string>> | null };
   readonly State?: { readonly Running?: boolean; readonly Restarting?: boolean };
-  readonly ExecIDs?: readonly string[] | null;
 }
 
 type KillOutcome = "done" | "gone" | "no_shell" | "failed";
@@ -464,9 +463,10 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
 }
 
 /**
- * At start-up: ends what the tasks of a previous executor left running. Only in running containers of application
- * components (name and labels as the engine gives them) that still have an exec; one container that fails does not
- * stop the pass. A container with no shell never ran a task.
+ * At start-up: ends what the tasks of a previous executor left running. In every running container of an application
+ * component (name and labels as the engine gives them), also one with no exec listed: the engine drops an exec once its
+ * command ends, and what the command left in the background stays. One container that fails does not stop the pass.
+ * A container with no shell never ran a task.
  */
 export async function reapAppStackTasks(target: DockerExecTarget, limits?: Pick<AppStackTaskLimits, "killTimeoutMs">): Promise<void> {
   const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_LABELS.role}=${APP_STACK_COMPONENT_ROLE}`] }));
@@ -485,7 +485,7 @@ export async function reapAppStackTasks(target: DockerExecTarget, limits?: Pick<
     if (typeof Id !== "string" || Id.length === 0) continue;
     try {
       const seen = await inspectTaskContainer(target, Id);
-      if (seen === null || seen.State?.Running !== true || !seen.ExecIDs?.length) continue;
+      if (seen === null || seen.State?.Running !== true) continue;
       const labels = seen.Config?.Labels;
       const stackId = labels?.[APP_STACK_LABELS.stackId];
       const organizationId = labels?.[APP_STACK_LABELS.organizationId];

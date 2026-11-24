@@ -536,11 +536,12 @@ describe("runAppStackTask on the Docker Engine", () => {
 });
 
 describe("reapAppStackTasks at the start of the executor", () => {
-  it("cleans the running components that still have an exec, and nothing else", async () => {
+  it("cleans every running component, also one whose execs have all ended, and nothing else", async () => {
     const { adapter, mockDaemon } = await setup();
     const add = (record: MockDockerContainerRecord) => mockDaemon.containers.set(record.id, record);
     mockDaemon.containers.clear();
     add(component("web", { execIds: ["old_exec"] }));
+    // The engine drops an exec from ExecIDs once its command ends; what the command left in the background stays.
     add(component("worker", { execIds: [] }));
     add(component("cache"));
     add(component("db", { execIds: ["x"], running: false, status: "exited" }));
@@ -549,9 +550,14 @@ describe("reapAppStackTasks at the start of the executor", () => {
     // A site container is not a component.
     add({ ...component("web", { execIds: ["x"] }), id: "site_id", name: "hp_svc_site", labels: { [APP_STACK_LABELS.managed]: "true" } });
     await adapter.reapAppStackTasks();
-    expect(mockDaemon.execCalls).toEqual([{ container: `${WEB}_id`, Cmd: ["/bin/sh", "-c", APP_STACK_TASK_KILL_SCRIPT, "sh", ""] }]);
-    expect(mockDaemon.execBodies[0]).not.toHaveProperty("User");
-    expect(mockDaemon.execBodies[0]).not.toHaveProperty("Env");
+    const kill = ["/bin/sh", "-c", APP_STACK_TASK_KILL_SCRIPT, "sh", ""];
+    expect([...mockDaemon.execCalls].sort((a, b) => a.container.localeCompare(b.container))).toEqual(
+      ["cache", "web", "worker"].map((key) => ({ container: `${appStackContainerName(STACK, key)}_id`, Cmd: kill })).sort((a, b) => a.container.localeCompare(b.container)),
+    );
+    for (const body of mockDaemon.execBodies) {
+      expect(body).not.toHaveProperty("User");
+      expect(body).not.toHaveProperty("Env");
+    }
   });
 
   it("goes on after a component that fails and tells the failure at the end; no shell is not a failure", async () => {
