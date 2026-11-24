@@ -258,6 +258,40 @@ describe("SimulatedAppStacks refusals", () => {
   });
 });
 
+describe("SimulatedAppStacks create refusals (#111)", () => {
+  const marked = async (promise: Promise<unknown>) => ((await failure(promise)) as { beforeChange?: unknown }).beforeChange === true;
+
+  it("a refusal raised before the first removal or create carries the mark, like the engine's", async () => {
+    const sim = simulator();
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // no network yet
+    await sim.prepareAppStack({ plan });
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // no image yet
+    await sim.pullAppStackImage({ plan, image: web.image });
+    expect(await marked(sim.createAppStackComponents({ plan: { ...plan, planHash: "0".repeat(64) } }))).toBe(true);
+    expect(await marked(sim.createAppStackComponents({ plan, secretContents: [{ ...SECRET, parameterKey: "not_in_plan" }] }))).toBe(true);
+    expect(sim.appStacks.appStackMutations.map((m) => m.kind)).not.toContain("container_create");
+
+    await sim.createAppStackComponents({ plan });
+    const stopping = sim.stopAppStack(ref);
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // another change is running
+    await stopping;
+  });
+
+  it("an engine that is down, a lost answer and a call that went through do not carry it", async () => {
+    const sim = simulator();
+    await sim.pullAppStackImage({ plan, image: web.image });
+    await sim.prepareAppStack({ plan });
+    sim.appStacks.failNextAppStackStep("create", "engine_unavailable");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.appStacks.failNextAppStackStep("create", "ambiguous_before");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.appStacks.failNextAppStackStep("create", "ambiguous_after");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.setEngineReachable(false);
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+  });
+});
+
 describe("SimulatedAppStacks test hooks", () => {
   it("pull_failed refuses one pull and records no image", async () => {
     const sim = simulator();

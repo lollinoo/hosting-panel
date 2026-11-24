@@ -4,6 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   AppStackComponentIpcRequestSchema,
   AppStackComponentsRemoveIpcRequestSchema,
   AppStackCreateIpcRequestSchema,
@@ -1055,14 +1056,17 @@ export class DockerExecutorIpcServer {
    * names are not public error codes): details[0].reason, then one `versionId` detail per missing certificate version.
    */
   private errorDetails(err: unknown, message: string): ErrorDetail[] {
+    // A refusal of a call that changed nothing says so, after the reason when it has one (#111).
+    const beforeChange: ErrorDetail[] = (err as { beforeChange?: unknown } | null)?.beforeChange === true ? [APP_STACK_REFUSED_BEFORE_CHANGE] : [];
     const reason = (err as { reason?: unknown } | null)?.reason;
-    if (typeof reason !== "string" || !/^(?:TLS|STACK)_[A-Z_]{1,40}$/.test(reason)) return [];
+    if (typeof reason !== "string" || !/^(?:TLS|STACK)_[A-Z_]{1,40}$/.test(reason)) return beforeChange;
     const ids = (err as { versionIds?: unknown }).versionIds;
     return [
       { message, reason },
       ...(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 200) : []).map(
         (id) => ({ field: "versionId", message: id }),
       ),
+      ...beforeChange,
     ];
   }
 

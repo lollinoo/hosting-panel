@@ -332,6 +332,30 @@ describe("application stack IPC routes", () => {
     expect([engine.statusCode, engine.code, engine.reason]).toEqual([503, "DOCKER_ENGINE_UNAVAILABLE", undefined]);
   });
 
+  it("a refusal that says nothing was changed carries one more detail, after its reason when it has one (#111)", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    const marked = <E extends ExecutorCodedError>(err: E): E => Object.assign(err, { beforeChange: true });
+    const BEFORE_CHANGE = { field: "stage", message: "before_change" };
+
+    fns.createAppStackComponents.mockRejectedValueOnce(marked(new AppStackExecutorError("STACK_IMAGE_MISSING", "The image is not available on this server")));
+    const withReason = await failure(client.createAppStackComponents({ plan }));
+    expect([withReason.statusCode, withReason.code, withReason.reason]).toEqual([404, "NOT_FOUND", "STACK_IMAGE_MISSING"]);
+    expect(withReason.details).toEqual([{ message: "The image is not available on this server", reason: "STACK_IMAGE_MISSING" }, BEFORE_CHANGE]);
+
+    // The hardening check names no reason: the mark is then the only detail, and the problem still comes from the code.
+    fns.createAppStackComponents.mockRejectedValueOnce(marked(new ExecutorCodedError("The body breaks a rule", "HOST_POLICY_DENIED")));
+    const noReason = await failure(client.createAppStackComponents({ plan }));
+    expect([noReason.code, noReason.reason, noReason.details]).toEqual(["HOST_POLICY_DENIED", undefined, [BEFORE_CHANGE]]);
+
+    // An error that was not marked, and an engine failure, carry what they carried before.
+    fns.createAppStackComponents.mockRejectedValueOnce(new AppStackExecutorError("STACK_NAMESPACE_CONFLICT", "An object uses the name"));
+    const unmarked = await failure(client.createAppStackComponents({ plan }));
+    expect(unmarked.details).toEqual([{ message: "An object uses the name", reason: "STACK_NAMESPACE_CONFLICT" }]);
+    fns.createAppStackComponents.mockRejectedValueOnce(new ExecutorCodedError("Failed to create (HTTP 500)", "DOCKER_ENGINE_UNAVAILABLE"));
+    expect((await failure(client.createAppStackComponents({ plan }))).details).toEqual([]);
+  });
+
   it("a query name given twice, a bad tail or a bad path id answers 400", async () => {
     const { executor, fns } = stackStub();
     const { socketPath } = await serve(executor);
