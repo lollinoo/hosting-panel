@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, type AppStackTaskRunIpcResult } from "@hosting-panel/contracts";
+import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, AppStackTaskReadIpcResultSchema, type AppStackTaskRunIpcResult } from "@hosting-panel/contracts";
 import {
   appStacks,
   appStackTaskRuns,
@@ -376,6 +376,20 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
       errorMessage: "It is not known how the task ended. It was not started again.",
     });
     expect(forgot.run).not.toHaveBeenCalled();
+
+    // An answer about the run that cannot be read now (it fails the schema the panel holds) will not be read later
+    // either: the outcome is unknown, and the run is not started again.
+    const w = await taken();
+    const sent = executor({ run: () => Promise.reject(lost()) });
+    await expect(runtime(sent.port).apply(w.op, w.payload)).rejects.toMatchObject({ ambiguousOutcome: true });
+    expect(await runRow(w.runId)).toMatchObject({ status: "running" });
+    const garbled = executor({ read: async () => AppStackTaskReadIpcResultSchema.parse({ state: "finished", result: { runId: w.runId } }) });
+    expect(await runtime(garbled.port).recover(w.op)).toBe("settled");
+    expect(await runRow(w.runId)).toMatchObject({ status: "unknown", problem: "outcome_lost", exitCode: null, output: "" });
+    expect(await opRow(w.op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+    expect(garbled.read).toHaveBeenCalledTimes(1);
+    expect(sent.run).toHaveBeenCalledTimes(1);
+    expect(garbled.run).not.toHaveBeenCalled();
 
     // Without the task calls nobody can tell either.
     const u = await taken();
