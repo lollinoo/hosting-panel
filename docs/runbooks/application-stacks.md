@@ -416,6 +416,13 @@ names only the key of a task, and the command is read from the template version 
    created it, so every script that creates an edge network (the engine, HTTP cache and WordPress scripts) hides it:
    in Docker that label has another value, which the script's gate translates in both directions, and the server's
    proxy never joins a run's network.
+   An edge network a failed run left behind has the role `app_edge_under_test` in Docker and a name that contains
+   the run's `swarmtest_<hex>`. List it, then remove it by exact name (after the run's containers, item 5):
+   ```bash
+   sudo docker network ls --filter label=io.hostingpanel.network_role=app_edge_under_test
+   sudo docker network rm <network>
+   ```
+   The panel's proxy never joins such a network, because it looks only for the role `app_edge`.
    The backups script uses `hp_swarmtest_<hex>` too; its job containers are named `hp_bk_op_<hex>…`, plus one
    `hp_bk_test_<16 hex>` for the destination test. It gives its application no address, so it creates no edge network.
    Its job containers carry the role of the panel's own jobs (`site_job`), and `hp-docker-executor` removes such
