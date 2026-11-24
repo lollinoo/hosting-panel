@@ -22,10 +22,12 @@ import {
   appStackRoutesRefresh,
   type ObservedAppStack,
 } from "./app-stack-runtime-policy.js";
-import { parkAppStackOperationUnknown, settleAppStackOperation } from "./app-stack-settle.js";
+import { closeUnconfirmedOperation, type RecoveryOutcome, type RecoveryReadBound } from "../runtime/recovery-read-bound.js";
+import { parkAppStackOperationUnknown, settleAppStackOperation, writeAppStackSettlement } from "./app-stack-settle.js";
 
 // Spec §10.1, A17: an operation in doubt is settled from what the executor shows, never by continuing or replaying it.
 // A failed read keeps it unknown (lock and quota held) for the next pass; the read is a GET, never in doubt itself.
+// A read that keeps failing in a way waiting does not cure is given up after RECOVERY_READ_GIVE_UP_MS (issue #183).
 
 const INTERRUPTED = APP_STACK_FAILURE.OPERATION_INTERRUPTED;
 // No route set hashes to this (an empty one is null): the observer's next pass rewrites routes of unconfirmed content.
@@ -35,7 +37,8 @@ const ROUTES_UNCONFIRMED = appStackRoutesHash([]);
 export async function recoverAppStackOperation(
   deps: AppStackRuntimeDeps,
   op: typeof operations.$inferSelect,
-): Promise<"pending" | "settled"> {
+  reads?: RecoveryReadBound,
+): Promise<RecoveryOutcome> {
   const { db } = deps;
   const kind = op.kind as AppStackOperationKind;
   const scope = { organizationId: op.organizationId, stackId: op.resourceId };
@@ -85,10 +88,21 @@ export async function recoverAppStackOperation(
   let observed: ObservedAppStack;
   try {
     observed = await port.getAppStackStatus(scope);
-  } catch {
+  } catch (err) {
     await parkAppStackOperationUnknown(db, op, deployment.id);
-    return "pending";
+    // A delete is never given up this way: its stack stays `deleting`, from which the page offers no action, so
+    // closing the operation would leave the customer nothing to check or do. It waits for a readable answer, or for
+    // the administrator (`hp-break-glass unlock`).
+    const giveUp = kind === "stack.delete" ? null : (reads?.failed(op.id, err) ?? null);
+    if (giveUp === null) return "pending";
+    // The application is left `unknown` (to be checked; every action is offered again) and its deployment failed
+    // with OPERATION_AMBIGUOUS. Nothing is sent: what the action did is not known, so nothing is undone or repeated.
+    const closed = await closeUnconfirmedOperation(db, op.id, giveUp, (tx) =>
+      writeAppStackSettlement(tx, op, deployment.id, { outcome: "failed", problem: "OPERATION_AMBIGUOUS", stackStatus: "unknown", failedStep: null }),
+    );
+    return closed ? "unconfirmed" : "pending";
   }
+  reads?.answered(op.id);
 
   const domains = await listAppStackDomains(db, scope);
   const now = new Date(deps.clock.now());

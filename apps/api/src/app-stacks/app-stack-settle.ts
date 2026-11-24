@@ -69,50 +69,67 @@ export function settleAppStackOperation(
   deploymentId: string | null,
   s: AppStackSettlement,
 ): Promise<boolean> {
-  const problem = s.outcome === "failed" ? (s.problem ?? "DOCKER_ENGINE_UNAVAILABLE") : s.problem;
+  const problem = settledProblem(s);
   const outcome =
     s.outcome === "succeeded"
       ? ({ status: "succeeded" } as const)
       : ({ status: "failed", errorCode: APP_STACK_FAILURE[problem!].code, errorMessage: APP_STACK_FAILURE[problem!].text } as const);
-  return settleOperation(db, op.id, outcome, async (tx) => {
-    const steps = await tx
-      .select({ key: operationSteps.key, status: operationSteps.status })
-      .from(operationSteps)
-      .where(eq(operationSteps.operationId, op.id));
-    for (const step of steps) {
-      if (!OPEN_STEP.has(step.status)) continue;
-      const key = step.key as AppStackStepKey;
-      if (s.outcome === "succeeded") {
-        await updateOperationStepTransactional(tx, op.id, key, "succeeded", APP_STACK_STEP_DONE_TEXT[key]);
-      } else if (s.failedStep == null || key === s.failedStep) {
-        await updateOperationStepTransactional(tx, op.id, key, "failed", APP_STACK_STEP_FAILED_TEXT);
-      } else if (step.status === "pending") {
-        await updateOperationStepTransactional(tx, op.id, key, "skipped", APP_STACK_STEP_SKIPPED_TEXT);
-      }
-    }
+  return settleOperation(db, op.id, outcome, (tx) => writeAppStackSettlement(tx, op, deploymentId, s));
+}
 
-    const current = await lockedStatus(tx, op);
-    const target = current === null ? null : appStackSettleTarget(current, s.stackStatus);
-    const scope = { organizationId: op.organizationId, stackId: op.resourceId };
-    if (deploymentId === null) {
-      if (target !== null && target !== current && target !== "deleted") await transitionAppStackTransactional(tx, { ...scope, to: target });
-    } else {
-      await updateAppStackDeploymentTransactional(tx, {
-        ...scope,
-        deploymentId,
-        deploymentStatus: s.outcome,
-        problem,
-        stackStatus: target === current ? null : target,
-        ...(s.appliedRevisionId === undefined ? {} : { appliedRevisionId: s.appliedRevisionId }),
-        ...(s.appliedRoutesHash === undefined ? {} : { appliedRoutesHash: s.appliedRoutesHash }),
-        ...(s.appliedAddressesHash === undefined ? {} : { appliedAddressesHash: s.appliedAddressesHash }),
-        ...(s.restoreReplaced === true ? { restoreReplaced: true } : {}),
-      });
+function settledProblem(s: AppStackSettlement): AppStackRuntimeProblem | null {
+  return s.outcome === "failed" ? (s.problem ?? "DOCKER_ENGINE_UNAVAILABLE") : s.problem;
+}
+
+/**
+ * The resource side of a settlement, inside the caller's transaction: steps, stack status, deployment, component
+ * health. settleAppStackOperation moves the operation around it; the closing of an operation whose recovery could not
+ * read the executor (issue #183) calls it on its own.
+ */
+export async function writeAppStackSettlement(
+  tx: HostingPanelDatabase,
+  op: OperationRow,
+  deploymentId: string | null,
+  s: AppStackSettlement,
+): Promise<void> {
+  const problem = settledProblem(s);
+  const steps = await tx
+    .select({ key: operationSteps.key, status: operationSteps.status })
+    .from(operationSteps)
+    .where(eq(operationSteps.operationId, op.id));
+  for (const step of steps) {
+    if (!OPEN_STEP.has(step.status)) continue;
+    const key = step.key as AppStackStepKey;
+    if (s.outcome === "succeeded") {
+      await updateOperationStepTransactional(tx, op.id, key, "succeeded", APP_STACK_STEP_DONE_TEXT[key]);
+    } else if (s.failedStep == null || key === s.failedStep) {
+      await updateOperationStepTransactional(tx, op.id, key, "failed", APP_STACK_STEP_FAILED_TEXT);
+    } else if (step.status === "pending") {
+      await updateOperationStepTransactional(tx, op.id, key, "skipped", APP_STACK_STEP_SKIPPED_TEXT);
     }
-    if (s.health && target !== "deleted") {
-      await recordAppStackComponentHealthTransactional(tx, { ...scope, ...s.health });
-    }
-  });
+  }
+
+  const current = await lockedStatus(tx, op);
+  const target = current === null ? null : appStackSettleTarget(current, s.stackStatus);
+  const scope = { organizationId: op.organizationId, stackId: op.resourceId };
+  if (deploymentId === null) {
+    if (target !== null && target !== current && target !== "deleted") await transitionAppStackTransactional(tx, { ...scope, to: target });
+  } else {
+    await updateAppStackDeploymentTransactional(tx, {
+      ...scope,
+      deploymentId,
+      deploymentStatus: s.outcome,
+      problem,
+      stackStatus: target === current ? null : target,
+      ...(s.appliedRevisionId === undefined ? {} : { appliedRevisionId: s.appliedRevisionId }),
+      ...(s.appliedRoutesHash === undefined ? {} : { appliedRoutesHash: s.appliedRoutesHash }),
+      ...(s.appliedAddressesHash === undefined ? {} : { appliedAddressesHash: s.appliedAddressesHash }),
+      ...(s.restoreReplaced === true ? { restoreReplaced: true } : {}),
+    });
+  }
+  if (s.health && target !== "deleted") {
+    await recordAppStackComponentHealthTransactional(tx, { ...scope, ...s.health });
+  }
 }
 
 /** Ambiguity: deployment unknown (problem OPERATION_AMBIGUOUS) and stack unknown (deleting stays deleting), one tx. Never throws. */

@@ -14,6 +14,7 @@ import {
   appStackRevisions,
   appStacks,
   appStackVolumes,
+  and,
   auditEvents,
   createAppStackTransactional,
   createAppTemplate,
@@ -26,10 +27,12 @@ import {
   operations,
   operationSteps,
   organizations,
+  outboxEvents,
   platformInstallations,
   resourceQuotas,
   sql,
   transitionOperation,
+  unlockOperationBreakGlassTransactional,
   updateAppTemplate,
   type AppStackWriteResult,
   type DatabaseClient,
@@ -47,6 +50,12 @@ import {
   APP_STACK_STEP_FAILED_TEXT,
 } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 import type { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 import type { SiteDomainsApplier } from "../src/sites/site-domains-applier.js";
 import type { SiteFilesApplier } from "../src/sites/site-files-applier.js";
@@ -646,6 +655,175 @@ describe("recoverAppStackOperation (RT4)", () => {
     // Neither none nor the hash of today's addresses: the observer refreshes again and withdraws the address.
     expect(stack.appliedRoutesHash).not.toBeNull();
     expect(stack.appliedRoutesHash).not.toBe(before.appliedRoutesHash);
+  });
+
+  // Issue #183: a status read that keeps failing in a way waiting does not cure. The fake keeps its state; only its
+  // status read is replaced, and everything still goes through the read-only port.
+  const MINUTE = 60_000;
+  const coded = (code: string) => Object.assign(new Error(`executor said ${code}`), { code });
+  /** The fake, whose status read throws `fault.err` while it is set and answers as the fake otherwise. */
+  function flaky(fault: { err: unknown }, before?: () => Promise<void>): object {
+    return Object.assign(Object.create(fake) as object, {
+      getAppStackStatus: async (req: Parameters<FakeStackExecutor["getAppStackStatus"]>[0]) => {
+        await before?.();
+        if (fault.err === null) return fake.getAppStackStatus(req);
+        fake.calls.push({ method: "getAppStackStatus", request: req });
+        throw fault.err;
+      },
+    });
+  }
+  const recoverBounded = async (write: AppStackWriteResult, port: object, reads: RecoveryReadBound) =>
+    new AppStackRuntime(dbClient, readOnly(port), config, clock).recover(await opOf(write), reads);
+  const unconfirmedAudits = async (write: AppStackWriteResult) =>
+    db()
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.targetId, write.operation!.id), eq(auditEvents.action, RECOVERY_UNCONFIRMED_AUDIT_ACTION)));
+
+  it("(12) #183: a status read that cannot be read for the whole bound closes the action as not confirmed, never succeeded, nothing sent", async () => {
+    // Everything was done (only the routes' answer was lost): a readable status would settle it succeeded.
+    const { stackId, write } = await create();
+    fake.failNext("publishAppStackRoutes", "ambiguous");
+    await parked(write);
+    const fault: { err: unknown } = { err: coded("INTERNAL_ERROR") };
+    const port = readOnly(flaky(fault));
+    const w = new OutboxWorkerService(
+      dbClient,
+      port,
+      {} as unknown as HostAgentPort,
+      config,
+      {} as unknown as SiteProvisioner,
+      {} as unknown as SiteDomainsApplier,
+      {} as unknown as SiteFilesApplier,
+      undefined,
+      undefined,
+      undefined,
+      new AppStackRuntime(dbClient, port, config, clock),
+    );
+    w.recoveryReads = new RecoveryReadBound(() => clock.now());
+
+    await w.recoverUnknownOperations();
+    await clock.sleep(RECOVERY_READ_GIVE_UP_MS - 1);
+    fault.err = new SyntaxError("Unexpected token < in JSON");
+    await w.recoverUnknownOperations();
+    expect((await opOf(write)).status).toBe("unknown");
+    await expect(enqueue(stackId, "stack.start")).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+
+    await clock.sleep(1);
+    await w.recoverUnknownOperations();
+
+    expect(await opOf(write)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+    expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "OPERATION_AMBIGUOUS" });
+    // To be checked: the application is unknown, not running and not failed; every open step failed.
+    expect(await stackOf(stackId)).toMatchObject({ status: "unknown", appliedRevisionId: null });
+    expect(Object.values(await stepsOf(write)).every((status) => status === "succeeded" || status === "failed")).toBe(true);
+    const audits = await unconfirmedAudits(write);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.details).toEqual({
+      operationId: write.operation!.id,
+      kind: "stack.deploy",
+      resourceType: "stack",
+      resourceId: stackId,
+      minutesWaited: 30,
+      failure: "unexpected_error",
+    });
+    const all = await db().select().from(auditEvents).where(eq(auditEvents.targetId, write.operation!.id));
+    expect(all.filter((a) => a.action.startsWith("operation.recovered."))).toHaveLength(1);
+    const events = await db().select().from(outboxEvents);
+    expect(events.filter((e) => (e.payload as { operationId?: string }).operationId === write.operation!.id).map((e) => e.status)).toEqual(["failed"]);
+    expect(trace()).toEqual(["getAppStackStatus", "getAppStackStatus", "getAppStackStatus"]);
+    expect(w.recoveryReads.size).toBe(0);
+
+    // A second pass finds nothing in doubt: no read, no row.
+    await w.recoverUnknownOperations();
+    expect(trace()).toHaveLength(3);
+    expect(await unconfirmedAudits(write)).toHaveLength(1);
+    expect(await opOf(write)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+    // The lock is free: the customer can act on the application again.
+    expect((await enqueue(stackId, "stack.start")).operation).toMatchObject({ kind: "stack.start", status: "queued" });
+  });
+
+  it("(13) #183: an executor that cannot be reached, or does not answer, never closes the action however long", async () => {
+    const { stackId, write } = await create();
+    fake.failNext("createAppStackComponents", "ambiguous");
+    await parked(write);
+    const reads = new RecoveryReadBound(() => clock.now());
+    const fault: { err: unknown } = { err: null };
+    for (const code of ["DOCKER_ENGINE_UNAVAILABLE", "OPERATION_AMBIGUOUS", "RESOURCE_LOCKED"]) {
+      fault.err = coded(code);
+      for (let pass = 0; pass < 16; pass += 1) {
+        expect(await recoverBounded(write, flaky(fault), reads)).toBe("pending");
+        await clock.sleep(30 * MINUTE);
+      }
+    }
+    expect((await opOf(write)).status).toBe("unknown");
+    expect((await stackOf(stackId)).status).toBe("unknown");
+    expect(reads.size).toBe(0);
+    expect(await unconfirmedAudits(write)).toHaveLength(0);
+
+    // Once it answers, the action settles from what it shows, as before.
+    fault.err = null;
+    expect(await recoverBounded(write, flaky(fault), reads)).toBe("settled");
+    await expectInterrupted(write);
+  });
+
+  it("(14) #183: only consecutive counted failures count: a pass that waits honestly starts the count again", async () => {
+    // A readable answer settles an application action at once; the honest wait is what can come between.
+    const { write } = await create();
+    fake.failNext("createAppStackComponents", "ambiguous");
+    await parked(write);
+    const reads = new RecoveryReadBound(() => clock.now());
+    const counted = { err: coded("VALIDATION_ERROR") as unknown };
+    const down = { err: coded("DOCKER_ENGINE_UNAVAILABLE") as unknown };
+    expect(await recoverBounded(write, flaky(counted), reads)).toBe("pending");
+    await clock.sleep(20 * MINUTE);
+    expect(await recoverBounded(write, flaky(down), reads)).toBe("pending");
+    await clock.sleep(20 * MINUTE);
+    expect(await recoverBounded(write, flaky(counted), reads)).toBe("pending");
+    await clock.sleep(29 * MINUTE);
+    expect(await recoverBounded(write, flaky(counted), reads)).toBe("pending");
+    expect((await opOf(write)).status).toBe("unknown");
+    await clock.sleep(MINUTE);
+    expect(await recoverBounded(write, flaky(counted), reads)).toBe("unconfirmed");
+    expect(await opOf(write)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+    expect((await unconfirmedAudits(write))[0]!.details).toMatchObject({ minutesWaited: 30, failure: "error_code" });
+  });
+
+  it("(15) #183: an action the administrator unlocks between the last failed read and the closing is not written twice", async () => {
+    const { stackId, write } = await create();
+    fake.failNext("createAppStackComponents", "ambiguous");
+    await parked(write);
+    const reads = new RecoveryReadBound(() => clock.now());
+    const fault = { err: coded("INTERNAL_ERROR") as unknown };
+    expect(await recoverBounded(write, flaky(fault), reads)).toBe("pending");
+    await clock.sleep(RECOVERY_READ_GIVE_UP_MS);
+    const unlockFirst = async () => {
+      await unlockOperationBreakGlassTransactional(db(), { operationId: write.operation!.id, reason: "checked by hand" });
+    };
+    expect(await recoverBounded(write, flaky(fault, unlockFirst), reads)).toBe("pending");
+
+    expect(await opOf(write)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+    expect((await opOf(write)).errorMessage).toContain("Break-glass unlock");
+    expect(await unconfirmedAudits(write)).toHaveLength(0);
+    // The unlock touches no resource row, and neither does the closing that found it ended.
+    expect(await deploymentOf(write)).toMatchObject({ status: "unknown", problem: "OPERATION_AMBIGUOUS" });
+    expect((await stackOf(stackId)).status).toBe("unknown");
+  });
+
+  it("(16) #183: a delete in doubt is never closed this way: the application stays deleting and the page would offer nothing", async () => {
+    const { stackId } = await running();
+    const del = await enqueue(stackId, "stack.delete");
+    fake.failNext("removeAppStack", "ambiguous");
+    await parked(del);
+    const reads = new RecoveryReadBound(() => clock.now());
+    const fault = { err: coded("INTERNAL_ERROR") as unknown };
+    for (let pass = 0; pass < 6; pass += 1) {
+      expect(await recoverBounded(del, flaky(fault), reads)).toBe("pending");
+      await clock.sleep(30 * MINUTE);
+    }
+    expect((await opOf(del)).status).toBe("unknown");
+    expect((await stackOf(stackId)).status).toBe("deleting");
+    expect(await unconfirmedAudits(del)).toHaveLength(0);
   });
 
   it("(7) no mutating call: every recovery above went through a port that throws on all but the two reads", () => {

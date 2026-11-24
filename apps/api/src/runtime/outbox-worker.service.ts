@@ -74,6 +74,7 @@ import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-appli
 import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 import { AppStackRuntime } from "../app-stacks/app-stack-runtime.js";
 import { AppStackTaskRuntime } from "../app-stacks/app-stack-task-runtime.js";
+import { RECOVERY_UNCONFIRMED_TEXT, RecoveryReadBound } from "./recovery-read-bound.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -243,6 +244,11 @@ export class OutboxWorkerService {
   readonly #wordpressImportApplier: SiteWordpressImportApplier;
   readonly #appStacks: AppStackRuntime;
   readonly #appStackTasks: AppStackTaskRuntime;
+  /**
+   * How long each unknown operation's recovery read has kept failing (issue #183). In memory: a restart of the API
+   * starts every count again. Public so a test can give it a clock of its own.
+   */
+  public recoveryReads = new RecoveryReadBound();
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -1036,6 +1042,9 @@ export class OutboxWorkerService {
       .from(operations)
       .where(eq(operations.status, "unknown"))
       .orderBy(asc(operations.submittedAt));
+    // Counts of operations no longer unknown (settled, unlocked by hand, deleted) go here, so the map never grows
+    // beyond the operations in doubt.
+    this.recoveryReads.retain(unknownOps.map((op) => op.id));
 
     let convergedSucceeded = 0;
     let convergedFailed = 0;
@@ -1072,7 +1081,7 @@ export class OutboxWorkerService {
             op.kind === STACK_TASK_KIND
               ? await this.#appStackTasks.recover(op) // a read: the command of a run is never started again
               : APP_STACK_RUNTIME_KINDS.includes(op.kind)
-              ? await this.#appStacks.recover(op)
+              ? await this.#appStacks.recover(op, this.recoveryReads)
               : op.kind === HOST_JOB_KIND
               ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)
               : op.kind === "site.wordpress.update"
@@ -1081,6 +1090,13 @@ export class OutboxWorkerService {
                 ? await this.#wordpressImportApplier.recover(op)
                 : await this.#backupsApplier.recover(op);
           if (outcome === "pending") {
+            continue;
+          }
+          this.recoveryReads.forget(op.id);
+          if (outcome === "unconfirmed") {
+            // Closed by the bound on reads (issue #183): its own audit row is written with it.
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT);
+            convergedFailed += 1;
             continue;
           }
           const [settled] = await db
