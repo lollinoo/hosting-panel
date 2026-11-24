@@ -363,16 +363,25 @@ export function appStackRoutesFollowAddresses(
 }
 
 /**
- * ADR-0037: when a change of the routing options reaches the route file. "shortly": the observer rewrites it now.
- * "at_start": nothing of the stack is published (never installed, or stopped, which withdraws the routes) and the
- * next start publishes the options. null: a route file may be in place that nothing rewrites until the customer acts,
- * so the change is refused rather than shown as active.
+ * ADR-0037: when a change of the routing options reaches the route file. "shortly": the observer rewrites it now, or
+ * its own route refresh is under way (it reads the addresses when it runs, and the pass after it sees a change it
+ * missed). "at_start": nothing of the stack is published (never installed, or stopped, which withdraws the routes) and
+ * the next start publishes the options. null: a route file may be in place that nothing rewrites until the customer
+ * acts, so the change is refused rather than shown as active.
  */
 export function appStackOptionsApply(
   stack: Pick<AppStackRow, "status" | "appliedRevisionId">,
-  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+  last:
+    | {
+        readonly kind: string;
+        readonly status: OperationStatus;
+        readonly requestedByUserId: string | null;
+        readonly idempotencyKey: string | null;
+      }
+    | undefined,
 ): "shortly" | "at_start" | null {
   if (appStackRoutesFollowAddresses(stack, last)) return "shortly";
+  if (last !== undefined && !isTerminalOperationStatus(last.status) && appStackRoutesRefresh(last)) return "shortly";
   if (stack.appliedRevisionId === null || stack.status === "stopped") return "at_start";
   return null;
 }

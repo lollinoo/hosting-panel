@@ -6274,7 +6274,8 @@ paths:
         point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
         pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
         published or is refused: while a route file may be in place that the panel cannot rewrite now (an action in
-        progress, a failed or unknown application, or a stop the customer asked for that did not finish) the answer is
+        progress other than the panel's own route refresh, a failed or unknown application, or a stop the customer
+        asked for that did not finish) the answer is
         409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status, and nothing is
         written. The audit row holds the user name and whether a password was sent, never the password. No
         Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag

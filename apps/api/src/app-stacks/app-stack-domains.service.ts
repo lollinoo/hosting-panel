@@ -261,7 +261,12 @@ export class AppStackDomainsService {
 /** The latest operation of the stack; the caller holds the stack row. */
 async function lastOperation(db: DatabaseExecutor, stackId: string) {
   const [last] = await db
-    .select({ kind: operations.kind, status: operations.status })
+    .select({
+      kind: operations.kind,
+      status: operations.status,
+      requestedByUserId: operations.requestedByUserId,
+      idempotencyKey: operations.idempotencyKey,
+    })
     .from(operations)
     .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stackId)))
     .orderBy(desc(operations.submittedAt))

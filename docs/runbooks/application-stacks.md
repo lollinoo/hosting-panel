@@ -271,12 +271,13 @@ administrator's console has no such action, and nobody writes proxy configuratio
    minutes of a health-only change nor the ten minutes after a failed action; after a failed refresh the periodic
    check waits those ten minutes only for the addresses that refresh was queued with. A change either reaches every route
    file of the stack that may be in place or is refused, so the panel never shows an option the live file lacks:
-   - running or partly running, with no action in progress and the last action not a stop: saved, and the page says
-     «Opzioni salvate: valgono tra qualche istante» (the API answers `applies: shortly`);
+   - running or partly running, with no action in progress and the last action not a stop, or with only the panel's
+     own route refresh queued or running (it reads the addresses when it runs; the check after it catches a change it
+     missed): saved, and the page says «Opzioni salvate: valgono tra qualche istante» (the API answers `applies: shortly`);
    - not installed yet, or stopped (a stop withdraws the routes): saved, and the page says the options apply when the
      application is started (`applies: at_start`); the next start publishes them;
-   - any other state (an action in progress, failed, outcome to be verified, or a stop the customer asked for that did
-     not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
+   - any other state (an action the customer asked for in progress, failed, outcome to be verified, or a stop the
+     customer asked for that did not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
      nothing would rewrite. Let the action finish, or start or restart the application, then save again.
 
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps

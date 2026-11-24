@@ -799,6 +799,30 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(mutatingCalls()).toEqual([]);
     });
 
+    it("an option saved while a refresh is queued, which that refresh did not read, is refreshed by the next pass at once", async () => {
+      const obs = observer();
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "late.example.com" }] });
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      // The save lands after the refresh read the addresses: it publishes them as they were.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      const appliedRoutesHash = appStackRoutesHash(
+        appStackRoutePlan({
+          plan: stack.plan,
+          domains: (await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id))).map((r) => ({ ...r, compression: false })),
+          include: new Set(["app"]),
+          now: NOW,
+          acmeEnabled: true,
+        }).entries,
+      );
+      await db().update(operations).set({ status: "succeeded", completedAt: NOW }).where(eq(operations.resourceId, stack.id));
+      await db().update(appStacks).set({ status: "running", appliedRoutesHash }).where(eq(appStacks.id, stack.id));
+
+      await obs.reconcileOnce(at(1));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
     it("after a failed refresh the loop waits the 10 minutes only for the addresses that refresh was queued with", async () => {
       const obs = observer();
       const stack = await seedStack({ status: "running", domains: [{ hostname: "pause.example.com" }] });

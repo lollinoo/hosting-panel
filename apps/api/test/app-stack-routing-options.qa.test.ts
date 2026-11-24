@@ -3,7 +3,18 @@
 // outbox and the operations never carry it or its verifier. Route files are covered by app-stack-domains.qa.test.ts.
 import { randomUUID } from "node:crypto";
 import { APP_IMAGE_ALLOWLIST, APP_ROUTE_PASSWORD_HASH_PATTERN, findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
-import { and, appStackDomains, appStacks, asc, auditEvents, eq, operations, outboxEvents, resourceQuotas } from "@hosting-panel/database";
+import {
+  and,
+  appStackDomains,
+  appStacks,
+  asc,
+  auditEvents,
+  enqueueAppStackOperationTransactional,
+  eq,
+  operations,
+  outboxEvents,
+  resourceQuotas,
+} from "@hosting-panel/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { apr1Verifier } from "../src/app-stacks/apr1.js";
 import { APP_TEST_ALLOWLIST, NOTES_DEMO_SOURCE, startAppStackHarness, type AppStackHarness, type HarnessCustomer } from "./fixtures/app-stack-harness.js";
@@ -464,6 +475,33 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
         expect(await rowOf(stackId, id)).toMatchObject({ compression: false, accessUsername: null, accessPasswordHash: null });
       },
     );
+
+    it("while only the panel's own route refresh is queued, a save is accepted and answers shortly: that refresh or the next one publishes it", async () => {
+      const { stackId, id } = await installed("running", true);
+      await enqueueAppStackOperationTransactional(h.dbClient.db, {
+        organizationId: h.a.orgId,
+        stackId,
+        kind: "stack.deploy",
+        requestedByUserId: null,
+        idempotencyKey: `sys_routes_${randomUUID().replace(/-/g, "")}`,
+        requestHash: "0".repeat(64),
+        revision: null,
+        routesOnly: true,
+        destroyData: false,
+      });
+      expect((await stackRow(stackId)).status).toBe("updating");
+      const operationsBefore = (await h.counts()).operations;
+      const res = await patch(stackId, id, { ...OFF, compression: true, protection: { username: "guest", password: PASSWORD } });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.body.applies).toBe("shortly");
+      expect(await rowOf(stackId, id)).toMatchObject({ compression: true, accessUsername: "guest" });
+      expect((await h.counts()).operations).toBe(operationsBefore);
+
+      // A deploy the customer asked for is another matter: its outcome decides the routes.
+      const other = await installed("running", true);
+      expect((await verb(other.stackId, "deploy")).status).toBe(202);
+      expectRefusal(await patch(other.stackId, other.id, { ...OFF, compression: true }), 409, "RESOURCE_LOCKED", { field: "status", reason: "updating" });
+    });
 
     it("a running application the customer last asked to stop, whose stop failed, takes no change either", async () => {
       const { stackId, id } = await installed("running", true);
