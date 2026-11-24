@@ -1912,7 +1912,7 @@ paths:
     post:
       tags: [Services]
       operationId: createService
-      summary: Instantiate service with initial stack revision #1 (service.create, then server administrator)
+      summary: "Instantiate service with initial stack revision #1 (service.create, then server administrator)"
       description: >-
         Server administrators only (R207 addendum 4 A): the caller needs `service.create` in the organization
         and then the server-administrator permission. A server administrator is not a member of a
@@ -1932,7 +1932,7 @@ paths:
               $ref: "#/components/schemas/CreateServiceInstanceInput"
       responses:
         "201":
-          description: Service and immutable revision #1 created
+          description: "Service and immutable revision #1 created"
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -5441,8 +5441,8 @@ paths:
       summary: List the applications installed from an application template, across customers (server administrator only)
       description: >-
         Deleted applications are left out; at most 200, by customer name then application name (`truncated` says
-        more exist). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
-        `applicationTemplatesAvailable` is false.
+        more exist). The `status` of a row is the one the customer's page shows (issue #130). Returns 422 NOT_SUPPORTED
+        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationTemplatesAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/AppTemplateIdParam"
       responses:
@@ -5473,8 +5473,9 @@ paths:
       summary: List every customer's applications installed from application templates (server administrator only, read-only)
       description: >-
         Deleted applications are left out; at most 200, by customer name then application name (`truncated` says
-        more exist). Never carries a secret, a setting value or a plan. Returns 422 NOT_SUPPORTED (reason
-        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+        more exist). The `status` of a row is the one the customer's page shows (issue #130). Never carries a secret, a
+        setting value or a plan. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       responses:
         "200":
           description: The applications
@@ -5775,7 +5776,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: "The name is taken (`ALREADY_EXISTS`, `details[0].reason: name_taken`), a web address is in use (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`), the application limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: STACK_QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
+          description: "The name is taken (`ALREADY_EXISTS`, `details[0].reason: name_taken`), a web address is in use (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`), the application limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: STACK_QUOTA_EXCEEDED`), an application that deploys now would use more processor or memory than the customer has (`QUOTA_EXCEEDED`, `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet, or need a dedicated server (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -5943,7 +5944,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)
+          description: "Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -5989,7 +5990,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6195,7 +6196,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6247,7 +6248,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6355,8 +6356,10 @@ paths:
       operationId: getAppStackComponentHealth
       summary: Show the last observed health of one component of an application (app.read)
       description: >-
-        An observation older than five minutes reads as `unknown` with `stale: true`. Returns 422 NOT_SUPPORTED
-        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+        An observation older than five minutes reads as `unknown` with `stale: true`; the `stopped` reading of an
+        application stored as `stopped` is the exception and stays `stopped` however old (`stale` still says it is old,
+        issue #208). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -10960,6 +10963,9 @@ components:
           type: integer
         maxServices:
           type: integer
+          description: >-
+            The limit of the earlier generic services. Applications add their components to `usedServices` but this
+            number never refuses one: only `maxCpuMilli` and `maxMemoryBytes` do.
         maxCpuMilli:
           type: integer
         maxMemoryBytes:
@@ -10970,6 +10976,8 @@ components:
           type: integer
         usedServices:
           type: integer
+          description: >-
+            Services plus the components of the customer's applications. It can be above `maxServices`.
         usedCpuMilli:
           type: integer
         usedMemoryBytes:
@@ -13751,7 +13759,7 @@ components:
           description: The validator's problem code
         reason:
           type: string
-          enum: [STACK_TEMPLATE_INVALID, STACK_TEMPLATE_UNPUBLISHED, STACK_IMAGE_NOT_ALLOWED, STACK_QUOTA_EXCEEDED, STACK_DEPENDENCY_CYCLE, STACK_HEALTH_TIMEOUT, STACK_PORT_UNAVAILABLE, STACK_SECRET_MISSING, STACK_VOLUME_IN_USE, STACK_UNSUPPORTED_FEATURE, STACK_PARAMETER_INVALID]
+          enum: [STACK_TEMPLATE_INVALID, STACK_TEMPLATE_UNPUBLISHED, STACK_IMAGE_NOT_ALLOWED, STACK_QUOTA_EXCEEDED, STACK_DEPENDENCY_CYCLE, STACK_HEALTH_TIMEOUT, STACK_PORT_UNAVAILABLE, STACK_SECRET_MISSING, STACK_VOLUME_IN_USE, STACK_UNSUPPORTED_FEATURE, STACK_PARAMETER_INVALID, STACK_IMAGE_VOLUME_UNCOVERED]
         message:
           type: string
           minLength: 1
@@ -14792,7 +14800,13 @@ components:
         name:
           type: string
         status:
-          $ref: "#/components/schemas/AppStackStatus"
+          allOf:
+            - $ref: "#/components/schemas/AppStackStatus"
+          description: >-
+            The status the application page shows (issue #130): the stored status, except for a `running` or `degraded`
+            application with a revision applied, where it follows the health of the components of that revision (a
+            crashed essential component reads `failed`, a missing or stale reading `unknown`). The list and the page
+            compute it the same way, from the revision that runs, so they never disagree
         templateId:
           $ref: "#/components/schemas/AppEntityId"
         templateName:
@@ -14956,6 +14970,10 @@ components:
                     nullable: true
             volumes:
               type: array
+              description: >-
+                A volume that was never created (`pending`) is listed only when the version that runs has it. A volume
+                that an upgrade created before it was taken back exists (`present`) and is listed, though the version
+                that runs does not use it: backups include it and a later attempt reuses it.
               items:
                 type: object
                 required: [key, status, retentionPolicy]
@@ -15054,7 +15072,11 @@ components:
         problem:
           type: string
           nullable: true
-          description: An UPPER_SNAKE reason or error code, never free text
+          description: >-
+            An UPPER_SNAKE reason or error code, never free text. `STACK_IMAGE_VOLUME_UNCOVERED`: a deploy, upgrade or
+            rollback was refused before anything changed because the application's software keeps data in a folder the
+            application does not declare; the operation fails with `HOST_POLICY_DENIED` and only the server
+            administrator can fix it, by publishing a version that gives that folder a volume.
         startedAt:
           type: string
           format: date-time
@@ -15438,7 +15460,10 @@ components:
           nullable: true
         stale:
           type: boolean
-          description: The last observation is older than five minutes (health then reads `unknown`)
+          description: >-
+            The last observation is older than five minutes. Its health then reads `unknown`, except the `stopped`
+            reading of an application stored as `stopped`, which stays `stopped` (issue #208); `observedAt` is always the
+            stored time of the last check
         source:
           type: string
           enum: [tcp, http, running_state]
@@ -15536,9 +15561,10 @@ components:
             output:
               type: string
               maxLength: 16384
-              description: The last lines the run printed, secrets masked; empty while it is queued or running
+              description: The last lines the run printed, secrets masked; empty while it is queued or running. Empty with `outputTruncated` true means the run printed something and none of it was kept
             outputTruncated:
               type: boolean
+              description: True when lines of the output were left out. With an empty `output` it means the run printed something and none of it was kept, because it was one very long line or because the panel could not read the private values of the application to mask it
 
     AppStackTaskRunsDto:
       type: object

@@ -146,14 +146,17 @@ export async function recoverAppStackOperation(
   // A create step still pending was never called: an upgrade or a rollback in doubt before it changed nothing, so what
   // its request wrote is taken back, and an application that was stopped stays stopped once a revision of it was
   // applied (one never applied has no installed version a start could use). Once create has started, the executor may
-  // have replaced components.
-  const [create] = deploys
-    ? await db
-        .select({ status: operationSteps.status })
-        .from(operationSteps)
-        .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "create")))
-    : [];
-  const untouched = create?.status === "pending";
+  // have replaced components. A start whose start step is still pending is the same: it rolls out no link and starts no
+  // container before that step begins, so a stopped application it was asked to start is still stopped.
+  const firstChange = deploys ? "create" : kind === "stack.start" ? "start" : null;
+  const [first] =
+    firstChange === null
+      ? []
+      : await db
+          .select({ status: operationSteps.status })
+          .from(operationSteps)
+          .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, firstChange)));
+  const untouched = first?.status === "pending";
   // Routes seen published keep the stored hash; else none is published. The observer republishes a stale route set
   // through a tracked operation.
   await settleAppStackOperation(db, op, deployment.id, {
@@ -161,7 +164,9 @@ export async function recoverAppStackOperation(
     problem: v.problem,
     // A redeploy's plan matches the stopped containers, so the verdict reads them as applied and failed.
     stackStatus:
-      untouched && v.outcome === "failed" && deployment.replacedStatus === "stopped" && stack.appliedRevisionId !== null ? "stopped" : v.stackStatus,
+      untouched && v.outcome === "failed" && deployment.replacedStatus === "stopped" && (kind === "stack.start" || stack.appliedRevisionId !== null)
+        ? "stopped"
+        : v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
     ...(untouched && !v.applied && (kind === "stack.upgrade" || kind === "stack.rollback") ? { restoreReplaced: true } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),

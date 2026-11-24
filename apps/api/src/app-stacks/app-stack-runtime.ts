@@ -58,6 +58,7 @@ import {
   appStackAddressesHash,
   appStackAggregate,
   appStackComponentReady,
+  appStackCreateRefusedBeforeChange,
   appStackEssentialKeys,
   appStackHealthRows,
   appStackObservedComponent,
@@ -106,6 +107,40 @@ export function appStackPort(deps: AppStackRuntimeDeps): StackExecutorPort | nul
   return isStackExecutor(executor) && executor.isRuntimeAvailable && deps.config.runtimeBackend !== "disabled" ? executor : null;
 }
 
+/** The revision's plan when it parses and names this stack, this revision and its own hash; else null. */
+export async function readAppStackPlan(
+  db: HostingPanelDatabase,
+  ref: { readonly stackId: string; readonly organizationId: string },
+  revisionId: string | null,
+): Promise<ApprovedStackPlan | null> {
+  if (revisionId === null) return null;
+  const revision = await getAppStackRevision(db, { ...ref, revisionId });
+  const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
+  if (!revision || !parsed.success) return null;
+  const plan = parsed.data;
+  const own =
+    plan.stackId === ref.stackId &&
+    plan.organizationId === ref.organizationId &&
+    plan.revisionId === revision.id &&
+    plan.planHash === revision.planHash &&
+    verifyAppStackPlanHash(plan);
+  return own ? plan : null;
+}
+
+/** What the executor's stop and remove take to go in the applied plan's order (#100): an upgrade keeps the position
+ *  label of a component it does not replace, so the labels alone can stop a database before what uses it. Only when the
+ *  installed version is the one asked for: after an upgrade that failed past create, or stayed unknown, the containers
+ *  may be the asked-for version's, which the applied plan does not name, and the labels serve better. Nothing either
+ *  when no revision was applied or the applied plan cannot be read: the executor then goes by the labels, as before.
+ *  `plan` is the applied plan; the one place that decides, so every caller sends or withholds it alike. */
+export function appStackStopOrder(
+  stack: { readonly appliedRevisionId: string | null; readonly desiredRevisionId: string | null },
+  plan: ApprovedStackPlan | null,
+): { order?: string[] } {
+  const installedIsAsked = stack.appliedRevisionId !== null && stack.appliedRevisionId === stack.desiredRevisionId;
+  return installedIsAsked && plan !== null ? { order: plan.components.map((c) => c.key) } : {};
+}
+
 /** A refusal of the handler itself (plan invalid, secret missing, runtime unavailable, health timeout). */
 class AppStackStepRefusal extends Error {
   public constructor(public readonly problem: AppStackRuntimeProblem) {
@@ -131,6 +166,10 @@ interface RolloutState {
   previous: ApprovedStackPlan | null;
   /** Components the create step created or replaced; null until it succeeded. */
   created: readonly string[] | null;
+  /** The executor was asked to create: set on the line before the call, so an answer that never came still counts. */
+  createAsked: boolean;
+  /** The executor refused the create and said it had removed and created nothing (#111). Read from that refusal only. */
+  createRefusedBeforeChange: boolean;
 }
 
 const healthMap = (rows: HealthRows) => new Map(rows.map((h) => [h.componentKey, h.health]));
@@ -299,20 +338,8 @@ export class AppStackRuntime {
     return stack;
   }
 
-  /** The revision's plan when it parses and names this stack, this revision and its own hash; else null. */
-  async #planOf(ctx: StackContext, revisionId: string | null): Promise<ApprovedStackPlan | null> {
-    if (revisionId === null) return null;
-    const revision = await getAppStackRevision(this.#deps.db, { ...ctx.ref, revisionId });
-    const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
-    if (!revision || !parsed.success) return null;
-    const plan = parsed.data;
-    const own =
-      plan.stackId === ctx.ref.stackId &&
-      plan.organizationId === ctx.ref.organizationId &&
-      plan.revisionId === revision.id &&
-      plan.planHash === revision.planHash &&
-      verifyAppStackPlanHash(plan);
-    return own ? plan : null;
+  #planOf(ctx: StackContext, revisionId: string | null): Promise<ApprovedStackPlan | null> {
+    return readAppStackPlan(this.#deps.db, ctx.ref, revisionId);
   }
 
   /** The pinned (parameterKey, version) pairs of the plan, decrypted: the ones delivered as files and, in a version 2
@@ -347,7 +374,7 @@ export class AppStackRuntime {
   async #rollout(ctx: StackContext, restart: boolean | null): Promise<void> {
     const { db, clock } = this.#deps;
     const deploy = restart === null;
-    const st: RolloutState = { stack: null, plan: null, previous: null, created: null };
+    const st: RolloutState = { stack: null, plan: null, previous: null, created: null, createAsked: false, createRefusedBeforeChange: false };
     const body = async () => {
       await this.#step(ctx, "validate", () => this.#validate(ctx, st, deploy));
       const stack = st.stack!;
@@ -373,7 +400,14 @@ export class AppStackRuntime {
             wanted.length === 0
               ? []
               : (await this.#secretFiles(ctx, plan)).filter((f) => wanted.some((w) => w.parameterKey === f.parameterKey && w.version === f.version));
-          const result = await port.createAppStackComponents(wanted.length === 0 ? { plan } : { plan, secretContents });
+          st.createAsked = true;
+          let result;
+          try {
+            result = await port.createAppStackComponents(wanted.length === 0 ? { plan } : { plan, secretContents });
+          } catch (err) {
+            st.createRefusedBeforeChange = appStackCreateRefusedBeforeChange(err);
+            throw err;
+          }
           st.created = result.components.filter((c) => c.outcome !== "unchanged").map((c) => c.componentKey);
         });
       }
@@ -459,9 +493,12 @@ export class AppStackRuntime {
         // The containers are healthy and the old route file is still in place.
         return settle({ stackStatus: "degraded", ...(deploy ? { appliedRevisionId: st.plan!.revisionId } : {}) }, ctx.lastHealth);
       }
-      if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare"))) {
-        // Pre-flight: create was never called, so no container was touched; the stack keeps the status the plan that
-        // runs shows, and an upgrade or a rollback takes back what its request wrote.
+      const createChangedNothing = step === "create" && (!st.createAsked || st.createRefusedBeforeChange);
+      if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare" || createChangedNothing))) {
+        // Pre-flight: create was never called (a create step that failed in the API before the executor was asked is
+        // the same, and so is a create the executor refused saying that it had removed and created nothing), so no
+        // container was touched; the stack keeps the status the plan that runs shows, and an upgrade or a rollback
+        // takes back what its request wrote.
         const { stack } = st;
         const previous = deploy ? st.previous : st.plan;
         const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
@@ -586,11 +623,12 @@ export class AppStackRuntime {
     const { db } = this.#deps;
     const st = { unpublished: false };
     const body = async () => {
-      const { plan, planned } = await this.#step(ctx, "validate", async () => {
+      const { plan, planned, order } = await this.#step(ctx, "validate", async () => {
         const stack = await this.#begin(ctx, false);
         const revisionId = stack.appliedRevisionId ?? stack.desiredRevisionId;
         if (revisionId !== null && !ctx.port) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
-        return { plan: await this.#planOf(ctx, revisionId), planned: revisionId !== null };
+        const plan = await this.#planOf(ctx, revisionId);
+        return { plan, planned: revisionId !== null, order: appStackStopOrder(stack, plan) };
       });
       if (!planned) {
         ctx.current = "settle";
@@ -603,7 +641,7 @@ export class AppStackRuntime {
         await port.unpublishAppStackRoutes(ctx.ref);
         st.unpublished = true;
       });
-      await this.#step(ctx, "stop", () => port.stopAppStack(ctx.ref));
+      await this.#step(ctx, "stop", () => port.stopAppStack({ ...ctx.ref, ...order }));
       ctx.current = "settle";
       const stopped = plan?.components.map((c) => ({ componentKey: c.key, health: "stopped" as const }));
       await settleAppStackOperation(db, ctx.op, ctx.deploymentId, {
@@ -629,18 +667,21 @@ export class AppStackRuntime {
   async #delete(ctx: StackContext): Promise<void> {
     const { db } = this.#deps;
     const body = async () => {
-      const destroy = await this.#step(ctx, "validate", async () => {
+      const { destroy, order } = await this.#step(ctx, "validate", async () => {
         const stack = await this.#begin(ctx, false);
         // Nothing was ever created on this runtime when no revision was applied.
         if (!ctx.port && stack.appliedRevisionId !== null) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
-        return (await listAppStackVolumes(db, ctx.ref)).some((v) => v.retentionPolicy === "destroy");
+        return {
+          destroy: (await listAppStackVolumes(db, ctx.ref)).some((v) => v.retentionPolicy === "destroy"),
+          order: ctx.port ? appStackStopOrder(stack, await this.#planOf(ctx, stack.appliedRevisionId)) : {},
+        };
       });
       const port = ctx.port;
       if (port) {
         await this.#step(ctx, "unpublish", () => port.unpublishAppStackRoutes(ctx.ref));
-        await this.#step(ctx, "stop", () => port.stopAppStack(ctx.ref));
+        await this.#step(ctx, "stop", () => port.stopAppStack({ ...ctx.ref, ...order }));
         await this.#step(ctx, "remove", async () => {
-          const removed = await port.removeAppStack({ ...ctx.ref, removeVolumes: destroy });
+          const removed = await port.removeAppStack({ ...ctx.ref, removeVolumes: destroy, ...order });
           if (destroy && removed.retainedVolumes.length > 0) throw new AppStackStepRefusal("STACK_VOLUME_IN_USE");
         });
       }

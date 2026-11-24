@@ -1,4 +1,5 @@
 import {
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   APP_STACK_STEP_KEYS,
   AppStackRouteWireSchema,
   ERROR_CODES,
@@ -25,6 +26,7 @@ import {
   APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
   appStackAggregate,
+  appStackCreateRefusedBeforeChange,
   appStackDisplayStatus,
   appStackEssentialKeys,
   appStackHealthRows,
@@ -168,9 +170,18 @@ describe("fixed texts, problems and codes", () => {
     }
   });
 
+  it("tells a customer the folder is the administrator's to cover, with no retry and no folder name (#98)", () => {
+    const { code, text } = APP_STACK_FAILURE.STACK_IMAGE_VOLUME_UNCOVERED;
+    expect(code).toBe("HOST_POLICY_DENIED");
+    expect(text).toMatch(/administrator/i);
+    expect(text).not.toMatch(/try again|retry/i);
+    expect(text).not.toContain("/");
+  });
+
   it.each([
     ["an executor reason", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "x", reason: "STACK_IMAGE_NOT_ALLOWED" }]), "STACK_IMAGE_NOT_ALLOWED"],
     ["a control-plane reason", new ControlPlaneError("VALIDATION_ERROR", "x", { details: [{ field: "s", message: "x", reason: "STACK_SECRET_MISSING" }] }), "STACK_SECRET_MISSING"],
+    ["an image folder no volume covers wins over the code that would read as not allowed", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "The image of component web declares the folder /data and no volume of the component is mounted at exactly that folder", reason: "STACK_IMAGE_VOLUME_UNCOVERED" }]), "STACK_IMAGE_VOLUME_UNCOVERED"],
     ["a reason that wins over the code", new ExecutorIpcClientError("busy", "RESOURCE_LOCKED", 409, false, [{ field: "v", message: "x", reason: "STACK_VOLUME_IN_USE" }]), "STACK_VOLUME_IN_USE"],
     ["an unknown reason falls back to the code", new ExecutorIpcClientError("x", "HOST_POLICY_DENIED", 403, false, [{ field: "t", message: "x", reason: "TLS_VERSION_MISSING" }]), "STACK_IMAGE_NOT_ALLOWED"],
     ["VALIDATION_ERROR", new ControlPlaneError("VALIDATION_ERROR", "x"), "STACK_TEMPLATE_INVALID"],
@@ -178,10 +189,39 @@ describe("fixed texts, problems and codes", () => {
     ["a message with a secret", new ExecutorIpcClientError("password=hunter2", "DOCKER_ENGINE_UNAVAILABLE", 502, true), "DOCKER_ENGINE_UNAVAILABLE"],
     ["a plain error", new Error("STACK_SECRET_MISSING password=hunter2"), "DOCKER_ENGINE_UNAVAILABLE"],
     ["not an error", null, "DOCKER_ENGINE_UNAVAILABLE"],
+    // The executor's mark that nothing was changed (#111) is a detail like another: it never moves the problem.
+    [
+      "a reason followed by the mark",
+      new ExecutorIpcClientError("refused", "RESOURCE_LOCKED", 409, false, [{ field: "stack", message: "x", reason: "STACK_VOLUME_IN_USE" }, APP_STACK_REFUSED_BEFORE_CHANGE]),
+      "STACK_VOLUME_IN_USE",
+    ],
+    ["the mark alone on a policy refusal", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), "STACK_IMAGE_NOT_ALLOWED"],
+    ["the mark alone on an engine failure", new ExecutorIpcClientError("x", "DOCKER_ENGINE_UNAVAILABLE", 502, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), "DOCKER_ENGINE_UNAVAILABLE"],
   ])("appStackProblemOf: %s", (_name, err, problem) => {
     const result = appStackProblemOf(err);
     expect(result).toBe(problem);
     expect(result).not.toContain("hunter2");
+  });
+
+  it.each([
+    ["the mark alone", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), true],
+    [
+      "the mark after a reason",
+      new ExecutorIpcClientError("refused", "NOT_FOUND", 404, false, [{ message: "x", reason: "STACK_IMAGE_MISSING" }, APP_STACK_REFUSED_BEFORE_CHANGE]),
+      true,
+    ],
+    ["a copy of the mark, as it travels", new ExecutorIpcClientError("refused", "RESOURCE_LOCKED", 409, false, [{ field: "stage", message: "before_change" }]), true],
+    ["a refusal that says nothing about it", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "x", reason: "STACK_IMAGE_NOT_ALLOWED" }]), false],
+    ["no detail at all", new ExecutorIpcClientError("refused", "DOCKER_ENGINE_UNAVAILABLE", 502, false, []), false],
+    ["another stage", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "stage", message: "after_change" }]), false],
+    ["the same words under another field", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "note", message: "before_change" }]), false],
+    ["the words in a reason or a message", new ExecutorIpcClientError("before_change", "HOST_POLICY_DENIED", 403, false, [{ field: "stage", message: "x", reason: "before_change" }]), false],
+    ["details that are not a list", Object.assign(new Error("x"), { details: APP_STACK_REFUSED_BEFORE_CHANGE }), false],
+    ["a plain error", new Error("before_change"), false],
+    ["not an error", null, false],
+    ["nothing", undefined, false],
+  ])("appStackCreateRefusedBeforeChange: %s", (_name, err, marked) => {
+    expect(appStackCreateRefusedBeforeChange(err)).toBe(marked);
   });
 });
 

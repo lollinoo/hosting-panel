@@ -1,4 +1,4 @@
-import { appStackComponents, appStackDomains, appStacks, auditEvents, eq, hostAllocations, organizations } from "@hosting-panel/database";
+import { and, appStackComponents, appStackDomains, appStacks, auditEvents, eq, hostAllocations, organizations } from "@hosting-panel/database";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startAppStackHarness, type AppStackHarness, type HarnessCustomer } from "./fixtures/app-stack-harness.js";
 
@@ -95,6 +95,45 @@ describe("GET /v1/admin/app-stacks", () => {
     await stacks(h, ids, h.b, [{ id: "stk_b0", name: "Notes" }]);
     const tied = await h.call(h.adminToken, "GET", ROUTE);
     expect((tied.body.data.stacks as Json[]).map((s) => s.id)).toEqual(["stk_a1", "stk_b0", "stk_b1", "stk_a2"]);
+  });
+
+  it("#130: shows the status the customer's page shows, here and in the usage of the template", async () => {
+    const ids = await h.publish();
+    const created = await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks`, { templateVersionId: ids.versionId, name: "shown", deploy: false }, { "Idempotency-Key": "key-shown" });
+    expect(created.status, created.raw).toBe(201);
+    const stackId = created.body.data.stackId as string;
+    // Its first revision, queued by a deploy that no runtime processes here: the plan of what "runs" below.
+    const secret = await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/secrets`, { parameterKey: "app_secret", value: "first-value" });
+    expect(secret.status, secret.raw).toBe(200);
+    const deploy = await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/deploy`, {}, { "Idempotency-Key": "deploy-shown" });
+    expect(deploy.status, deploy.raw).toBe(202);
+    const [row] = await h.dbClient.db.select().from(appStacks).where(eq(appStacks.id, stackId));
+    await h.dbClient.db.update(appStacks).set({ status: "running", appliedRevisionId: row!.desiredRevisionId }).where(eq(appStacks.id, stackId));
+
+    const cases: readonly { readings: Record<string, [string, number]>; shown: string }[] = [
+      { readings: { app: ["healthy", 30_000], cache: ["healthy", 30_000] }, shown: "running" },
+      { readings: { app: ["stopped", 30_000], cache: ["healthy", 30_000] }, shown: "failed" },
+      { readings: { app: ["healthy", 10 * 60_000], cache: ["healthy", 30_000] }, shown: "unknown" },
+    ];
+    for (const { readings, shown } of cases) {
+      for (const [componentKey, [health, ageMs]] of Object.entries(readings)) {
+        await h.dbClient.db
+          .update(appStackComponents)
+          .set({ health: health as "healthy", healthObservedAt: new Date(Date.now() - ageMs) })
+          .where(and(eq(appStackComponents.stackId, stackId), eq(appStackComponents.componentKey, componentKey)));
+      }
+      const detail = await h.call(h.adminToken, "GET", `${ROUTE}/${stackId}`);
+      expect(detail.status, detail.raw).toBe(200);
+      expect(detail.body.data.status, JSON.stringify(readings)).toBe(shown);
+      const list = await h.call(h.adminToken, "GET", ROUTE);
+      expect(list.status, list.raw).toBe(200);
+      const [listed] = list.body.data.stacks as Json[];
+      expect(Object.keys(listed!).sort()).toEqual([...ROW_KEYS].sort());
+      expect(listed!.status, JSON.stringify(readings)).toBe(shown);
+      const usage = await h.call(h.adminToken, "GET", `/v1/admin/app-templates/${ids.templateId}/usage`);
+      expect(usage.status, usage.raw).toBe(200);
+      expect((usage.body.data.stacks as Json[])[0]!.status, JSON.stringify(readings)).toBe(shown);
+    }
   });
 
   it("shows the first active address by hostname, else the first address, else null", async () => {

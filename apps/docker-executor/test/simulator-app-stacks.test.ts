@@ -258,6 +258,40 @@ describe("SimulatedAppStacks refusals", () => {
   });
 });
 
+describe("SimulatedAppStacks create refusals (#111)", () => {
+  const marked = async (promise: Promise<unknown>) => ((await failure(promise)) as { beforeChange?: unknown }).beforeChange === true;
+
+  it("a refusal raised before the first removal or create carries the mark, like the engine's", async () => {
+    const sim = simulator();
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // no network yet
+    await sim.prepareAppStack({ plan });
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // no image yet
+    await sim.pullAppStackImage({ plan, image: web.image });
+    expect(await marked(sim.createAppStackComponents({ plan: { ...plan, planHash: "0".repeat(64) } }))).toBe(true);
+    expect(await marked(sim.createAppStackComponents({ plan, secretContents: [{ ...SECRET, parameterKey: "not_in_plan" }] }))).toBe(true);
+    expect(sim.appStacks.appStackMutations.map((m) => m.kind)).not.toContain("container_create");
+
+    await sim.createAppStackComponents({ plan });
+    const stopping = sim.stopAppStack(ref);
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(true); // another change is running
+    await stopping;
+  });
+
+  it("an engine that is down, a lost answer and a call that went through do not carry it", async () => {
+    const sim = simulator();
+    await sim.pullAppStackImage({ plan, image: web.image });
+    await sim.prepareAppStack({ plan });
+    sim.appStacks.failNextAppStackStep("create", "engine_unavailable");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.appStacks.failNextAppStackStep("create", "ambiguous_before");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.appStacks.failNextAppStackStep("create", "ambiguous_after");
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+    sim.setEngineReachable(false);
+    expect(await marked(sim.createAppStackComponents({ plan }))).toBe(false);
+  });
+});
+
 describe("SimulatedAppStacks test hooks", () => {
   it("pull_failed refuses one pull and records no image", async () => {
     const sim = simulator();
@@ -442,6 +476,46 @@ describe("SimulatedAppStacks idempotency and removal", () => {
       removedVolumes: [],
       retainedVolumes: [],
     });
+  });
+});
+
+describe("SimulatedAppStacks stop and remove order (#100)", () => {
+  /** An upgrade that kept web's old label: web carries the later one although worker uses it. */
+  function shifted(sim: InMemoryDockerSimulatorAdapter): void {
+    const stacks = (sim.appStacks as unknown as { stacks: Map<string, { containers: Map<string, { labels: Record<string, string> }> }> }).stacks;
+    const containers = stacks.get(ID)?.containers;
+    if (containers === undefined) throw new Error("no stack");
+    for (const [key, index] of [["web", "5"], ["worker", "1"]] as const) {
+      const container = containers.get(key);
+      if (container === undefined) throw new Error(`no container ${key}`);
+      container.labels = { ...container.labels, [APP_STACK_LABELS.startIndex]: index };
+    }
+  }
+
+  it("stops by reverse position in the order, a key it does not list first, and by the labels without one", async () => {
+    const stopped = async (order?: string[]) => {
+      const sim = simulator();
+      await deploy(sim);
+      shifted(sim);
+      const result = await sim.stopAppStack(order === undefined ? ref : { ...ref, order });
+      return result.components.map((c) => c.componentKey);
+    };
+    expect(await stopped()).toEqual(["web", "worker"]);
+    expect(await stopped(["web", "worker"])).toEqual(["worker", "web"]);
+    expect(await stopped(["worker"])).toEqual(["web", "worker"]);
+    expect(await stopped(["ghost"])).toEqual(["web", "worker"]);
+  });
+
+  it("removes in the same order", async () => {
+    const removed = async (order?: string[]) => {
+      const sim = simulator();
+      await deploy(sim);
+      shifted(sim);
+      const result = await sim.removeAppStack(order === undefined ? { ...ref, removeVolumes: false } : { ...ref, removeVolumes: false, order });
+      return result.removedComponents;
+    };
+    expect(await removed()).toEqual(["web", "worker"]);
+    expect(await removed(["web", "worker"])).toEqual(["worker", "web"]);
   });
 });
 

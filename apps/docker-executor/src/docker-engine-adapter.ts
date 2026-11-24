@@ -72,6 +72,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type AppStackTaskReadIpcRequest,
   type AppStackTaskReadIpcResult,
@@ -1529,6 +1530,17 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
           }),
         );
       },
+      // The output was not kept because it could not be masked: the same, no name, no output, no value.
+      onOutputWithheld: () => {
+        console.warn(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "app_task_output_withheld",
+            code: "DOCKER_ENGINE_UNAVAILABLE",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      },
     });
   }
 
@@ -1556,7 +1568,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     return this.appStackEngine.restartAppStackComponent(req);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.appStackEngine.stopAppStack(req);
   }
 

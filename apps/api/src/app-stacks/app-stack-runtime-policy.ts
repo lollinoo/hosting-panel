@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   aggregateAppStackStatus,
   canTransitionAppStack,
   effectiveComponentHealth,
@@ -69,6 +70,7 @@ export const APP_STACK_UNCERTAIN_TEXT = "The result of this action is being chec
 export const APP_STACK_RUNTIME_PROBLEMS = [
   "STACK_TEMPLATE_INVALID",
   "STACK_IMAGE_NOT_ALLOWED",
+  "STACK_IMAGE_VOLUME_UNCOVERED",
   "STACK_SECRET_MISSING",
   "STACK_UNSUPPORTED_FEATURE",
   "STACK_HEALTH_TIMEOUT",
@@ -89,6 +91,11 @@ export const APP_STACK_FAILURE: Readonly<Record<AppStackRuntimeProblem, { readon
     STACK_IMAGE_NOT_ALLOWED: {
       code: "HOST_POLICY_DENIED",
       text: "The application uses software this server does not allow. Ask the administrator for help.",
+    },
+    // Not "try again": nothing changes until the administrator publishes a version that covers the folder (#98).
+    STACK_IMAGE_VOLUME_UNCOVERED: {
+      code: "HOST_POLICY_DENIED",
+      text: "The application's software keeps data in a folder the application does not declare. Ask the administrator to publish a version that gives that folder its own storage.",
     },
     STACK_SECRET_MISSING: { code: "VALIDATION_ERROR", text: "A required password or key is not set. Set it and try again." },
     STACK_UNSUPPORTED_FEATURE: { code: "NOT_SUPPORTED", text: "Applications are not available on this server." },
@@ -122,6 +129,19 @@ export function appStackProblemOf(err: unknown): AppStackRuntimeProblem {
   const reason: unknown = Array.isArray(e?.details) ? (e.details[0] as { reason?: unknown } | null | undefined)?.reason : undefined;
   if (isRuntimeProblem(reason)) return reason;
   return (typeof e?.code === "string" ? PROBLEM_BY_CODE[e.code] : undefined) ?? "DOCKER_ENGINE_UNAVAILABLE";
+}
+
+/**
+ * True when a refusal of the executor's create call says that nothing was removed or created before it (#111): its
+ * details carry the executor's mark. Read only from an error of that one call; the mark is never shown to a customer
+ * and never stored (appStackProblemOf reads details[0].reason and the code only, so it does not move the problem).
+ */
+export function appStackCreateRefusedBeforeChange(err: unknown): boolean {
+  const details: unknown = (err as { details?: unknown } | null | undefined)?.details;
+  return (
+    Array.isArray(details) &&
+    details.some((d: { field?: unknown; message?: unknown } | null | undefined) => d?.field === APP_STACK_REFUSED_BEFORE_CHANGE.field && d?.message === APP_STACK_REFUSED_BEFORE_CHANGE.message)
+  );
 }
 
 /** A plan key absent from `components` is "missing". */
@@ -423,6 +443,26 @@ export function appStackAddressRemovable(
   return idle && stack.appliedRoutesHash === null && (stack.appliedRevisionId === null || stack.status === "stopped");
 }
 
+/** The stored statuses whose shown status is computed from the health of the components; the others are shown as stored. */
+export const APP_STACK_STATUSES_SHOWN_FROM_HEALTH: readonly AppStackStatus[] = ["running", "degraded"];
+
+/**
+ * The health a component shows (ADR-0035, issue #208). An observation older than five minutes reads `unknown`
+ * (`effectiveComponentHealth`), except the `stopped` reading of an application stored as `stopped`: the observer stops
+ * reading a stopped application, so no newer reading will come and the old one is still true. Any other reading, and a
+ * `stopped` one of an application in any other stored status, keeps the five-minute rule. The time of the last check is
+ * not touched here: it stays the stored one.
+ */
+export function shownComponentHealth(
+  stackStatus: AppStackStatus,
+  health: AppStackComponentHealth,
+  observedAt: Date | null,
+  now: Date,
+): AppStackComponentHealth {
+  if (stackStatus === "stopped" && health === "stopped" && observedAt !== null) return "stopped";
+  return effectiveComponentHealth(health, observedAt, now);
+}
+
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */
 export function appStackDisplayStatus(input: {
   readonly stack: Pick<AppStackRow, "status" | "appliedRoutesHash">;
@@ -432,7 +472,7 @@ export function appStackDisplayStatus(input: {
   readonly now: Date;
 }): AppStackStatus {
   const { stack, plan } = input;
-  if ((stack.status !== "running" && stack.status !== "degraded") || plan === null) return stack.status;
+  if (!APP_STACK_STATUSES_SHOWN_FROM_HEALTH.includes(stack.status) || plan === null) return stack.status;
   const rows = new Map(input.components.map((c) => [c.componentKey, c]));
   const health = new Map<string, AppStackComponentHealth>();
   for (const c of plan.components) {

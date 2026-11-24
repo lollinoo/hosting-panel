@@ -297,23 +297,20 @@ const MARIADB_DESCRIPTION =
 const POSTGRESQL_DESCRIPTION =
   "Un database PostgreSQL con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Database e utente si chiamano app.";
 
-const VALKEY_DESCRIPTION =
+/** The description of version 1, as it shipped: it says nothing of how much the store holds. */
+const VALKEY_DESCRIPTION_1 =
   "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Non ha password.";
+
+const VALKEY_DESCRIPTION =
+  "Un archivio chiave-valore Valkey, compatibile con Redis, con i dati conservati su disco. Può tenere fino a 256 MB di dati: quando è pieno rifiuta le nuove scritture e tiene quello che ha. Lo raggiungono soltanto le tue applicazioni che gli colleghi, con il nome e la porta indicati nella sua pagina; da fuori del server non è raggiungibile. Non ha password.";
 
 const DATABASE_LIMITS = ["    deploy:", "      resources:", "        limits:", '          cpus: "1.0"', "          memory: 512M"];
 const tcpHealth = (port: number) => ["    healthcheck:", "      kind: tcp", `      port: ${port}`, "      intervalSeconds: 10", "      timeoutSeconds: 3"];
 const databasePassword = ["  - key: database_password", '    label: "Password del database"', "    type: secret", "    required: true", "    customer: true"];
 
-const mariadb: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_mariadb",
-  versionId: "atv_mariadb_1",
-  slug: "mariadb",
-  name: "Database MariaDB",
-  category: "database",
-  description: MARIADB_DESCRIPTION,
-  descriptionEn:
-    "A MariaDB database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
-  source: [
+/** The MariaDB source; `command` is the line that starts the server (version 2 adds the temporary directory). */
+function mariadbSource(command: string): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Database MariaDB"',
@@ -329,8 +326,7 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
     "services:",
     "  db:",
     "    image: docker.io/library/mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
-    // Socket and pid file under /tmp: the root file system is read-only.
-    '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]',
+    command,
     "    environment:",
     "      - name: MARIADB_DATABASE",
     "        value: app",
@@ -352,19 +348,33 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const mariadb: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_mariadb",
+  versionId: "atv_mariadb_2",
+  slug: "mariadb",
+  name: "Database MariaDB",
+  category: "database",
+  description: MARIADB_DESCRIPTION,
+  descriptionEn:
+    "A MariaDB database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  source: mariadbSource(
+    // Socket and pid file under /tmp: the root file system is read-only. The temporary files of a sort or of an index
+    // build go to the data area: the 64 MB /tmp of the strict profile is memory, and a statement that needed more
+    // than that failed there.
+    '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid", "--tmpdir=/var/lib/mysql"]',
+  ),
+  // Version 1 as it shipped: the databases installed on it are offered version 2.
+  previousVersions: Object.freeze([
+    Object.freeze({ versionId: "atv_mariadb_1", source: mariadbSource('    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]') }),
+  ]),
 });
 
-const postgresql: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_postgresql",
-  versionId: "atv_postgresql_1",
-  slug: "postgresql",
-  name: "Database PostgreSQL",
-  category: "database",
-  description: POSTGRESQL_DESCRIPTION,
-  descriptionEn:
-    "A PostgreSQL database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
-  source: [
+/** The PostgreSQL source; `dataDirectory` is the environment entry that names the data directory, or none (version 1). */
+function postgresqlSource(dataDirectory: readonly string[]): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Database PostgreSQL"',
@@ -381,6 +391,7 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
     "        value: app",
     "      - name: POSTGRES_USER",
     "        value: app",
+    ...dataDirectory,
     "      - name: POSTGRES_PASSWORD_FILE",
     "        secret: database_password",
     "    volumes:",
@@ -392,24 +403,35 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const postgresql: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_postgresql",
+  versionId: "atv_postgresql_2",
+  slug: "postgresql",
+  name: "Database PostgreSQL",
+  category: "database",
+  description: POSTGRESQL_DESCRIPTION,
+  descriptionEn:
+    "A PostgreSQL database that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. The database and its user are both named app.",
+  // The data directory is written here, with the value this image (PostgreSQL 18) already uses by default, so the
+  // mount and the data stay where version 1 put them. Left to the image, a later image of another major version would
+  // take the directory of its own major version, and the database would start empty beside the data. With the line
+  // kept, PostgreSQL refuses to start on the data of another major version, and the data stay.
+  source: postgresqlSource(["      - name: PGDATA", "        value: /var/lib/postgresql/18/docker"]),
+  // Version 1 as it shipped: the databases installed on it are offered version 2.
+  previousVersions: Object.freeze([Object.freeze({ versionId: "atv_postgresql_1", source: postgresqlSource([]) })]),
 });
 
-const valkey: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_valkey",
-  versionId: "atv_valkey_1",
-  slug: "valkey",
-  name: "Archivio Valkey",
-  category: "database",
-  description: VALKEY_DESCRIPTION,
-  descriptionEn:
-    "A Valkey key-value store, compatible with Redis, that keeps its data on disk. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
-  source: [
+/** The Valkey source; `description` is the one the version shipped with and `memory` its limit (version 2 raises it). */
+function valkeySource(description: string, memory: string): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 1",
     '  name: "Archivio Valkey"',
     "  category: database",
-    `  description: "${VALKEY_DESCRIPTION}"`,
+    `  description: "${description}"`,
     "services:",
     "  db:",
     "    image: valkey/valkey:9.2.0-alpine3.24@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882",
@@ -423,11 +445,27 @@ const valkey: AppBuiltInTemplate = Object.freeze({
     "      resources:",
     "        limits:",
     '          cpus: "0.5"',
-    "          memory: 384M",
+    `          memory: ${memory}`,
     "volumes:",
     "  data: {}",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+const valkey: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_valkey",
+  versionId: "atv_valkey_2",
+  slug: "valkey",
+  name: "Archivio Valkey",
+  category: "database",
+  description: VALKEY_DESCRIPTION,
+  descriptionEn:
+    "A Valkey key-value store, compatible with Redis, that keeps its data on disk. It holds up to 256 MB: when it is full it refuses new writes and keeps what it holds. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
+  // The ceiling (256 MB) is unchanged and now told to the customer; the limit is twice it, so the server, its buffers and
+  // the copy of a snapshot or of an append-only rewrite fit above what the store may hold (swap is off: memory is all).
+  source: valkeySource(VALKEY_DESCRIPTION, "512M"),
+  // Version 1 as it shipped: the stores installed on it are offered version 2.
+  previousVersions: Object.freeze([Object.freeze({ versionId: "atv_valkey_1", source: valkeySource(VALKEY_DESCRIPTION_1, "384M") })]),
 });
 
 /** The two seeds of the first format (ADR-0035), the WordPress one of the extended format (ADR-0036), then the three

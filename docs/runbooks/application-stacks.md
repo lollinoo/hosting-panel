@@ -48,12 +48,16 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## 1. See a stack's real state
 
-1. In the panel: the application page (`/apps/<stackId>`) shows the status, each component's health with the time of
+1. In the panel: the application page (`/apps/<stackId>`) shows the status (the list shows the same one), each component's health with the time of
    the last check, the domains, the history of every action with its reason, and each component's log (the last 1 to
-   500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`.
+   500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`, except the `stopped`
+   reading of an application stored as `stopped`: its components keep reading `stopped` however long ago it was stopped,
+   with the time of that last check beside it.
 2. The server administrator sees every live stack in **Applicazioni** (customer, template and version, status, web
    address; at most 200, read-only) and the stacks of one template in **Modelli** › the template › its usage list
-   (organisation, name, version, status). All live stacks:
+   (organisation, name, version, status). The status of a row is the one the application page shows: for a `running` or
+   `degraded` application it follows the health of its components, so a crashed one reads `failed` and a missing or
+   old reading `unknown`, while the `status` column below is the stored one. All live stacks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where deleted_at is null order by organization_id, name"
    ```
@@ -145,10 +149,26 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    - `STACK_HEALTH_TIMEOUT`: read the component logs, fix the cause, then **Riavvia** or **Reinstalla**;
    - `STACK_IMAGE_NOT_ALLOWED`, `STACK_TEMPLATE_INVALID`: the template is at fault; the administrator publishes a fixed
      version and the customer upgrades;
+   - `STACK_IMAGE_VOLUME_UNCOVERED`: the template is at fault, see the paragraph below;
    - `DOCKER_ENGINE_UNAVAILABLE`, `OPERATION_INTERRUPTED`: the action was cut (Docker, the executor, an API restart or a
      restore); check procedure 2 step 3, then **Riavvia** or **Reinstalla**.
 
-   An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
+   **`STACK_IMAGE_VOLUME_UNCOVERED` (issue #98).** A software image can declare a folder (`VOLUME` in its build file) that
+   Docker backs with a hidden volume nobody named, outside the volumes the panel lists, backs up and restores. The executor
+   refuses, at the download step and before anything is created, an image that declares a folder when some component
+   using it has no volume mounted at exactly that folder (a volume at a parent, inside it, a temporary area or a secret
+   file does not count). The customer sees that the software keeps data in a folder the application does not declare; the
+   operation fails with `HOST_POLICY_DENIED` and the status rules below apply. The folder is not named to the customer;
+   the administrator reads it on the server:
+   `docker image inspect --format '{{json .Config.Volumes}}' <image>` (the image of the component, as pinned by digest in
+   the template). The fix is a new template version that gives each folder listed a volume whose `containerPath` is
+   exactly that folder, which the customer then upgrades to. What an earlier container wrote to the hidden area is not
+   carried over to the new volume: the template author decides whether that data matters before publishing. A folder the
+   image declares at or under `/run` or `/tmp`, or at another path a volume may not use, cannot be covered: the panel
+   cannot run that image, and the template needs another one.
+
+   An upgrade or a rollback that fails before its components are created (download, preparation, or a create the
+   executor refuses before it removes or creates anything) goes back to what its
    request replaced: the version, settings, components and quota asked for before that request (usually those of the
    version installed, but not after a change that failed past create, nor on an application never installed), the
    upgrade on offer again, and the failed attempt in the history. Not so when a web address or one of its paths was
@@ -322,13 +342,26 @@ names only the key of a task, and the command is read from the template version 
    could not begin leaves no row in `app_stack_task_runs` and makes its time owed again this way. After 30 minutes
    the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
    at the same hour run one after another; one that cannot start within 30 minutes is skipped as `busy`.
-5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
-   the run (it restarted), or its answer to the panel's question did not have the expected shape. The panel never
-   starts it again by itself: check the application, then press «Esegui ora» if running it twice is safe. While the
-   executor still knows the run, the application stays held and the panel asks again at every recovery pass.
+5. **A run reads «esito non noto» (`unknown`).** Two causes. The answer of the executor was lost and the executor no
+   longer knows the run (it restarted), or its answer to the panel's question did not have the expected shape. Or the
+   executor answered it itself: at the time limit, or when the output of the command ended with no exit code, it could
+   not confirm that it had stopped the command (`journalctl -u hp-docker-executor | grep app_task_cleanup_failed`
+   shows the same run), so the command may still be running; it is never called «stopped». Either way the panel never
+   starts it again by itself: check the application (for the second cause, look for the process of the command in the
+   component, or restart the application), then press «Esegui ora» if running it twice is safe. The run keeps what
+   the command printed in the second case and nothing in the first. While the executor still knows the run, the
+   application stays held and the panel asks again at every recovery pass.
 6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
    (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
    a code only when that clean-up could not finish; restart the application to be sure nothing is left).
+   `app_task_cleanup_failed` after a run (not only at start) means that the executor tried to stop the command six
+   times, five seconds apart, and none was confirmed, or that the component's own environment carries the mark so
+   the clean-up cannot work (it is then written at once, not retried). The attempts are part of the run: the
+   application stays held, and the run is answered after them, about a minute and a half after its time limit when
+   the engine does not answer at all. A **slow** engine (each step answered just before its time-out) can take about
+   six and a half minutes past the limit (ADR-0042, A4), longer than the panel waits: the operation then reads
+   «Da verificare», the application stays refused as busy while the executor still tries, and the recovery pass
+   writes the run when the executor has answered. The run reads «esito non noto» (item 5), never «stopped».
    `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
    environment (their image, or a container created before the rule against it). The clean-up kills nothing there and
    no task of such a component can run (its runs end not started, `unavailable`). Find the variable in the
@@ -336,6 +369,10 @@ names only the key of a task, and the command is read from the template version 
    The start-up clean-up works in four components at once and stops after 60 seconds, before the executor takes calls.
    `app_task_reap_unfinished` with a `count`: that many components were not cleaned by then; each is cleaned by the
    probe of its next run, and while a clean-up of it is still going no task of that application starts.
+   `app_task_output_withheld` with `code` `DOCKER_ENGINE_UNAVAILABLE`: a run printed something and none of it was kept,
+   because the private values of the component could not be read to hide them (the page tells the customer so). The
+   remedy is the one of procedure 13, step 5: **Riavvia** the application; if it comes back, the customer replaces the
+   private value shorter than 6 characters in **Valori riservati** and presses **Reinstalla**.
 7. **Downgrade.** `hp-update --allow-downgrade` exits with **code 8** when the target release does not list the feature
    `app-tasks` and a template version that declares tasks exists: an older release refuses the source of such a version
    and cannot show the applications that use it. Template versions are never deleted, so the only way back is
@@ -470,7 +507,8 @@ names only the key of a task, and the command is read from the template version 
    template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
    the images are local), `infra/linux/accept-app-stack-backups.mjs` (backup and restore of an application,
    `ADR-0038`), `infra/linux/accept-app-stack-databases.mjs` (the three built-in databases and their private
-   links) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
+   links, and the move of an application from version 1 of a database template to the newest) and
+   `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
    prefix is `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the
    «Lavoro periodico con archivio» template on the machine: its `preflight` step fails and names the image when it is
    missing). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
@@ -488,9 +526,9 @@ names only the key of a task, and the command is read from the template version 
    node infra/linux/accept-app-stack-wordpress.mjs --imported
    ```
    The built-in run is made for the newest version of the template (procedure 15); without root it ends with
-   `RESULT 25/25 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
+   `RESULT 26/26 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
    `address-follows-host`, `address-follows-https` and `uploads-limit` fail (`no-redirect-loop` is expected to fail
-   too, so `RESULT 21/25`): that run reproduces what version 2 fixes:
+   too, so `RESULT 22/26`): that run reproduces what version 2 fixes:
    ```bash
    HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs
    ```
@@ -774,6 +812,21 @@ approval.
    the panel, disabled until the server administrator publishes them: «Database MariaDB» (`atpl_mariadb`), «Database
    PostgreSQL» (`atpl_postgresql`) and «Archivio Valkey» (`atpl_valkey`). A database has one component, one port and no
    web address: nothing outside the server reaches it, and no other application does until it is linked to it.
+   «Database MariaDB» has a second version (`atv_mariadb_2`) that keeps the database's temporary files on its data volume
+   instead of the 64 MB `/tmp`: a database installed before it stays on version 1 until its customer accepts the
+   upgrade (a short stop, the data stays), and the real-Docker check of procedure 9 proves the move.
+   «Archivio Valkey» has a second version (`atv_valkey_2`): the same 256 MB ceiling under a 512 MB limit instead of
+   384 MB, and a description that says a full store refuses new writes; its upgrade asks the customer 128 MiB more of
+   the memory maximum and is refused, the store untouched, when the customer is already at it.
+   «Database PostgreSQL» has a second version (`atv_postgresql_2`) that names the data directory (`PGDATA`,
+   `/var/lib/postgresql/18/docker`, the one version 1 already used), so an image of another major version would find the
+   data instead of starting an empty database beside them: PostgreSQL is then expected to refuse to start (not tested,
+   no image of another major version is allowed today); its upgrade keeps the data.
+   A change of major version of a database is not a template upgrade: it is a dump of the old database and a restore
+   into a new database application of the new version, made with the database's own tools; the panel has no step for
+   it and never converts the data. Whoever writes a template with a database image keeps the same major version in
+   every version of that template, publishes another major version as a template of its own and, where the image
+   chooses its data folder by version (PostgreSQL does), names that folder in the template.
 2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
    presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
    applications of the same customer; an application has at most 4 databases and a database at most 8 applications.

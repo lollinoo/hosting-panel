@@ -65,6 +65,8 @@ export interface AppStackFakeEngine {
   /** "METHOD path" -> bodies sent. */
   readonly bodies: Map<string, unknown[]>;
   readonly images: Map<string, FakeImage>;
+  /** Image reference -> what its inspect answers as Config.Volumes (the folders the image declares); an image with no entry answers with no Config at all. */
+  readonly declaredVolumes: Map<string, unknown>;
   /** Refs a pull succeeds for (RepoDigests = [ref]); any other pull answers 200 with an "error" line. */
   readonly pullable: Set<string>;
   /** GET /distribution/<reference>/json: reference -> the body answered with 200; any other reference answers 404. */
@@ -100,6 +102,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
   const log: string[] = [];
   const bodies = new Map<string, unknown[]>();
   const images = new Map<string, FakeImage>();
+  const declaredVolumes = new Map<string, unknown>();
   const pullable = new Set<string>();
   const registry = new Map<string, unknown>();
   const networks = new Map<string, FakeNetwork>();
@@ -136,7 +139,12 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     if (kind === "images") {
       if (method === "GET" && action === "json") {
         const image = images.get(ref);
-        return image ? reply(200, { Id: "sha256:fake", RepoDigests: image.repoDigests }) : reply(404, { message: "No such image" });
+        if (!image) return reply(404, { message: "No such image" });
+        return reply(200, {
+          Id: "sha256:fake",
+          RepoDigests: image.repoDigests,
+          ...(declaredVolumes.has(ref) ? { Config: { Volumes: declaredVolumes.get(ref) } } : {}),
+        });
       }
       if (method === "POST" && ref === "create") {
         const image = url.searchParams.get("fromImage") ?? "";
@@ -370,6 +378,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     log,
     bodies,
     images,
+    declaredVolumes,
     pullable,
     registry,
     networks,

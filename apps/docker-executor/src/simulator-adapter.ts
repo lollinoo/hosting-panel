@@ -43,6 +43,7 @@ import {
   type AppStackRefIpcRequest,
   type AppStackRemoveIpcRequest,
   type AppStackRoutesIpcRequest,
+  type AppStackStopIpcRequest,
   type AppStackTaskReadIpcRequest,
   type AppStackTaskRunIpcRequest,
 } from "@hosting-panel/contracts";
@@ -1395,7 +1396,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public resolveAppStackImage(req: AppStackImageResolveIpcRequest) { return this.appStacks.resolveAppStackImage(req); }
   public startAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.startAppStackComponent(req); }
   public restartAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.restartAppStackComponent(req); }
-  public stopAppStack(req: AppStackRefIpcRequest) { return this.appStacks.stopAppStack(req); }
+  public stopAppStack(req: AppStackStopIpcRequest) { return this.appStacks.stopAppStack(req); }
   public publishAppStackRoutes(req: AppStackRoutesIpcRequest) { return this.appStacks.publishAppStackRoutes(req); }
   public unpublishAppStackRoutes(req: AppStackRefIpcRequest) { return this.appStacks.unpublishAppStackRoutes(req); }
   public removeAppStack(req: AppStackRemoveIpcRequest) { return this.appStacks.removeAppStack(req); }

@@ -92,6 +92,21 @@ describe("M6 web guards: browser-side hazards", () => {
     for (const f of routeFiles) expect(code(f), rel(f)).not.toMatch(/randomUUID|uuid|Math\.random|nanoid/i);
   });
 
+  it("a typed password or private value is read from its field through a ref at submit: no state slot for it, no controlled input (issue #136)", () => {
+    for (const name of ["app-stack-domain-options", "app-stack-secrets", "app-stack-actions"]) {
+      const c = code(path.join(src, `components/app-stacks/${name}.tsx`));
+      const slots = [...c.matchAll(/const \[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*useState/g)].map((x) => x[1]!);
+      expect(slots.length, `${name}: the scan sees the state slots`).toBeGreaterThan(0);
+      expect(slots.filter((n) => /password|secret|typed|value|token/i.test(n)), name).toEqual([]);
+      const fields = (c.match(/<Input\b[\s\S]*?\/>/g) ?? []).filter((b) => /type="password"/.test(b));
+      expect(fields.length, `${name}: the scan sees the password field`).toBe(1);
+      for (const field of fields) {
+        expect(field, name).toMatch(/\bref=/);
+        expect(field, name).not.toMatch(/\b(value|defaultValue|onChange)=/);
+      }
+    }
+  });
+
   it("the browser never sets a secret value into a URL or query string", () => {
     for (const f of customerFiles) {
       expect(code(f), rel(f)).not.toMatch(/[?&](value|secret|password)=/i);

@@ -19,7 +19,7 @@ import { useLocale, useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 import { appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
 
-/** Private values are write-only: a row says whether one is set; the typed value lives only in the field until it is sent. */
+/** Private values are write-only: a row says whether one is set; the typed value lives only in the field until it is stored or the dialog closes. */
 export function AppStackSecrets({
   orgId,
   stackId,
@@ -70,8 +70,11 @@ export function AppStackSecrets({
       parameterKey: row.key,
       value,
     });
-    if (inputRef.current) inputRef.current.value = "";
     setBusy(false);
+    // The value leaves its field once it is stored or refused as a value; any other refusal (busy, rate limit, a lost
+    // reply) keeps it, so the next send carries what was typed.
+    const valueRefused = !sent.ok && (sent.field === "value" || sent.reason === "value_too_long" || sent.reason === "value_too_short");
+    if ((sent.ok || valueRefused) && inputRef.current) inputRef.current.value = "";
     if (sent.ok) {
       setEditing(null);
       setNotice(t.replaced);

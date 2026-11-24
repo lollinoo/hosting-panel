@@ -239,6 +239,7 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
   async function running() {
     n += 1;
     const stackId = newAppEntityId("stk");
+    const rev = revision(stackId);
     const write = await createAppStackTransactional(db(), {
       stackId,
       organizationId: ORG,
@@ -248,7 +249,7 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       createdBy: null,
       idempotencyKey: `bk-${String(n)}`,
       requestHash: hex(`create ${String(n)}`),
-      deploy: revision(stackId),
+      deploy: rev,
     });
     await addAppStackDomainsTransactional(db(), {
       organizationId: ORG,
@@ -258,7 +259,7 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
     expect(await apply(write.operation!)).toBeUndefined();
     expect((await stackOf(stackId)).status).toBe("running");
     fake.calls.length = 0;
-    return { stackId };
+    return { stackId, rev };
   }
 
   async function stopped() {
@@ -481,6 +482,41 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       await resume(op.id);
       expect((await stackOf(stackId)).status).toBe("running");
       expect(fake.stack(stackId).routes).toHaveLength(1);
+    });
+
+    it("the stop names the applied plan's components in plan order, so a database goes down after what uses it (#100)", async () => {
+      const { stackId } = await running();
+      const { operation: op } = await request(stackId);
+
+      expect(await apply(op)).toBeUndefined();
+
+      expect(fake.calls.find((c) => c.method === "stopAppStack")?.request).toEqual({ stackId, organizationId: ORG, order: ["web"] });
+    });
+
+    it("an application whose installed version is not the one asked for is stopped without one (#100)", async () => {
+      const { stackId, rev } = await running();
+      n += 1;
+      // An upgrade that failed past create: the containers may be the asked-for version's, which the applied plan does not name.
+      const v2 = revision(stackId);
+      const upgrade = await enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId,
+        kind: "stack.upgrade",
+        requestedByUserId: null,
+        idempotencyKey: `bk-${String(n)}`,
+        requestHash: hex(`upgrade ${String(n)}`),
+        revision: v2,
+        destroyData: false,
+      });
+      fake.failNext("createAppStackComponents", "definite");
+      expect(await apply(upgrade.operation!)).toBeInstanceOf(Error);
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+      fake.calls.length = 0;
+      const { operation: op } = await request(stackId);
+
+      expect(await apply(op)).toBeUndefined();
+
+      expect(fake.calls.find((c) => c.method === "stopAppStack")?.request).toEqual({ stackId, organizationId: ORG });
     });
 
     it("a stopped application stays stopped: nothing is withdrawn, stopped or queued", async () => {
@@ -763,6 +799,15 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await stepsOf(op.id)).toEqual(done("stack.restore"));
       await resume(op.id);
       expect((await stackOf(stackId)).status).toBe("running");
+    });
+
+    it("stops the application in the applied plan's order too (#100)", async () => {
+      const { stackId, source } = await withBackup();
+      const { operation: op } = await request(stackId, "stack.restore", source.id);
+
+      expect(await apply(op)).toBeUndefined();
+
+      expect(fake.calls.find((c) => c.method === "stopAppStack")?.request).toEqual({ stackId, organizationId: ORG, order: ["web"] });
     });
 
     it("a stopped application is restored and stays stopped", async () => {

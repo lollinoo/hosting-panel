@@ -2986,6 +2986,7 @@ x-hp-ingress:
         STACK_VOLUME_IN_USE: "Volume ancora in uso.",
         STACK_UNSUPPORTED_FEATURE: "Funzione non supportata in questa release.",
         STACK_PARAMETER_INVALID: "Valore di parametro non valido.",
+        STACK_IMAGE_VOLUME_UNCOVERED: "L'immagine dichiara una cartella su cui non è montato alcun volume del componente: pubblica una versione che dia un volume a quella cartella.",
         slug_taken: "Esiste già un modello con questo slug.",
         template_archived: "Il modello è archiviato.",
         built_in: "I modelli di sistema non si archiviano.",
@@ -3580,6 +3581,8 @@ x-hp-ingress:
         error: "Impossibile leggere le esecuzioni.",
         output: "Cosa ha scritto",
         noOutput: "Non ha scritto nulla.",
+        notKept:
+          "Questa esecuzione ha scritto qualcosa, ma non è stato conservato. Succede quando quello che ha scritto è una sola riga molto lunga, oppure quando il pannello non ha potuto leggere i valori riservati dell'applicazione per nasconderli. Se succede di nuovo, riavvia l'applicazione ed esegui di nuovo l'attività; se succede ancora dopo il riavvio, rivolgiti all'amministratore del server.",
         truncated: "Sono mostrate solo le ultime righe.",
       },
     },
@@ -3676,6 +3679,10 @@ x-hp-ingress:
       STACK_TEMPLATE_UNPUBLISHED: "Questa applicazione o versione non è più offerta nel catalogo.",
       STACK_IMAGE_NOT_ALLOWED: "Il software di questa applicazione non è approvato su questo server.",
       STACK_QUOTA_EXCEEDED: "Hai raggiunto il limite di applicazioni o di risorse del tuo piano.",
+      cpu_limit_reached:
+        "Le tue applicazioni userebbero più processore di quello che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
+      memory_limit_reached:
+        "Le tue applicazioni userebbero più memoria di quella che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
       STACK_DEPENDENCY_CYCLE: "I componenti di questa applicazione dipendono l'uno dall'altro in cerchio: contatta l'assistenza.",
       STACK_HEALTH_TIMEOUT: "L'applicazione non è diventata pronta in tempo. I dati sono conservati: guarda i registri e riprova.",
       STACK_PORT_UNAVAILABLE: "La porta richiesta non è disponibile.",
@@ -3683,6 +3690,8 @@ x-hp-ingress:
       STACK_VOLUME_IN_USE: "I dati di questa applicazione sono ancora in uso: riprova tra poco.",
       STACK_UNSUPPORTED_FEATURE: "Questa funzione non è disponibile su questo server.",
       STACK_PARAMETER_INVALID: "Controlla le impostazioni evidenziate.",
+      STACK_IMAGE_VOLUME_UNCOVERED:
+        "Il software di questa applicazione conserva dati in una cartella che l'applicazione non dichiara. L'amministratore del server deve pubblicare una versione che dia a quella cartella un proprio spazio di archiviazione.",
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
       notNow: "Questa azione non è disponibile in questo momento. Ricarica la pagina per vedere le azioni che puoi usare ora.",

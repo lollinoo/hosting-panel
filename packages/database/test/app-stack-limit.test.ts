@@ -158,16 +158,17 @@ describe("@hosting-panel/database — app stack limit and quota charge", () => {
     expect(await quotaRow(rq)).toMatchObject({ usedServices: 4, usedCpuMilli: 800, usedMemoryBytes: "1600" });
   });
 
-  it("6. a positive delta over max_services, max_cpu_milli or max_memory_bytes throws AppStackQuotaError and writes nothing", async () => {
+  it("6. a positive delta over max_cpu_milli or max_memory_bytes throws AppStackQuotaError and writes nothing", async () => {
     const org = await organization();
     const rq = await quota(org, { maxServices: 4, maxCpuMilli: 1000, maxMemoryBytes: "5000", usedServices: 2, usedCpuMilli: 400, usedMemoryBytes: "3000" });
     const stackId = await stack(org);
     const charge = (next: ReturnType<typeof totals>) =>
       chargeAppStackQuota(db(), { organizationId: org.id, stackId, hostAllocationId: org.allocation, resourceQuotaId: null, previous: null, next });
+    // The third case is also over max_services: the count of components is no bound, so the field is still the processor.
     const cases = [
-      [totals(3, 100, 100), "components", 2, 4],
       [totals(1, 700, 100), "cpuMilli", 400, 1000],
       [totals(1, 100, 2001), "memoryBytes", 3000, 5000],
+      [totals(9, 700, 100), "cpuMilli", 400, 1000],
     ] as const;
     for (const [next, field, used, limit] of cases) {
       const error = await charge(next).catch((e: unknown) => e);
@@ -178,6 +179,25 @@ describe("@hosting-panel/database — app stack limit and quota charge", () => {
     expect(await quotaRow(rq)).toMatchObject({ usedServices: 2, usedCpuMilli: 400, usedMemoryBytes: "3000" });
     await charge(totals(2, 600, 2000));
     expect(await quotaRow(rq)).toMatchObject({ usedServices: 4, usedCpuMilli: 1000, usedMemoryBytes: "5000" });
+  });
+
+  it("6b. the number of components is bookkeeping, not a bound: max_services 20 with 18 in use takes 4 more, and deleting gives them back (issue #151)", async () => {
+    const org = await organization();
+    const rq = await quota(org, { maxServices: 20, usedServices: 18 });
+    const stackId = await stack(org);
+    const input = { organizationId: org.id, stackId, hostAllocationId: org.allocation };
+    expect(await chargeAppStackQuota(db(), { ...input, resourceQuotaId: null, previous: null, next: totals(4, 400, 4000) })).toEqual({
+      resourceQuotaId: rq,
+    });
+    expect(await quotaRow(rq)).toMatchObject({ usedServices: 22, usedCpuMilli: 400, usedMemoryBytes: "4000" });
+    // An upgrade that adds components while the count is already over the maximum is accepted too.
+    await chargeAppStackQuota(db(), { ...input, resourceQuotaId: rq, previous: totals(4, 400, 4000), next: totals(8, 500, 5000) });
+    expect(await quotaRow(rq)).toMatchObject({ usedServices: 26, usedCpuMilli: 500, usedMemoryBytes: "5000" });
+    expect(await chargeAppStackQuota(db(), { ...input, resourceQuotaId: rq, previous: totals(8, 500, 5000), next: null })).toEqual({
+      resourceQuotaId: null,
+    });
+    expect(await quotaRow(rq)).toMatchObject({ usedServices: 18, usedCpuMilli: 0, usedMemoryBytes: "0" });
+    expect(await stackQuotaId(stackId)).toBeNull();
   });
 
   it("7. a negative delta is applied without a check, even when the row is already over its maximum", async () => {

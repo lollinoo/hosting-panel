@@ -4,7 +4,7 @@ import http from "node:http";
 import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { createErrorEnvelope, signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
+import { APP_TEMPLATE_LIMITS, createErrorEnvelope, signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
 import { APP_STACK_EXECUTOR_METHODS, Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
@@ -216,6 +216,26 @@ describe("application stack IPC routes", () => {
     }
   });
 
+  it("a stop and a remove carry the applied plan's order to the executor, and refuse a malformed one (#100)", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    const order = ["web", "worker"];
+    await client.stopAppStack({ ...ref, order });
+    await client.removeAppStack({ ...ref, removeVolumes: false, order });
+    expect(fns.stopAppStack.mock.calls[0]?.[0]).toEqual({ ...ref, order });
+    expect(fns.removeAppStack.mock.calls[0]?.[0]).toEqual({ ...ref, removeVolumes: false, order });
+    for (const bad of [["web", "web"], [], ["Bad_Key"], Array.from({ length: APP_TEMPLATE_LIMITS.services + 1 }, (_, i) => `c${i}`)]) {
+      for (const err of [
+        await failure(client.stopAppStack({ ...ref, order: bad })),
+        await failure(client.removeAppStack({ ...ref, removeVolumes: false, order: bad })),
+      ]) {
+        expect([err.statusCode, err.code, err.reason], JSON.stringify(bad)).toEqual([400, "VALIDATION_ERROR", undefined]);
+      }
+    }
+    expect(fns.stopAppStack).toHaveBeenCalledTimes(1);
+    expect(fns.removeAppStack).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses unsigned (401) and replayed (409) requests before any executor call", async () => {
     const { executor, fns } = stackStub();
     const { socketPath } = await serve(executor);
@@ -320,6 +340,14 @@ describe("application stack IPC routes", () => {
     const conflict = await failure(client.getAppStackStatus(ref));
     expect([conflict.statusCode, conflict.code, conflict.reason]).toEqual([403, "HOST_POLICY_DENIED", "STACK_NAMESPACE_CONFLICT"]);
 
+    // An image folder no volume covers (#98): a policy denial whose message names the folder for the administrator.
+    fns.pullAppStackImage.mockRejectedValueOnce(
+      new AppStackExecutorError("STACK_IMAGE_VOLUME_UNCOVERED", "The image of component web declares the folder /data and no volume of the component is mounted at exactly that folder"),
+    );
+    const uncovered = await failure(client.pullAppStackImage({ plan, image }));
+    expect([uncovered.statusCode, uncovered.code, uncovered.reason, uncovered.ambiguousOutcome]).toEqual([403, "HOST_POLICY_DENIED", "STACK_IMAGE_VOLUME_UNCOVERED", false]);
+    expect(uncovered.message).toContain("/data");
+
     fns.prepareAppStack.mockRejectedValueOnce(Object.assign(new ExecutorCodedError("Manifest moved", "RESOURCE_LOCKED"), { reason: "TLS_MANIFEST_CONFLICT" }));
     expect((await failure(client.prepareAppStack({ plan }))).reason).toBe("TLS_MANIFEST_CONFLICT");
 
@@ -330,6 +358,30 @@ describe("application stack IPC routes", () => {
     fns.createAppStackComponents.mockRejectedValueOnce(new ExecutorCodedError("Failed to create (HTTP 500)", "DOCKER_ENGINE_UNAVAILABLE"));
     const engine = await failure(client.createAppStackComponents({ plan }));
     expect([engine.statusCode, engine.code, engine.reason]).toEqual([503, "DOCKER_ENGINE_UNAVAILABLE", undefined]);
+  });
+
+  it("a refusal that says nothing was changed carries one more detail, after its reason when it has one (#111)", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    const marked = <E extends ExecutorCodedError>(err: E): E => Object.assign(err, { beforeChange: true });
+    const BEFORE_CHANGE = { field: "stage", message: "before_change" };
+
+    fns.createAppStackComponents.mockRejectedValueOnce(marked(new AppStackExecutorError("STACK_IMAGE_MISSING", "The image is not available on this server")));
+    const withReason = await failure(client.createAppStackComponents({ plan }));
+    expect([withReason.statusCode, withReason.code, withReason.reason]).toEqual([404, "NOT_FOUND", "STACK_IMAGE_MISSING"]);
+    expect(withReason.details).toEqual([{ message: "The image is not available on this server", reason: "STACK_IMAGE_MISSING" }, BEFORE_CHANGE]);
+
+    // The hardening check names no reason: the mark is then the only detail, and the problem still comes from the code.
+    fns.createAppStackComponents.mockRejectedValueOnce(marked(new ExecutorCodedError("The body breaks a rule", "HOST_POLICY_DENIED")));
+    const noReason = await failure(client.createAppStackComponents({ plan }));
+    expect([noReason.code, noReason.reason, noReason.details]).toEqual(["HOST_POLICY_DENIED", undefined, [BEFORE_CHANGE]]);
+
+    // An error that was not marked, and an engine failure, carry what they carried before.
+    fns.createAppStackComponents.mockRejectedValueOnce(new AppStackExecutorError("STACK_NAMESPACE_CONFLICT", "An object uses the name"));
+    const unmarked = await failure(client.createAppStackComponents({ plan }));
+    expect(unmarked.details).toEqual([{ message: "An object uses the name", reason: "STACK_NAMESPACE_CONFLICT" }]);
+    fns.createAppStackComponents.mockRejectedValueOnce(new ExecutorCodedError("Failed to create (HTTP 500)", "DOCKER_ENGINE_UNAVAILABLE"));
+    expect((await failure(client.createAppStackComponents({ plan }))).details).toEqual([]);
   });
 
   it("a query name given twice, a bad tail or a bad path id answers 400", async () => {

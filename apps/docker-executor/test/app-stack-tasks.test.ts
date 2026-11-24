@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -42,7 +42,7 @@ import {
   type IngressCapableDockerExecutor,
 } from "../src/index.js";
 import { type MockDockerContainerRecord, type MockDockerDaemon, type MockExecPlan, startMockDockerDaemon } from "./mock-docker-daemon.js";
-import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
+import { TEST_ALLOWLIST, V2_CREATE_SECRETS, V2_SECRET_VALUES, appStackTestPlan, appStackTestPlanV2, rehash, v2SecretEntry } from "./support/app-stack-plans.js";
 
 // ADR-0042: a task of an application. The command runs in the existing container of one component, started directly
 // with no user, no folder, no terminal and no input; it ends at its time limit and what it started is killed.
@@ -326,6 +326,105 @@ describe("runAppStackTask on the Docker Engine", () => {
     const result = await adapter.runAppStackTask(request(1));
     expect(result.output).toBe("key=[REDACTED]\nagain [REDACTED] here\nclean");
     expect(JSON.stringify(result)).not.toContain(CANARY);
+  });
+
+  describe("when the private values of the component cannot be read (#188)", () => {
+    /** The folder of the secret files of `web`, and the bind that gives the container one of them. */
+    const folderOf = (root: string) => path.join(path.resolve(root), appStackSecretDirKey(STACK, "web"));
+    const bindOf = (root: string, name: string) => `${path.join(folderOf(root), name)}:/run/secrets/${name}:ro`;
+    const envLabel = (name: string) => ({ [APP_STACK_LABELS.secretEnvironment]: JSON.stringify([[name, null]]) });
+    /** What a result shows, as booleans and markers only: a failing test must never print what the run printed. */
+    const shown = (result: AppStackTaskRunIpcResult) => ({
+      outcome: result.outcome,
+      exitCode: result.exitCode,
+      empty: result.output === "",
+      truncated: result.outputTruncated,
+      leaks: JSON.stringify(result).includes(CANARY),
+      valid: AppStackTaskRunIpcResultSchema.safeParse(result).success,
+    });
+
+    /** A component whose container was given one secret file, and a way to leave the folder as the case needs. */
+    async function withSecretFile(script: Script, folder: (dir: string) => Promise<void>) {
+      const made = await setup(script);
+      made.mockDaemon.containers.set(`${WEB}_id`, component("web", { hostConfig: { Binds: [bindOf(made.secretsRootDir, "app_key")] } }));
+      await folder(folderOf(made.secretsRootDir));
+      return made;
+    }
+
+    const cannotBeRead: Array<[string, (dir: string) => Promise<void>]> = [
+      ["the folder is gone (a reboot emptied the tmpfs)", () => Promise.resolve()],
+      ["Docker made the missing file a directory", async (dir) => {
+        await mkdir(path.join(dir, "app_key"), { recursive: true });
+      }],
+      ["the file holds a value too short to mask", async (dir) => {
+        await mkdir(dir, { recursive: true });
+        await writeFile(path.join(dir, "app_key"), "abc");
+      }],
+    ];
+
+    it.each(cannotBeRead)("keeps nothing of what the run printed, and says so: %s", async (_case, folder) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter } = await withSecretFile({ command: (call) => (call.Env.some((env) => env.endsWith(RUN(2))) ? { frames: [[1, `key=${CANARY}\n`], [2, "second\n"]], exitCode: 3 } : { frames: [[1, `key=${CANARY}\n`]], exitCode: 0 }) }, folder);
+      // The outcome and the exit code are the command's own; only the output is withheld.
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+      expect(shown(await adapter.runAppStackTask(request(2)))).toEqual({ outcome: "failed", exitCode: 3, empty: true, truncated: true, leaks: false, valid: true });
+      // Each withheld output is logged once, in the executor's fixed style: no output, no value, no name, no id.
+      expect(warn).toHaveBeenCalledTimes(2);
+      for (const call of warn.mock.calls) {
+        const logged = JSON.parse(String(call[0])) as Record<string, unknown>;
+        expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
+        expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_output_withheld", "DOCKER_ENGINE_UNAVAILABLE"]);
+        expect(String(call[0]).includes(CANARY)).toBe(false);
+      }
+    });
+
+    it("keeps nothing when the label names an environment secret the container does not hold", async () => {
+      const { adapter, mockDaemon } = await setup({ command: () => ({ frames: [[1, `token=${CANARY}\n`]] }) });
+      mockDaemon.containers.set(`${WEB}_id`, component("web", { labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: ["OTHER=value-of-six"] }));
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+    });
+
+    it("answers an empty output, not flagged, for a run that printed nothing, whether or not the values can be read", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      // Nothing at all, and a blank line: the ordinary side answers "" and not flagged for both.
+      const plans: MockExecPlan[] = [{ frames: [] }, { frames: [[1, "\n"]] }];
+      const { adapter } = await withSecretFile({ command: () => plans.shift() }, () => Promise.resolve());
+      for (const n of [1, 2]) {
+        expect(shown(await adapter.runAppStackTask(request(n)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: false, leaks: false, valid: true });
+      }
+      // Nothing was withheld, so nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("masks a value that only the environment of the container holds: the secret folder is empty, as after a reboot", async () => {
+      const { adapter, mockDaemon, secretsRootDir } = await setup({ command: () => ({ frames: [[1, `token=${CANARY} and again ${CANARY}\n`], [2, "clean\n"]] }) });
+      mockDaemon.containers.set(`${WEB}_id`, component("web", { labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: [`API_TOKEN=${CANARY}`, "PLAIN=not-a-secret"] }));
+      await mkdir(folderOf(secretsRootDir), { recursive: true });
+      const result = await adapter.runAppStackTask(request(1));
+      // Booleans only: a failing run must not print what the command printed.
+      expect([result.output === "token=[REDACTED] and again [REDACTED]\nclean", result.outputTruncated, JSON.stringify(result).includes(CANARY)]).toEqual([true, false, false]);
+    });
+
+    it("masks with the secret file and the environment secret together", async () => {
+      const second = `${CANARY}-file`;
+      const { adapter, mockDaemon, secretsRootDir } = await setup({ command: () => ({ frames: [[1, `a=${CANARY} b=${second}\n`]] }) });
+      mockDaemon.containers.set(
+        `${WEB}_id`,
+        component("web", { hostConfig: { Binds: [bindOf(secretsRootDir, "app_key")] }, labels: { ...labelsOf("web"), ...envLabel("API_TOKEN") }, env: [`API_TOKEN=${CANARY}`] }),
+      );
+      await mkdir(folderOf(secretsRootDir), { recursive: true });
+      await writeFile(path.join(folderOf(secretsRootDir), "app_key"), second);
+      const result = await adapter.runAppStackTask(request(1));
+      expect([result.output === "a=[REDACTED] b=[REDACTED]", JSON.stringify(result).includes("CANARY")]).toEqual([true, false]);
+    });
+
+    it("answers the same pair for one very long line, which no cause of this section makes: it was so before", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter } = await setup({ command: () => ({ frames: [[1, "a".repeat(70_000)]] }) });
+      expect(shown(await adapter.runAppStackTask(request(1)))).toEqual({ outcome: "succeeded", exitCode: 0, empty: true, truncated: true, leaks: false, valid: true });
+      // Its values could be read: nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps the last lines only, cleaned, and says when something was left out", async () => {
@@ -657,7 +756,7 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect(mockDaemon.requestedPaths).toEqual([]);
   });
 
-  it("tries the clean-up again when it fails after a run, and logs a code only when it gives up", async () => {
+  it("tries the clean-up again when it fails after a run, before the answer, and logs a code only when it gives up", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     let failing = 3;
     const retried = await setup({
@@ -669,18 +768,334 @@ describe("runAppStackTask on the Docker Engine", () => {
     });
     expect((await retried.adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
     const kills = (d: MockDockerDaemon) => killRuns(d).filter((runId) => runId === RUN(1)).length;
-    await until(() => kills(retried.mockDaemon) === 4);
+    // The retries are part of the run (#158): all of them are done when the answer comes, none is left to a timer.
+    expect(kills(retried.mockDaemon)).toBe(4);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(kills(retried.mockDaemon)).toBe(4);
     expect(warn).not.toHaveBeenCalled();
 
     const never = await setup({ kill: (call) => (killOf(call) === RUN(1) ? { exitCode: 1 } : undefined) });
+    // The command ended by itself: its outcome stays, whatever the kill of what it left behind.
     expect((await never.adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
-    await until(() => warn.mock.calls.length === 1);
     expect(kills(never.mockDaemon)).toBe(6);
+    expect(warn).toHaveBeenCalledTimes(1);
     const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
     expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
     expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_cleanup_failed", "INTERNAL_ERROR"]);
+  });
+
+  describe("a kill that is not confirmed holds the run and the application (#158)", () => {
+    type Step = "fail" | "hold" | "ok";
+    /**
+     * The kills of one run answer as the steps tell, one per attempt (the last step repeats): `fail` ends with a code
+     * of failure, `hold` keeps the kill open until the test ends it (its exec id is added to `held`), `ok` ends well.
+     * `onKill` runs on every attempt: it is what the kill does to the command.
+     */
+    const kills = (runId: string, steps: readonly Step[], held: string[], onKill?: (daemon: MockDockerDaemon) => void): NonNullable<Script["kill"]> => {
+      let attempt = 0;
+      return (call, daemon) => {
+        if (killOf(call) !== runId) return undefined;
+        const step = steps[Math.min(attempt, steps.length - 1)]!;
+        attempt += 1;
+        onKill?.(daemon);
+        if (step === "fail") return { exitCode: 1 };
+        if (step === "hold") {
+          held.push(call.execId);
+          return { stayOpen: true };
+        }
+        return undefined;
+      };
+    };
+    const attemptsOf = (d: MockDockerDaemon, n: number) => killRuns(d).filter((runId) => runId === RUN(n)).length;
+    const REF = { stackId: STACK, organizationId: ORG };
+    /** What the engine's exclusion says while a task of the application goes: its changes are refused. */
+    const refusedWhileHeld = async (adapter: DockerEngineSocketAdapter): Promise<unknown[]> => {
+      const err = await refusal(adapter.stopAppStack(REF));
+      return [err.reason, err.code, err.message];
+    };
+    const HELD = ["STACK_BUSY", "RESOURCE_LOCKED", "A task of this application stack is running"];
+    /** The answer of a run, and whether it has come. */
+    const asked = (adapter: DockerEngineSocketAdapter, n: number) => {
+      const state: { answered: boolean } = { answered: false };
+      const answer = adapter.runAppStackTask(request(n)).then((result) => {
+        state.answered = true;
+        return result;
+      });
+      return { state, answer };
+    };
+    // A long enough pause between the tries: a run that answers at once is out well before the second try.
+    const slowRetry = { retryDelayMs: 100, killTimeoutMs: 5_000 };
+
+    it("gives no answer at the time limit until the kill that failed once is tried again: then timed_out", async () => {
+      const held: string[] = [];
+      let command = "";
+      const { adapter, mockDaemon } = await setup(
+        {
+          command: (call) => {
+            command = call.execId;
+            return { stayOpen: true, frames: [[1, "going\n"]] };
+          },
+          // The first kill fails after it killed the command: its output ends, only the answer of the script is a failure.
+          kill: kills(RUN(1), ["fail", "hold"], held, (daemon) => daemon.endExec(command, 137)),
+        },
+        slowRetry,
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(attemptsOf(mockDaemon, 1)).toBe(2);
+      // The second kill is going: the run is not over, so the application is held and nothing is answered.
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+      expect(await adapter.getAppStackTaskRun({ ...REF, runId: RUN(1) })).toEqual({ state: "running" });
+
+      mockDaemon.endExec(held[0]!, 0);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "timed_out", problem: null, exitCode: null, output: "going" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(2);
+      // The run is over: the application is free again.
+      await adapter.stopAppStack(REF);
+    });
+
+    it("answers unknown, not timed_out, when every kill fails, and holds the application until the last one", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const held: string[] = [];
+      let command = "";
+      const { adapter, mockDaemon } = await setup(
+        {
+          command: (call) => {
+            command = call.execId;
+            return { stayOpen: true, frames: [[1, "going\n"]] };
+          },
+          // Five kills fail, the sixth (the last of APP_STACK_TASK_CLEANUP_RETRIES) is held open by the test.
+          kill: kills(RUN(1), ["fail", "fail", "fail", "fail", "fail", "hold"], held, (daemon) => daemon.endExec(command, 137)),
+        },
+        { retryDelayMs: 20, killTimeoutMs: 5_000 },
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      // Still held at the last attempt, and nothing is logged before it ended.
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+      expect(warn).not.toHaveBeenCalled();
+
+      mockDaemon.endExec(held[0]!, 1);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "going", outputTruncated: false });
+      expect(result.startedAt).not.toBeNull();
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
+      expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
+      expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_cleanup_failed", "INTERNAL_ERROR"]);
+      await adapter.stopAppStack(REF);
+      // The run is remembered as it was answered: a second call with its id starts nothing.
+      expect(await adapter.getAppStackTaskRun({ ...REF, runId: RUN(1) })).toEqual({ state: "finished", result });
+    });
+
+    it("answers unknown at once, with no second try, where the clean-up cannot work in the component", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ stayOpen: true, frames: [[1, "going\n"]] }),
+        kill: (call) => (killOf(call) === RUN(1) ? { exitCode: APP_STACK_TASK_KILL_OWN_MARK_EXIT } : undefined),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "going" });
+      expect(attemptsOf(mockDaemon, 1)).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("says timed_out when the container is gone: nothing is left to stop", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: (_call, daemon) => {
+          // The component is removed while the command goes: the next exec of a kill is refused as "no such container".
+          daemon.containers.delete(`${WEB}_id`);
+          return { stayOpen: true, frames: [[1, "going\n"]] };
+        },
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "timed_out", exitCode: null, output: "going" });
+      expect(killRuns(mockDaemon)).toEqual([""]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("keeps the outcome and the exit code of a command that ended by itself, held until the kill that failed once is tried again", async () => {
+      const held: string[] = [];
+      const { adapter, mockDaemon } = await setup(
+        { command: () => ({ frames: [[1, "done\n"]], exitCode: 3 }), kill: kills(RUN(1), ["fail", "hold"], held) },
+        slowRetry,
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+
+      mockDaemon.endExec(held[0]!, 0);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "failed", exitCode: 3, output: "done" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      await adapter.stopAppStack(REF);
+    });
+
+    it("keeps the outcome of a command that ended by itself when no kill is confirmed, and holds until the last one", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const held: string[] = [];
+      const { adapter, mockDaemon } = await setup(
+        { command: () => ({ frames: [[1, "done\n"]], exitCode: 0 }), kill: kills(RUN(1), ["fail", "fail", "fail", "fail", "fail", "hold"], held) },
+        { retryDelayMs: 20, killTimeoutMs: 5_000 },
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect([state.answered, warn.mock.calls.length]).toEqual([false, 0]);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+
+      mockDaemon.endExec(held[0]!, 1);
+      expect(await answer).toMatchObject({ outcome: "succeeded", exitCode: 0, output: "done" });
+      expect(warn).toHaveBeenCalledTimes(1);
+      await adapter.stopAppStack(REF);
+    });
+
+    it("answers unknown for an output that ends by a cut connection when no kill is confirmed and the engine does not tell how the command ended", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter, mockDaemon } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, frames: [[1, "half\n"]] };
+        },
+        // The exec is over for the engine, with no exit code; the kill itself fails.
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "half" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the exit code of an output cut by a broken connection when the engine tells how the command ended, whatever the kill", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, frames: [[1, "half\n"]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, 137)),
+      });
+      expect(await adapter.runAppStackTask(request(1))).toMatchObject({ outcome: "failed", exitCode: 137, output: "half" });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers unknown for a broken output when no kill is confirmed and the engine no longer knows the exec: that is not a command that never started", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter, mockDaemon } = await setup({
+        command: (call) => {
+          command = call.execId;
+          // The engine forgot the exec once it ended (a restart of the engine does it): its inspect answers 404.
+          return { cut: true, forgotten: true, frames: [[1, `No such exec instance: ${"4f".repeat(32)}\r\n`]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      // What the stream held may be the engine's own text, with a Docker id: nothing of it is kept.
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "", outputTruncated: false });
+      expect(JSON.stringify(result)).not.toContain("4f4f");
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers failed, with no output, for a broken output when no kill is confirmed and the engine says no process ever ran", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, pid: 0, frames: [[1, "the engine's own text\n"]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "failed", problem: null, exitCode: null, output: "" });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers unknown for a command whose start failed when no kill is confirmed", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ failStart: true }),
+        kill: kills(RUN(1), ["fail"], []),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers failed at once, with no clean-up and no hold, when the engine refuses to create the exec of the command", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ failCreate: true }),
+        // Were a clean-up tried, it would fail: the answer must not wait for it, nor turn into unknown.
+        kill: kills(RUN(1), ["fail"], []),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "failed", problem: null, exitCode: null, output: "", outputTruncated: false });
+      expect(result.startedAt).not.toBeNull();
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      // Only the clean-up before the command ran: nothing of this run exists to be stopped.
+      expect(killRuns(mockDaemon)).toEqual([""]);
+      expect(warn).not.toHaveBeenCalled();
+      // The application is free at once.
+      await adapter.stopAppStack(REF);
+    });
+  });
+});
+
+describe("the mock engine of these tests", () => {
+  it("ends the stream of an exec that was ended before its stream arrived, as it ends one that is attached", async () => {
+    // A test that holds an exec open ends it as soon as the exec exists; on a busy machine the stream can come after.
+    const { mockDaemon } = await setup({ command: () => ({ stayOpen: true }) });
+    const body = JSON.stringify({ Cmd: ["sleep", "60"] });
+    const execId = await new Promise<string>((resolve, reject) => {
+      const req = http.request(
+        { socketPath: mockDaemon.socketPath, method: "POST", path: `/containers/${WEB}_id/exec`, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { Id: string }).Id));
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+    mockDaemon.endExec(execId, 0);
+
+    const ended = await new Promise<boolean>((resolve, reject) => {
+      const req = http.request({ socketPath: mockDaemon.socketPath, method: "POST", path: `/exec/${execId}/start`, headers: { Connection: "Upgrade", Upgrade: "tcp" } });
+      req.on("error", reject);
+      req.on("upgrade", (_res, socket) => {
+        const give = setTimeout(() => {
+          socket.destroy();
+          resolve(false);
+        }, 1_000);
+        socket.on("error", () => undefined);
+        socket.on("end", () => {
+          clearTimeout(give);
+          socket.destroy();
+          resolve(true);
+        });
+        socket.resume();
+      });
+      req.end(JSON.stringify({ Detach: false, Tty: false }));
+    });
+    expect(ended).toBe(true);
   });
 });
 
@@ -1061,6 +1476,109 @@ describe("tasks in the simulator", () => {
 
     sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${CANARY}`] });
     expect((await sim.runAppStackTask(run(6, { componentKey: "worker" }))).output).toBe("key [REDACTED]");
+  });
+
+  it("answers unknown, as the executor does, for a command whose kill is not confirmed and that has no exit code (#158)", async () => {
+    const sim = await deployed();
+    sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, notStopped: true, lines: ["slow"] });
+    sim.appStackTasks.setNextAppStackTaskRun({ exitCode: null, notStopped: true, lines: ["half"] });
+    // A command that ended by itself keeps its outcome and exit code, whatever its kill; a stop that is confirmed too.
+    sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 3, notStopped: true });
+    sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, notStopped: false });
+    const results = [];
+    for (let n = 1; n <= 4; n += 1) results.push(await sim.runAppStackTask(run(n, { componentKey: "worker" })));
+    expect(results.map((r) => [r.outcome, r.problem, r.exitCode, r.output])).toEqual([
+      ["unknown", null, null, "slow"],
+      ["unknown", null, null, "half"],
+      ["failed", null, 3, ""],
+      ["timed_out", null, null, ""],
+    ]);
+    for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+    expect(await sim.getAppStackTaskRun(readOf(1))).toEqual({ state: "finished", result: results[0] });
+  });
+
+  describe("when the private values of the component cannot be established (#188)", () => {
+    // Booleans only: a failure must never print the output of a run.
+    const shown = (result: AppStackTaskRunIpcResult) => ({
+      outcome: result.outcome,
+      exitCode: result.exitCode,
+      empty: result.output === "",
+      truncated: result.outputTruncated,
+      leaks: JSON.stringify(result).includes(CANARY),
+      valid: AppStackTaskRunIpcResultSchema.safeParse(result).success,
+    });
+    const WITHHELD = { empty: true, truncated: true, leaks: false, valid: true };
+    const secretDir = (root: string) => path.join(root, appStackSecretDirKey(STACK, "worker"));
+
+    it("keeps nothing of what a run printed, in memory, when the container names a file from another folder", async () => {
+      const sim = await deployed();
+      const own = sim.appStacks.getAppStackSnapshot(plan.stackId)?.containers.worker?.payload.HostConfig.Binds ?? [];
+      sim.appStacks.setAppStackComponentBinds(plan.stackId, "worker", [`/var/lib/earlier-root/${appStackSecretDirKey(STACK, "worker")}/shared_key:/run/secrets/shared_key:ro`]);
+      sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 3, lines: [`key ${CANARY}`, "second line"] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: ["", ""] });
+      sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, lines: [`slow ${CANARY}`] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: ["GET / 200"] });
+      const withheld = await sim.runAppStackTask(run(1, { componentKey: "worker" }));
+      expect(shown(withheld)).toEqual({ outcome: "failed", exitCode: 3, ...WITHHELD });
+      expect(shown(await sim.runAppStackTask(run(2, { componentKey: "worker" })))).toEqual({
+        outcome: "succeeded", exitCode: 0, empty: true, truncated: false, leaks: false, valid: true,
+      });
+      expect(shown(await sim.runAppStackTask(run(3, { componentKey: "worker" })))).toMatchObject({ empty: true, truncated: false });
+      expect(shown(await sim.runAppStackTask(run(4, { componentKey: "worker" })))).toEqual({ outcome: "timed_out", exitCode: null, ...WITHHELD });
+      // web was given no secret file: its output is kept.
+      expect(await sim.runAppStackTask(run(5, { componentKey: "web" }))).toMatchObject({ output: "GET / 200", outputTruncated: false });
+      // The answer is the one read back later, and it holds nothing of the output.
+      expect(await sim.getAppStackTaskRun(readOf(1))).toEqual({ state: "finished", result: withheld });
+      // As soon as the container names its own folder again, the output is kept, masked.
+      sim.appStacks.setAppStackComponentBinds(plan.stackId, "worker", own);
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${CANARY}`] });
+      expect(await sim.runAppStackTask(run(6, { componentKey: "worker" }))).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+    });
+
+    it("keeps nothing of it on disk either once the secret folder is gone, as after a reboot, and masks again once it is back", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "hp-sim-task-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const sim = new InMemoryDockerSimulatorAdapter({ appImageAllowlist: TEST_ALLOWLIST, secretsRootDir: root });
+      await sim.pullAppStackImage({ plan, image: web.image });
+      await sim.prepareAppStack({ plan });
+      await sim.createAppStackComponents({ plan });
+      await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+      await sim.startAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SHARED] });
+      const printing = (n: number) => {
+        sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 2, lines: [`key ${CANARY}`] });
+        return sim.runAppStackTask(run(n, { componentKey: "worker" }));
+      };
+      expect(await printing(1)).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+      await rm(secretDir(root), { recursive: true, force: true });
+      expect(shown(await printing(2))).toEqual({ outcome: "failed", exitCode: 2, ...WITHHELD });
+      // What Docker does with a bind source that is missing: it makes a directory of it.
+      await mkdir(path.join(secretDir(root), "shared_key"), { recursive: true });
+      expect(shown(await printing(3))).toEqual({ outcome: "failed", exitCode: 2, ...WITHHELD });
+      await rm(secretDir(root), { recursive: true, force: true });
+      await sim.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SHARED] });
+      expect(await printing(4)).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+    });
+
+    it("masks a value that only the environment of the container holds, once the secret folder is empty", async () => {
+      const plan2 = appStackTestPlanV2();
+      const root = await mkdtemp(path.join(os.tmpdir(), "hp-sim-task-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const sim = new InMemoryDockerSimulatorAdapter({ appImageAllowlist: TEST_ALLOWLIST, secretsRootDir: root });
+      for (const image of new Set(plan2.components.map((c) => c.image))) await sim.pullAppStackImage({ plan: plan2, image });
+      await sim.prepareAppStack({ plan: plan2 });
+      await sim.createAppStackComponents({ plan: plan2, secretContents: [...V2_CREATE_SECRETS] });
+      await sim.startAppStackComponent({ plan: plan2, componentKey: "db", secretFileContents: [v2SecretEntry("db_password"), v2SecretEntry("db_root_password")] });
+      await sim.startAppStackComponent({ plan: plan2, componentKey: "web", secretFileContents: [v2SecretEntry("app_key"), v2SecretEntry("db_password")] });
+      for (const entry of await readdir(root)) await rm(path.join(root, entry), { recursive: true, force: true });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`root ${V2_SECRET_VALUES.db_root_password}`] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${V2_SECRET_VALUES.app_key}`] });
+      const db = await sim.runAppStackTask(run(1, { componentKey: "db" }));
+      expect([db.output === "root [REDACTED]", db.outputTruncated, JSON.stringify(db).includes(V2_SECRET_VALUES.db_root_password)]).toEqual([true, false, false]);
+      // web was given a secret file that is gone: its values cannot be established.
+      const web2 = await sim.runAppStackTask(run(2, { componentKey: "web" }));
+      expect([web2.output === "", web2.outputTruncated, JSON.stringify(web2).includes(V2_SECRET_VALUES.app_key)]).toEqual([true, true, false]);
+    });
   });
 
   it("refuses a component that is not running, an unknown one and another customer's application", async () => {

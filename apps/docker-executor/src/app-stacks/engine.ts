@@ -35,6 +35,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -50,7 +51,7 @@ import {
   decodeAppStackHealthLabel,
   type AppStackContainerCreatePayload,
 } from "./container-payload.js";
-import { AppStackExecutorError } from "./errors.js";
+import { AppStackExecutorError, markRefusedBeforeChange } from "./errors.js";
 import { probeAppStackHealth, type AppStackHealthProbe } from "./health-probe.js";
 import {
   APP_STACK_COMPONENT_ROLE,
@@ -65,6 +66,7 @@ import {
 } from "./names.js";
 import {
   appStackImageDigestMatches,
+  appStackUncoveredImageFolder,
   assertAppStackCreateSecretContents,
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
@@ -302,13 +304,23 @@ function ownVolumeKey(view: VolumeView, ids: Ids): string | null {
 
 const byKey = (a: { readonly key: string }, b: { readonly key: string }) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
-/** app_start_index descending (non-numeric = 0), ties by key descending. */
-function reverseStartOrder(containers: readonly OwnContainer[]): OwnContainer[] {
+/** app_start_index descending (non-numeric = 0), ties by key descending. An upgrade keeps the label of a component it
+ *  does not replace, so after one the labels alone can put a component before what uses it: `order`, the keys of the
+ *  applied plan's components in plan order, replaces them. By descending position in it; a container whose key it does
+ *  not list (one the applied plan does not name) goes first, those among themselves by the label as above. */
+function reverseStartOrder(containers: readonly OwnContainer[], order?: readonly string[]): OwnContainer[] {
   const index = (c: OwnContainer) => {
     const raw = c.labels[APP_STACK_LABELS.startIndex] ?? "";
     return /^[0-9]{1,3}$/.test(raw) ? Number(raw) : 0;
   };
-  return [...containers].sort((a, b) => index(b) - index(a) || byKey(b, a));
+  const byLabel = (a: OwnContainer, b: OwnContainer) => index(b) - index(a) || byKey(b, a);
+  if (order === undefined) return [...containers].sort(byLabel);
+  const position = new Map(order.map((key, at) => [key, at]));
+  return [...containers].sort((a, b) => {
+    const [pa, pb] = [position.get(a.key), position.get(b.key)];
+    if (pa === undefined || pb === undefined) return pa === pb ? byLabel(a, b) : pa === undefined ? -1 : 1;
+    return pb - pa;
+  });
 }
 
 export class AppStackEngine implements StackExecutorPort {
@@ -327,7 +339,7 @@ export class AppStackEngine implements StackExecutorPort {
       const { image } = req;
       if (!plan.components.some((c) => c.image === image)) refuse("STACK_PLAN_INVALID", "The image is not part of the plan");
       const inspectPath = `/images/${enc(image)}/json`;
-      let found = await this.get<{ RepoDigests?: unknown[] }>(inspectPath, "inspect an application image");
+      let found = await this.get<{ RepoDigests?: unknown[]; Config?: { Volumes?: unknown } | null }>(inspectPath, "inspect an application image");
       const pulled = found === null;
       if (found === null) {
         if (!this.deps.pullMissingImages) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
@@ -353,6 +365,18 @@ export class AppStackEngine implements StackExecutorPort {
       }
       if (!appStackImageDigestMatches(image, found.RepoDigests)) {
         refuse("STACK_IMAGE_DIGEST_MISMATCH", "The downloaded software does not match its pinned fingerprint");
+      }
+      // #98: the Engine gives a hidden writable volume to a folder the image declares that no mount sits at. This step
+      // runs before anything of the application is created or removed, so the application keeps what it has.
+      const declared = found.Config?.Volumes ?? null;
+      if (typeof declared !== "object" || Array.isArray(declared)) throw malformed();
+      const open = appStackUncoveredImageFolder(plan, image, declared === null ? [] : Object.keys(declared));
+      if (open !== null) {
+        const named = /^\/[A-Za-z0-9._/-]{1,254}$/.test(open.folder) ? `the folder ${open.folder}` : "a folder with an unusual name";
+        refuse(
+          "STACK_IMAGE_VOLUME_UNCOVERED",
+          `The image of component ${open.componentKey} declares ${named} and no volume of the component is mounted at exactly that folder`,
+        );
       }
       return { image, pulled };
     });
@@ -388,7 +412,20 @@ export class AppStackEngine implements StackExecutorPort {
     });
   }
 
-  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+  public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+    // Up to the first removal everything this call does is a read or a check: a refusal raised until then says so (#111).
+    let changing = false;
+    try {
+      return await this.createComponents(req, () => {
+        changing = true;
+      });
+    } catch (err) {
+      if (!changing) markRefusedBeforeChange(err);
+      throw err;
+    }
+  }
+
+  private createComponents(req: AppStackCreateIpcRequest, beforeFirstChange: () => void): Promise<AppStackCreateIpcResult> {
     const checked = () => {
       const plan = this.check(req.plan);
       // Environment secrets (version 2) live only in this call and in the create bodies built from it.
@@ -439,6 +476,7 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents: string[] = [];
+      beforeFirstChange();
       for (const stale of listed.filter((c) => !keys.has(c.key)).sort(byKey)) {
         await this.removeContainer(stale.id);
         await purgeAppStackComponentSecrets(this.deps.secretsRootDir, plan.stackId, stale.key);
@@ -468,10 +506,10 @@ export class AppStackEngine implements StackExecutorPort {
     return this.runComponent(req, "restart");
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.lockedWithoutTask(req.stackId, async () => {
       const components: AppStackStopIpcResult["components"] = [];
-      for (const c of reverseStartOrder(await this.listContainers(req))) {
+      for (const c of reverseStartOrder(await this.listContainers(req), req.order)) {
         if (STOPPED_STATES.has(c.state)) {
           components.push({ componentKey: c.key, outcome: "already_stopped" });
           continue;
@@ -533,7 +571,7 @@ export class AppStackEngine implements StackExecutorPort {
       const listed = await this.listAll(req);
       await this.deps.routes.remove(req.stackId);
       const removedComponents: string[] = [];
-      for (const c of reverseStartOrder(listed.containers)) {
+      for (const c of reverseStartOrder(listed.containers, req.order)) {
         await this.removeContainer(c.id);
         removedComponents.push(c.key);
       }
@@ -961,7 +999,14 @@ export class AppStackEngine implements StackExecutorPort {
         "POST",
         action === "start" ? `/containers/${enc(target.Id)}/start` : `/containers/${enc(target.Id)}/restart?t=10`,
       );
-      if (res.statusCode === 404) refuse("STACK_COMPONENT_NOT_READY", `Component ${key} is not created`);
+      if (res.statusCode === 404) {
+        // The engine answers 404 both for the container and for a network its stored attachment names: read it again.
+        const again = await this.get<ContainerInspect>(
+          `/containers/${enc(appStackContainerName(plan.stackId, key))}/json`,
+          "inspect an application container",
+        );
+        refuse("STACK_COMPONENT_NOT_READY", again === null ? `Component ${key} is not created` : `Component ${key} is attached to a network that is missing`);
+      }
       if (res.statusCode === 204 || (action === "start" && res.statusCode === 304)) {
         return { componentKey: key, outcome: action === "start" ? "started" : "restarted" };
       }

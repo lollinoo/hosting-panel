@@ -262,6 +262,22 @@ describe("@hosting-panel/policy-engine — Resource Quota Admission", () => {
     expect(result.dimension).toBe("sites");
   });
 
+  // Applications add their components to usedServices without being refused by maxServices (issue #151).
+  const overServices: QuotaSnapshot = { ...quota, usedServices: 22 };
+
+  it("admits a demand that asks for no service although the services in use are above the maximum", () => {
+    const result = evaluateQuotaAdmission(overServices, { sites: 1 });
+    expect(result.admitted).toBe(true);
+    expect(result.errorCode).toBeNull();
+  });
+
+  it("still refuses a demand that asks for a service when the services in use are above the maximum", () => {
+    const result = evaluateQuotaAdmission(overServices, { sites: 1, services: 1 });
+    expect(result.admitted).toBe(false);
+    expect(result.errorCode).toBe("QUOTA_EXCEEDED");
+    expect(result.dimension).toBe("services");
+  });
+
   it("accounts for pending reservations without overcommitting", () => {
     const pendingReservations = [
       {

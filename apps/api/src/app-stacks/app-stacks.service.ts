@@ -14,7 +14,6 @@ import {
   appStackTaskQueueKey,
   appTemplateHiddenSecretKeys,
   appTemplateInstallParameters,
-  effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
   type AppStackComponentHealthDto,
@@ -115,6 +114,7 @@ import { diffAppStackPlans } from "./app-stack-diff.js";
 import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { addressRemovingInTheWay, customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
+import { shownComponentHealth } from "./app-stack-runtime-policy.js";
 
 export interface AppStackRequestContext {
   readonly organizationId: string;
@@ -332,15 +332,22 @@ export class AppStacksService {
     const kept = rows.slice(0, page.limit);
     if (kept.length === 0) return { data: [], total, page: EMPTY_PAGE };
     const stackIds = kept.map((s) => s.id);
-    // What runs, where it is not the desired revision: the list names that version, as the detail does.
-    const appliedIds = kept.flatMap((s) => (s.appliedRevisionId !== null && s.appliedRevisionId !== s.desiredRevisionId ? [s.appliedRevisionId] : []));
+    // What runs: the status follows its plan, as the detail does, and where it is not the desired revision the list names
+    // that version too. One query for the page, at most one revision per application of it.
+    const appliedIds = kept.flatMap((s) => (s.appliedRevisionId === null ? [] : [s.appliedRevisionId]));
     const applied =
       appliedIds.length === 0
         ? []
         : await db
-            .select({ id: appStackRevisions.id, revisionNumber: appStackRevisions.revisionNumber, templateVersionId: appStackRevisions.templateVersionId })
+            .select({
+              id: appStackRevisions.id,
+              revisionNumber: appStackRevisions.revisionNumber,
+              templateVersionId: appStackRevisions.templateVersionId,
+              plan: appStackRevisions.plan,
+            })
             .from(appStackRevisions)
             .where(and(eq(appStackRevisions.organizationId, organizationId), inArray(appStackRevisions.id, appliedIds)));
+    const installedIds = new Set(kept.flatMap((s) => (s.appliedRevisionId !== null && s.appliedRevisionId !== s.desiredRevisionId ? [s.appliedRevisionId] : [])));
     const [templates, versions, components, domains] = await Promise.all([
       db
         .select({ id: appTemplates.id, name: appTemplates.name })
@@ -349,7 +356,7 @@ export class AppStacksService {
       db
         .select({ id: appTemplateVersions.id, versionNumber: appTemplateVersions.versionNumber })
         .from(appTemplateVersions)
-        .where(inArray(appTemplateVersions.id, [...new Set([...kept.map((s) => s.templateVersionId), ...applied.map((r) => r.templateVersionId)])])),
+        .where(inArray(appTemplateVersions.id, [...new Set([...kept.map((s) => s.templateVersionId), ...applied.filter((r) => installedIds.has(r.id)).map((r) => r.templateVersionId)])])),
       db
         .select()
         .from(appStackComponents)
@@ -372,11 +379,17 @@ export class AppStacksService {
     const now = new Date();
     const data = kept.map((stack) => {
       const running = stack.appliedRevisionId === null ? undefined : appliedById.get(stack.appliedRevisionId);
+      // A plan that cannot be read shows the stored status; the list never fails for one application.
+      const plan = running === undefined ? null : ApprovedStackPlanSchema.safeParse(running.plan);
       return appStackSummaryDto({
         stack,
         templateName: names.get(stack.templateId) ?? "",
         templateVersionNumber: numbers.get(stack.templateVersionId) ?? 1,
-        installed: running ? { revisionNumber: running.revisionNumber, templateVersionNumber: numbers.get(running.templateVersionId) ?? 1 } : null,
+        installed:
+          running && installedIds.has(running.id)
+            ? { revisionNumber: running.revisionNumber, templateVersionNumber: numbers.get(running.templateVersionId) ?? 1 }
+            : null,
+        appliedPlan: plan?.success ? plan.data : null,
         components: components.filter((c) => c.stackId === stack.id),
         domains: domains.filter((d) => d.stackId === stack.id),
         now,
@@ -614,7 +627,7 @@ export class AppStacksService {
     const observedAt = row?.healthObservedAt ?? null;
     return {
       componentKey,
-      health: effectiveComponentHealth(row?.health ?? "unknown", observedAt, now),
+      health: shownComponentHealth(stack.status, row?.health ?? "unknown", observedAt, now),
       observedAt: observedAt?.toISOString() ?? null,
       stale: observedAt === null || now.getTime() - observedAt.getTime() > APP_STACK_HEALTH_STALE_AFTER_MS,
       source: probe.healthcheck?.kind ?? "running_state",

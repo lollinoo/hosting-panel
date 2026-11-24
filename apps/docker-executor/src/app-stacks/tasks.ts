@@ -10,12 +10,12 @@ import {
   type AppStackTaskRunIpcResult,
 } from "@hosting-panel/contracts";
 import type { StackTaskExecutorPort } from "@hosting-panel/executor-contracts";
-import { inspectExecState, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
+import { DockerExecCreateRefusedError, inspectExecState, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
 import { ExecutorCodedError } from "../traefik-config.js";
 import { ownComponentKey } from "./engine.js";
 import { AppStackExecutorError } from "./errors.js";
 import { APP_STACK_COMPONENT_ROLE, APP_STACK_LABELS, appStackContainerName } from "./names.js";
-import { maskAppStackLogLines, readAppStackComponentSecretValues } from "./secrets.js";
+import { appStackContainerMaskValues, maskAppStackLogLines, type AppStackInspectedContainer } from "./secrets.js";
 
 /** The command of a run, and all it starts, carry `HP_TASK_RUN=<run id>` in their environment (ADR-0042 A3). */
 export const APP_STACK_TASK_MARK = "HP_TASK_RUN";
@@ -26,6 +26,10 @@ export const APP_STACK_TASK_END_SETTLE_MS = 2_000;
 export const APP_STACK_TASK_OUTPUT_TAIL_BYTES = 65_536;
 /** Finished runs remembered by id, so that a second call with the same id never starts the command again. */
 export const APP_STACK_TASK_RUNS_REMEMBERED = 200;
+/**
+ * Tries of the kill after a run, the first one included, and the pause between two of them. They are part of the run:
+ * the application stays held, and nothing is answered, until a kill is confirmed or the last one failed.
+ */
 export const APP_STACK_TASK_CLEANUP_RETRIES = 6;
 export const APP_STACK_TASK_CLEANUP_RETRY_MS = 5_000;
 /** Components the start-up clean-up works in at once. */
@@ -82,8 +86,11 @@ export interface AppStackTaskRunnerDeps {
   readonly target: DockerExecTarget;
   readonly secretsRootDir: string;
   readonly now?: () => Date;
-  /** The clean-up after a run did not finish, also when tried again. It is told nothing: no name and no output. */
+  /** The clean-up after a run did not finish, the last try included. It is told nothing: no name and no output. */
   readonly onCleanupFailed?: () => void;
+  /** A run printed something and none of it was kept: the private values of the component could not be established, so
+   *  it could not be masked. It is told nothing: no name, no output, no value. */
+  readonly onOutputWithheld?: () => void;
   /** The engine of this executor is changing the application: no task of it starts meanwhile (ADR-0042). */
   readonly engineBusy?: (stackId: string) => boolean;
   readonly limits?: AppStackTaskLimits;
@@ -92,8 +99,15 @@ export interface AppStackTaskRunnerDeps {
 interface TaskContainerInspect {
   readonly Id?: unknown;
   readonly Name?: string;
-  readonly Config?: { readonly Labels?: Readonly<Record<string, string>> | null };
+  readonly Config?: { readonly Labels?: Readonly<Record<string, string>> | null; readonly Env?: readonly string[] | null };
+  readonly HostConfig?: unknown;
   readonly State?: { readonly Running?: boolean; readonly Restarting?: boolean };
+}
+
+/** The container a run goes to: its id, and what the output of the run is masked from (its own inspect). */
+interface TaskContainer {
+  readonly id: string;
+  readonly inspected: AppStackInspectedContainer;
 }
 
 /** `own_mark`: pid 1 carries the mark, so the script killed nothing: no task can run in that component. */
@@ -228,6 +242,7 @@ class TaskOutputTail {
  * printed is logged here, and no Docker id leaves this class.
  */
 export class AppStackTaskRunner implements StackTaskExecutorPort {
+  /** Applications with a run going: it lasts until a kill is confirmed or the last try of it failed. */
   private readonly busy = new Set<string>();
   /** Applications with a start-up clean-up still going, and how many. */
   private readonly held = new Map<string, number>();
@@ -263,12 +278,12 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     if (this.held.has(req.stackId)) refuse("STACK_BUSY", "The tasks of this application are still being cleaned up");
     this.busy.add(req.stackId);
     try {
-      const containerId = await this.findContainer(req);
+      const container = await this.findContainer(req);
       const remembered: RememberedRun = { stackId: req.stackId, organizationId: req.organizationId, state: "running" };
       this.runs.set(req.runId, remembered);
       let result: AppStackTaskRunIpcResult;
       try {
-        result = await this.execute(req, containerId);
+        result = await this.execute(req, container);
       } catch (err) {
         // Thrown only before the command was started: nothing ran, so a later call may try again.
         this.runs.delete(req.runId);
@@ -315,7 +330,7 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
   }
 
   /** The container the engine itself names for this component, with the labels of this application, running. */
-  private async findContainer(req: AppStackTaskRunIpcRequest): Promise<string> {
+  private async findContainer(req: AppStackTaskRunIpcRequest): Promise<TaskContainer> {
     const seen = await inspectTaskContainer(this.target, appStackContainerName(req.stackId, req.componentKey));
     if (seen === null) return notRunning();
     if (ownComponentKey(seen.Config?.Labels, seen.Name, req) !== req.componentKey) {
@@ -326,10 +341,11 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
       throw new ExecutorCodedError("Docker answered the inspect of a component with no id", "DOCKER_ENGINE_UNAVAILABLE");
     }
     // From here on the checked container is used by its id: a container put under the same name later is not this one.
-    return seen.Id;
+    return { id: seen.Id, inspected: { labels: seen.Config?.Labels, env: seen.Config?.Env, hostConfig: seen.HostConfig } };
   }
 
-  private async execute(req: AppStackTaskRunIpcRequest, containerId: string): Promise<AppStackTaskRunIpcResult> {
+  private async execute(req: AppStackTaskRunIpcRequest, container: TaskContainer): Promise<AppStackTaskRunIpcResult> {
+    const containerId = container.id;
     // The clean-up is tried first: it proves the command can be stopped, and ends what an earlier run left here.
     const probe = await killMarkedProcesses(this.target, containerId, "", this.killTimeoutMs);
     if (probe === "gone") return notRunning();
@@ -362,22 +378,27 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     } catch (err) {
       // The engine refused to create the exec: the container is gone or stopped, nothing started.
       if (codeOf(err) === "NOT_FOUND") return notRunning();
-      // Otherwise the command may be running (a failed create cannot be told from a failed start).
-      await this.cleanUp(containerId, req.runId);
-      return this.finished(req, "failed", null, startedAt, tail);
+      // The engine answered the create with a refusal: no exec exists, nothing of this run is there to stop, and the
+      // clean-up before the command has just emptied the component of any earlier mark. No try, no hold.
+      if (err instanceof DockerExecCreateRefusedError) return this.finished(req, container.inspected, "failed", null, startedAt, tail);
+      // Otherwise the command may be running (a create or a start whose answer could not be read): it ended as failed
+      // only where the kill is confirmed, else nobody knows.
+      const stopped = await this.cleanUp(containerId, req.runId);
+      return this.finished(req, container.inspected, stopped ? "failed" : "unknown", null, startedAt, tail);
     }
 
     // A late error of the stream must never be an unhandled one.
     exec.socket.on("error", () => undefined);
     try {
-      return await this.followToTheEnd(req, containerId, exec, startedAt, tail);
+      return await this.followToTheEnd(req, container, exec, startedAt, tail);
     } catch {
-      // Not expected. The command did start, so the run is remembered as failed and is never started again.
+      // Not expected. The command did start, so the run is remembered and is never started again: as failed where the
+      // kill is confirmed, else as not known.
       exec.socket.destroy();
-      await this.cleanUp(containerId, req.runId);
+      const stopped = await this.cleanUp(containerId, req.runId);
       return {
         runId: req.runId,
-        outcome: "failed",
+        outcome: stopped ? "failed" : "unknown",
         problem: null,
         exitCode: null,
         startedAt: startedAt.toISOString(),
@@ -390,21 +411,25 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
 
   private async followToTheEnd(
     req: AppStackTaskRunIpcRequest,
-    containerId: string,
+    container: TaskContainer,
     exec: { readonly execId: string; readonly socket: Duplex },
     startedAt: Date,
     tail: TaskOutputTail,
   ): Promise<AppStackTaskRunIpcResult> {
+    const containerId = container.id;
     const how = await this.follow(exec.socket, tail, req.timeoutSeconds * this.secondMs);
     if (how === "limit") {
-      await this.cleanUp(containerId, req.runId);
+      // Stopped at its time limit only where a kill is confirmed (or the container is gone): else the command may still
+      // be going, and the run is not known to have ended.
+      const stopped = await this.cleanUp(containerId, req.runId);
       await this.waitForEnd(exec.socket);
       exec.socket.destroy();
-      return this.finished(req, "timed_out", null, startedAt, tail);
+      return this.finished(req, container.inspected, stopped ? "timed_out" : "unknown", null, startedAt, tail);
     }
     exec.socket.destroy();
-    // What the command left behind ends before the answer; then the engine tells how the command itself ended.
-    await this.cleanUp(containerId, req.runId);
+    // What the command left behind ends before the answer (every try of the kill is part of the run); then the engine
+    // tells how the command itself ended.
+    const stopped = await this.cleanUp(containerId, req.runId);
     const state = await inspectExecState(this.target, exec.execId).catch(() => undefined);
     const raw = state?.exitCode ?? null;
     const exitCode = raw !== null && Number.isInteger(raw) && raw >= 0 && raw <= 255 ? raw : null;
@@ -413,7 +438,15 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     // container stops, but it also forgets every exec when it restarts: a command that did run then loses its output
     // and its exit code (ADR-0042 §7).
     const started = state !== null && state?.pid !== 0;
-    return this.finished(req, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
+    // A command that ended by itself keeps its outcome and exit code, whatever the kill of what it left behind. An end
+    // of the output that comes with no exit code (a connection that broke ends it the same way) does not say that the
+    // command ended: with no confirmed kill either, it may still be going. Only an engine that says no process ever ran
+    // (pid 0) tells a command that never started; one that no longer knows the exec does not, so that run is not known
+    // (its output stays withheld, as the engine's own text can be all it holds).
+    if (!stopped && exitCode === null && state?.pid !== 0) {
+      return this.finished(req, container.inspected, "unknown", null, startedAt, tail, started);
+    }
+    return this.finished(req, container.inspected, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
   }
 
   /** Resolves when the output ended, when the connection broke, or at the time limit. The command gets no input. */
@@ -452,33 +485,29 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     });
   }
 
-  /** Kills what a run started. A failure is tried again in the background; the next run's first step is another net. */
-  private async cleanUp(containerId: string, runId: string): Promise<void> {
-    const first = await killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs);
-    if (first === "done" || first === "gone") return;
-    // The component's own environment carries the mark: the script would kill nothing again, so it is not retried.
-    if (first === "own_mark") {
-      this.deps.onCleanupFailed?.();
-      return;
+  /**
+   * Kills what a run started, and tries again after a failure, up to `APP_STACK_TASK_CLEANUP_RETRIES` tries in all, each
+   * one awaited: the run, and so the hold on the application, lasts until a kill is confirmed or the last one failed.
+   * True when a kill is confirmed (also when the container is gone, so nothing is left to stop); false when it is not,
+   * which is logged once. The component's own environment carrying the mark is not tried again: the script would kill
+   * nothing again. The next run's first step is another net.
+   */
+  private async cleanUp(containerId: string, runId: string): Promise<boolean> {
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs);
+      if (outcome === "done" || outcome === "gone") return true;
+      if (outcome === "own_mark" || attempt >= APP_STACK_TASK_CLEANUP_RETRIES) {
+        this.deps.onCleanupFailed?.();
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, this.retryDelayMs));
     }
-    let attempt = 1;
-    const again = (): void => {
-      const timer = setTimeout(() => {
-        void killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs).then((outcome) => {
-          if (outcome === "done" || outcome === "gone") return;
-          attempt += 1;
-          if (outcome !== "own_mark" && attempt < APP_STACK_TASK_CLEANUP_RETRIES) again();
-          else this.deps.onCleanupFailed?.();
-        });
-      }, this.retryDelayMs);
-      timer.unref();
-    };
-    again();
   }
 
   private async finished(
     req: AppStackTaskRunIpcRequest,
-    outcome: "succeeded" | "failed" | "timed_out",
+    inspected: AppStackInspectedContainer,
+    outcome: "succeeded" | "failed" | "timed_out" | "unknown",
     exitCode: number | null,
     startedAt: Date,
     tail: TaskOutputTail,
@@ -493,13 +522,7 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
         !kept.cut &&
         kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true);
     const { lines, cut } = engineError ? { lines: [], cut: false } : kept;
-    const values = await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey);
-    const masked = maskAppStackLogLines(
-      lines.map((text) => ({ at: null, stream: "stdout" as const, text })),
-      values,
-    ).map((line) => line.text);
-    const { output, truncated } = boundAppStackTaskOutput(masked);
-    return {
+    const answer = (output: string, outputTruncated: boolean): AppStackTaskRunIpcResult => ({
       runId: req.runId,
       outcome,
       problem: null,
@@ -507,8 +530,29 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
       startedAt: startedAt.toISOString(),
       endedAt: this.now().toISOString(),
       output,
-      outputTruncated: truncated || cut,
-    };
+      outputTruncated,
+    });
+    // Masked with every private value of the component, or not kept at all. The values come from the container the run
+    // went to (its binds name its secret files, its environment holds the rest), as the log reader takes them, so a
+    // folder a reboot emptied cannot leave a value unmasked. Where they cannot be established, what the run printed is
+    // dropped and the answer is the one of a run whose output was all cut away: empty and flagged. A run that printed
+    // nothing has nothing to mask, so it keeps its ordinary answer.
+    const printed = cut || lines.some((line) => line !== "");
+    let values: string[] = [];
+    if (printed) {
+      try {
+        values = await appStackContainerMaskValues(this.deps.secretsRootDir, req, inspected);
+      } catch {
+        this.deps.onOutputWithheld?.();
+        return answer("", true);
+      }
+    }
+    const masked = maskAppStackLogLines(
+      lines.map((text) => ({ at: null, stream: "stdout" as const, text })),
+      values,
+    ).map((line) => line.text);
+    const { output, truncated } = boundAppStackTaskOutput(masked);
+    return answer(output, truncated || cut);
   }
 
   private forgetOldRuns(): void {

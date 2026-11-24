@@ -53,6 +53,8 @@ const SAFE_DOMAIN_PATTERN =
 
 export class ExecutorCodedError extends Error {
   public readonly code: ErrorCode;
+  /** Set on a refusal that a call raised before it changed anything (#111); the answer then carries a `stage` detail. */
+  public beforeChange = false;
 
   public constructor(message: string, code: ErrorCode) {
     super(message);

@@ -30,6 +30,7 @@ import {
   AppStackSecretFileContentSchema,
   AppStackSecretFileContentsSchema,
   AppStackStatusIpcResultSchema,
+  AppStackStopIpcRequestSchema,
   AppStackStopIpcResultSchema,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
@@ -50,6 +51,7 @@ import {
   type AppStackRoutesIpcResult,
   type AppStackSecretFileContent,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
 } from "../src/app-templates/stack-ipc.js";
 import { ERROR_CODES } from "../src/errors.js";
@@ -71,6 +73,8 @@ const pull: AppStackPullIpcRequest = { plan: PLAN, image: PLAN.components[0]!.im
 const planOnly: AppStackPlanIpcRequest = { plan: PLAN };
 const component: AppStackComponentIpcRequest = { plan: PLAN, componentKey: "app", secretFileContents: [SECRET] };
 const remove: AppStackRemoveIpcRequest = { ...REF, removeVolumes: false };
+const ORDER = ["cache", "web"];
+const stop: AppStackStopIpcRequest = { ...REF, order: ORDER };
 const componentsRemove: AppStackComponentsRemoveIpcRequest = { plan: PLAN, componentKeys: ["old-web", "cache"] };
 const logs: AppStackLogsIpcRequest = { ...REF, componentKey: "app", tail: 100 };
 const routes: AppStackRoutesIpcRequest = { plan: PLAN, routes: [ROUTE] };
@@ -168,7 +172,9 @@ const INSTANCES: [string, z.ZodType, unknown][] = [
   ["plan request", AppStackPlanIpcRequestSchema, planOnly],
   ["component request", AppStackComponentIpcRequestSchema, component],
   ["ref request", AppStackRefIpcRequestSchema, REF],
+  ["stop request", AppStackStopIpcRequestSchema, stop],
   ["remove request", AppStackRemoveIpcRequestSchema, remove],
+  ["remove request with order", AppStackRemoveIpcRequestSchema, { ...remove, order: ORDER }],
   ["components remove request", AppStackComponentsRemoveIpcRequestSchema, componentsRemove],
   ["logs request", AppStackLogsIpcRequestSchema, logs],
   ["routes request", AppStackRoutesIpcRequestSchema, routes],
@@ -209,7 +215,7 @@ const WIRE_KEY_NAMES = (
   "internalPort hosts hostname tls httpsRedirect redirectTo challenge source routes pulled networks role created volumes " +
   "volumeKey components outcome removedComponents routeCount hostnames changed removedNetworks removedVolumes " +
   "retainedVolumes componentKeys state health probe componentHash revisionId startedAt restartCount exitCode oomKilled " +
-  "observedAt internal edge published at stream text compress protection username paths pathPrefix stripPrefix"
+  "observedAt internal edge published at stream text compress protection username paths pathPrefix stripPrefix order"
 ).split(" ");
 /** ADR-0037 R3: the one wire key that is forbidden in a public DTO on purpose, so a leak of it is blocked and redacted. */
 const VERIFIER_KEY = "passwordHash";
@@ -237,7 +243,7 @@ describe("application stack IPC wire", () => {
     const organizationId = "org_3984baf6-928d-40dd-b388-bfac50b5e54f";
     const foreignPlan = { ...PLAN, organizationId, hostAllocationId: "alloc_3984baf6-928d-40dd-b388-bfac50b5e54f" };
     const requests = INSTANCES.filter(([name]) => name.endsWith("request"));
-    expect(requests).toHaveLength(8);
+    expect(requests).toHaveLength(9);
     for (const [name, schema, value] of requests) {
       const request = value as Record<string, unknown>;
       const foreign = "plan" in request ? { ...request, plan: foreignPlan } : { ...request, organizationId };
@@ -312,6 +318,31 @@ describe("application stack IPC wire", () => {
     expect(parse(["old_web"])).toBe(false);
   });
 
+  it("takes the applied plan's order on a stop and a remove, and on nothing else", () => {
+    const parseStop = (order?: unknown) => AppStackStopIpcRequestSchema.safeParse(order === undefined ? REF : { ...REF, order }).success;
+    const parseRemove = (order?: unknown) => AppStackRemoveIpcRequestSchema.safeParse({ ...remove, ...(order === undefined ? {} : { order }) }).success;
+    for (const parse of [parseStop, parseRemove]) {
+      expect(parse()).toBe(true);
+      expect(parse(["a", "b", "c", "d", "e", "f", "g", "h"])).toBe(true);
+      expect(parse(["old-web"])).toBe(true);
+      expect(parse([])).toBe(false);
+      expect(parse(["a", "a"])).toBe(false);
+      expect(parse(["a", "b", "c", "d", "e", "f", "g", "h", "i"])).toBe(false);
+      expect(parse(["Web"])).toBe(false);
+      expect(parse(["a b"])).toBe(false);
+      expect(parse([""])).toBe(false);
+      expect(parse([1])).toBe(false);
+      expect(parse("web")).toBe(false);
+      expect(parse(null)).toBe(false);
+    }
+    // A request without the field is what an older API sends: it parses to the same value as before.
+    expect(AppStackStopIpcRequestSchema.parse(REF)).toEqual(REF);
+    expect(AppStackRemoveIpcRequestSchema.parse(remove)).toEqual(remove);
+    // The calls that share the Ref schema (unpublish, status, logs, terminal) do not take it.
+    expect(AppStackRefIpcRequestSchema.safeParse({ ...REF, order: ORDER }).success).toBe(false);
+    expect(AppStackLogsIpcRequestSchema.safeParse({ ...logs, order: ORDER }).success).toBe(false);
+  });
+
   it("refuses empty hosts, more than eight hostnames, duplicate hostnames and duplicate routes", () => {
     const parse = (list: AppStackRouteWire[]) => AppStackRoutesIpcRequestSchema.safeParse({ plan: PLAN, routes: list }).success;
     const hosts = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => host(`${prefix}${i}.example.org`));
@@ -338,9 +369,9 @@ describe("application stack IPC wire", () => {
     expect(AppStackLogsIpcRequestSchema.parse(logs)).toEqual(logs);
   });
 
-  it("lists twelve executor reasons, each mapped to an error code by a total frozen map", () => {
-    expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(12);
-    expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(12);
+  it("lists thirteen executor reasons, each mapped to an error code by a total frozen map", () => {
+    expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(13);
+    expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(13);
     for (const reason of APP_STACK_EXECUTOR_REASONS) {
       expect(reason).toMatch(/^STACK_[A-Z_]{1,40}$/);
       expect(AppStackExecutorReasonSchema.parse(reason)).toBe(reason);
@@ -348,8 +379,11 @@ describe("application stack IPC wire", () => {
     }
     expect(Object.keys(APP_STACK_EXECUTOR_REASON_CODES).sort()).toEqual([...APP_STACK_EXECUTOR_REASONS].sort());
     expect(Object.isFrozen(APP_STACK_EXECUTOR_REASON_CODES)).toBe(true);
+    // An image that declares a folder no mount covers (#98) is refused as a permanent policy denial, never as an outage.
+    expect(APP_STACK_EXECUTOR_REASON_CODES.STACK_IMAGE_VOLUME_UNCOVERED).toBe("HOST_POLICY_DENIED");
     expect(APP_STACK_EXECUTOR_REASONS.filter((r) => (APP_STACK_REASONS as readonly string[]).includes(r))).toEqual([
       "STACK_IMAGE_NOT_ALLOWED",
+      "STACK_IMAGE_VOLUME_UNCOVERED",
       "STACK_SECRET_MISSING",
       "STACK_VOLUME_IN_USE",
       "STACK_UNSUPPORTED_FEATURE",

@@ -27,7 +27,7 @@ export const APP_STACK_LOG_TAIL_MAX = 500;
 export const APP_STACK_NETWORK_ROLES = ["app_internal", "app_edge"] as const;
 export type AppStackNetworkRole = (typeof APP_STACK_NETWORK_ROLES)[number];
 
-/** details[0].reason of every executor refusal of the stack routes. Four names are spec §16 ones (APP_STACK_REASONS). */
+/** details[0].reason of every executor refusal of the stack routes. Five names are in APP_STACK_REASONS. */
 export const APP_STACK_EXECUTOR_REASONS = [
   "STACK_PLAN_INVALID",
   "STACK_PLAN_HASH_MISMATCH",
@@ -35,6 +35,7 @@ export const APP_STACK_EXECUTOR_REASONS = [
   "STACK_IMAGE_PULL_FAILED",
   "STACK_IMAGE_DIGEST_MISMATCH",
   "STACK_IMAGE_MISSING",
+  "STACK_IMAGE_VOLUME_UNCOVERED",
   "STACK_SECRET_MISSING",
   "STACK_NAMESPACE_CONFLICT",
   "STACK_COMPONENT_NOT_READY",
@@ -51,6 +52,7 @@ export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorRe
   STACK_IMAGE_PULL_FAILED: "DOCKER_ENGINE_UNAVAILABLE", // pull HTTP error or "error" line in the 200 stream
   STACK_IMAGE_DIGEST_MISMATCH: "HOST_POLICY_DENIED", // local image has no RepoDigests entry for the plan digest
   STACK_IMAGE_MISSING: "NOT_FOUND", // image not local (create, or pull with pullMissingImages false)
+  STACK_IMAGE_VOLUME_UNCOVERED: "HOST_POLICY_DENIED", // the image declares a folder (Config.Volumes) that no mount of a component using it sits at (#98)
   STACK_SECRET_MISSING: "VALIDATION_ERROR", // a (parameterKey, version) the component pins has no content entry
   STACK_NAMESPACE_CONFLICT: "HOST_POLICY_DENIED", // a derived name or a stack_id label belongs to something not ours
   STACK_COMPONENT_NOT_READY: "RESOURCE_LOCKED", // needed resource missing, dependency or route target not running, other plan
@@ -58,6 +60,12 @@ export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorRe
   STACK_BUSY: "RESOURCE_LOCKED", // another mutating call for this stack is running in this executor
   STACK_UNSUPPORTED_FEATURE: "VALIDATION_ERROR", // route host with source "manual" or a redirectTo
 });
+
+/**
+ * The one more error detail of a refusal of the create call that raised it before its first removal or create: the
+ * executor changed nothing for this call (#111). Never a reason, never shown to a customer.
+ */
+export const APP_STACK_REFUSED_BEFORE_CHANGE = Object.freeze({ field: "stage", message: "before_change" } as const);
 
 /** C0 controls but tab and line breaks, and unpaired surrogates: 6 bytes each in JSON, so the start body stays < 1 MiB. */
 // eslint-disable-next-line no-control-regex
@@ -119,10 +127,23 @@ export const AppStackComponentIpcRequestSchema = z
   .object({ plan: ApprovedStackPlanSchema, componentKey: AppStackKeySchema, secretFileContents: AppStackSecretFileContentsSchema })
   .strict();
 export type AppStackComponentIpcRequest = z.infer<typeof AppStackComponentIpcRequestSchema>;
-/** stop, unpublish, status. */
+/** unpublish, status. */
 export const AppStackRefIpcRequestSchema = z.object({ stackId: AppEntityIdSchema, organizationId: AppForeignIdSchema }).strict();
 export type AppStackRefIpcRequest = z.infer<typeof AppStackRefIpcRequestSchema>;
-export const AppStackRemoveIpcRequestSchema = AppStackRefIpcRequestSchema.extend({ removeVolumes: z.boolean() }).strict();
+/** The keys of the applied plan's components in plan order. A hint for the order of a stop or a remove only: it never
+ *  selects what is touched, and a key that names no container is ignored. */
+const AppStackOrderSchema = z
+  .array(AppStackKeySchema)
+  .min(1)
+  .max(APP_TEMPLATE_LIMITS.services)
+  .refine((keys) => new Set(keys).size === keys.length, "Duplicate component key");
+/** stop: every container, by reverse position in `order` when it is given. */
+export const AppStackStopIpcRequestSchema = AppStackRefIpcRequestSchema.extend({ order: AppStackOrderSchema.optional() }).strict();
+export type AppStackStopIpcRequest = z.infer<typeof AppStackStopIpcRequestSchema>;
+export const AppStackRemoveIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
+  removeVolumes: z.boolean(),
+  order: AppStackOrderSchema.optional(),
+}).strict();
 export type AppStackRemoveIpcRequest = z.infer<typeof AppStackRemoveIpcRequestSchema>;
 /** Upgrade/rollback cleanup: only these containers; the keys need not be in the plan. */
 export const AppStackComponentsRemoveIpcRequestSchema = z

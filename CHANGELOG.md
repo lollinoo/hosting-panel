@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Image folders, the built-in databases, task runs, the statuses of an application and five more fixes (2026-11-24)
+*hosting-panel v0.17.8*
+
+**Bug Fixes & Stability**
+- **apps**: Image folders, the built-in databases, task runs, the statuses of an application and five more fixes
+
+---
+
 ### Unreadable executor answers, a time bound on recoveries, the generic site route, removed addresses and three more fixes (2026-11-24)
 *hosting-panel v0.17.7*
 

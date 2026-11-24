@@ -27,6 +27,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -52,10 +53,10 @@ import {
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
   decodeAppStackHealthLabel,
+  markRefusedBeforeChange,
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
 } from "./app-stacks/index.js";
@@ -124,6 +125,16 @@ const VIRTUAL_SECRETS_ROOT = "/run/hosting-panel/secrets";
 const startIndex = (c: SimContainer) => Number(c.labels[APP_STACK_LABELS.startIndex]) || 0;
 const byStartDesc = ([ka, a]: [string, SimContainer], [kb, b]: [string, SimContainer]) =>
   startIndex(b) - startIndex(a) || kb.localeCompare(ka);
+/** The real engine's order (#100): by reverse position in `order` when given, a key it does not list first. */
+function stopOrder(order: readonly string[] | undefined): typeof byStartDesc {
+  if (order === undefined) return byStartDesc;
+  const position = new Map(order.map((key, at) => [key, at]));
+  return (a, b) => {
+    const [pa, pb] = [position.get(a[0]), position.get(b[0])];
+    if (pa === undefined || pb === undefined) return pa === pb ? byStartDesc(a, b) : pa === undefined ? -1 : 1;
+    return pb - pa;
+  };
+}
 const notReady = (message: string) => new AppStackExecutorError("STACK_COMPONENT_NOT_READY", message);
 /** The steps the real engine refuses while a backup job holds the application's lane. */
 const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove", "remove_components"]);
@@ -243,20 +254,40 @@ export class SimulatedAppStacks implements StackExecutorPort {
     }) as AppStackSimSnapshot;
   }
 
-  /** For the simulated tasks: is the component there and running, and which values its output must never show. */
+  /**
+   * For the simulated tasks: is the component there and running, and which values its output must never show. The
+   * values are the engine's (the same rule as the logs): null when they cannot be established, and then the output
+   * of a run is not kept.
+   */
   public async findAppStackComponent(req: {
     readonly stackId: string;
     readonly organizationId: string;
     readonly componentKey: string;
-  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] } | null> {
+  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] | null } | null> {
     const stack = this.own(req.stackId, req.organizationId);
     const container = stack?.containers.get(req.componentKey);
     if (stack === undefined || container === undefined) return null;
-    const secretValues =
-      this.options.secretsRootDir !== null
-        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : Object.values(stack.secrets.get(req.componentKey) ?? {});
+    let secretValues: readonly string[] | null;
+    try {
+      secretValues = await this.maskValues(stack, container, req);
+    } catch {
+      secretValues = null;
+    }
     return { running: container.state === "running", secretValues };
+  }
+
+  /** The engine's rule, from the container's binds: every secret file it was given must be there, or it throws. */
+  private async maskValues(
+    stack: SimStack,
+    container: SimContainer,
+    req: { readonly stackId: string; readonly componentKey: string },
+  ): Promise<string[]> {
+    const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
+    if (this.options.secretsRootDir !== null) return appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
+    const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
+    const held = stack.secrets.get(req.componentKey) ?? {};
+    const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
+    return appStackLogMaskValues(req.componentKey, inspected, files);
   }
 
   public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
@@ -323,7 +354,20 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return { image: req.image, digest: `sha256:${createHash("sha256").update(req.image).digest("hex")}` };
   }
 
-  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+  public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+    // Like the engine: a refusal raised before the first removal says nothing was changed (#111).
+    let changing = false;
+    try {
+      return await this.createComponents(req, () => {
+        changing = true;
+      });
+    } catch (err) {
+      if (!changing) markRefusedBeforeChange(err);
+      throw err;
+    }
+  }
+
+  private createComponents(req: AppStackCreateIpcRequest, beforeFirstChange: () => void): Promise<AppStackCreateIpcResult> {
     return this.run("create", { method: "createAppStackComponents", stackId: req.plan.stackId }, true, async () => {
       const plan = this.checkPlan(req.plan);
       const secretContents = assertAppStackCreateSecretContents(plan, req.secretContents);
@@ -352,6 +396,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents = [...stack.containers.keys()].filter((key) => !keys.has(key)).sort();
+      beforeFirstChange();
       for (const key of removedComponents) await this.removeComponent(stack, plan.stackId, key);
       const components = plan.components.map(({ key }) => {
         const existing = stack.containers.get(key);
@@ -388,10 +433,10 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return this.runComponent("restart", "restartAppStackComponent", req);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.run("stop", { method: "stopAppStack", stackId: req.stackId }, true, async () => {
       const stack = this.own(req.stackId, req.organizationId);
-      const components = [...(stack?.containers ?? [])].sort(byStartDesc).map(([key, c]) => {
+      const components = [...(stack?.containers ?? [])].sort(stopOrder(req.order)).map(([key, c]) => {
         if (c.state !== "running") return { componentKey: key, outcome: "already_stopped" as const };
         c.state = "exited";
         c.exitCode = 0;
@@ -436,7 +481,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const result: AppStackRemoveIpcResult = { removedComponents: [], removedNetworks: [], removedVolumes: [], retainedVolumes: [] };
       if (this.options.secretsRootDir !== null) await purgeAppStackSecrets(this.options.secretsRootDir, req.stackId);
       if (stack === undefined) return result;
-      for (const [key, c] of [...stack.containers].sort(byStartDesc)) {
+      for (const [key, c] of [...stack.containers].sort(stopOrder(req.order))) {
         stack.containers.delete(key);
         this.mutate("container_remove", c.name);
         this.gone(req.stackId, key);
@@ -538,18 +583,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return this.run("logs", { method: "getAppStackComponentLogs", stackId: req.stackId, componentKey: req.componentKey }, false, async () => {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
-      if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      // The engine's rule, from the container's binds: every secret file it was given must be there.
-      const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
-      let values: string[];
-      if (this.options.secretsRootDir !== null) {
-        values = await appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
-      } else {
-        const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
-        const held = stack?.secrets.get(req.componentKey) ?? {};
-        const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
-        values = appStackLogMaskValues(req.componentKey, inspected, files);
-      }
+      if (stack === undefined || container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+      const values = await this.maskValues(stack, container, req);
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }

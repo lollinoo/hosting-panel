@@ -2959,6 +2959,7 @@ x-hp-ingress:
         STACK_VOLUME_IN_USE: "Volume still in use.",
         STACK_UNSUPPORTED_FEATURE: "Feature not supported in this release.",
         STACK_PARAMETER_INVALID: "Invalid parameter value.",
+        STACK_IMAGE_VOLUME_UNCOVERED: "The image declares a folder with no volume of the component mounted at it: publish a version that gives that folder a volume.",
         slug_taken: "A template with this slug already exists.",
         template_archived: "The template is archived.",
         built_in: "Built-in templates cannot be archived.",
@@ -3551,6 +3552,8 @@ x-hp-ingress:
         error: "Cannot read the runs.",
         output: "What it printed",
         noOutput: "It printed nothing.",
+        notKept:
+          "This run printed something, but it was not kept. This happens when the output is one very long line, or when the panel could not read the application's private values to hide them. If it happens again, restart the application and run the task again; if it still happens after a restart, ask your server administrator.",
         truncated: "Only the last lines are shown.",
       },
     },
@@ -3647,6 +3650,10 @@ x-hp-ingress:
       STACK_TEMPLATE_UNPUBLISHED: "This application or version is no longer offered in the catalog.",
       STACK_IMAGE_NOT_ALLOWED: "This application's software is not approved on this server.",
       STACK_QUOTA_EXCEEDED: "You have reached the application or resource limit of your plan.",
+      cpu_limit_reached:
+        "Your applications would use more processor than you have on this server. Delete an application you no longer need, or ask your administrator.",
+      memory_limit_reached:
+        "Your applications would use more memory than you have on this server. Delete an application you no longer need, or ask your administrator.",
       STACK_DEPENDENCY_CYCLE: "This application's components depend on each other in a loop: contact support.",
       STACK_HEALTH_TIMEOUT: "The application did not become ready in time. Your data is kept: check the logs and try again.",
       STACK_PORT_UNAVAILABLE: "The requested port is not available.",
@@ -3654,6 +3661,8 @@ x-hp-ingress:
       STACK_VOLUME_IN_USE: "This application's data is still in use: try again shortly.",
       STACK_UNSUPPORTED_FEATURE: "This feature is not available on this server.",
       STACK_PARAMETER_INVALID: "Check the highlighted settings.",
+      STACK_IMAGE_VOLUME_UNCOVERED:
+        "This application's software keeps data in a folder the application does not declare. The server administrator must publish a version that gives that folder its own storage.",
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
       notNow: "This action is not available at the moment. Reload the page to see the actions you can use now.",

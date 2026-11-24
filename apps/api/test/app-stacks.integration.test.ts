@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/contracts";
 import {
   and,
+  appStackComponents,
   appStackDeployments,
   appStackParameters,
   appStackRevisions,
@@ -472,6 +473,105 @@ describe("application stacks HTTP API (H5)", () => {
     const cache = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/cache/health`);
     expect(cache.body.data).toMatchObject({ componentKey: "cache", source: "running_state" });
     expectRefusal(await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/nope/health`), 404, "NOT_FOUND");
+  });
+
+  it("issue #151: the count of components refuses nothing; the processor and the memory refuse each with its own sentence", async () => {
+    const quotaRow = async () => (await h.dbClient.db.select().from(resourceQuotas).where(eq(resourceQuotas.organizationId, h.a.orgId)))[0]!;
+    const setQuota = (values: Partial<typeof resourceQuotas.$inferInsert>) =>
+      h.dbClient.db.update(resourceQuotas).set(values).where(eq(resourceQuotas.organizationId, h.a.orgId));
+    const roomFor = { maxServices: 1000, maxCpuMilli: 1_000_000, maxMemoryBytes: String(2 ** 50) };
+    try {
+      // The count already passes max_services: the application is accepted and the count keeps going up.
+      const used = (await quotaRow()).usedServices;
+      expect(used).toBeGreaterThan(1);
+      await setQuota({ maxServices: 1 });
+      const accepted = await create(h.a, { templateVersionId: web, name: `qa-count-${randomUUID().slice(0, 6)}`, deploy: true });
+      expect(accepted.status, accepted.raw).toBe(202);
+      expect((await quotaRow()).usedServices).toBeGreaterThan(used);
+
+      const before = await h.counts();
+      const full = await quotaRow();
+      await setQuota({ ...roomFor, maxCpuMilli: full.usedCpuMilli });
+      const cpu = await create(h.a, { templateVersionId: web, name: `qa-cpu-${randomUUID().slice(0, 6)}`, deploy: true });
+      expectRefusal(cpu, 409, "QUOTA_EXCEEDED", { field: "cpuMilli", reason: "cpu_limit_reached" });
+      expect(cpu.body.error.message).toContain("more processor than");
+      await setQuota({ ...roomFor, maxMemoryBytes: full.usedMemoryBytes });
+      const memory = await create(h.a, { templateVersionId: web, name: `qa-memory-${randomUUID().slice(0, 6)}`, deploy: true });
+      expectRefusal(memory, 409, "QUOTA_EXCEEDED", { field: "memoryBytes", reason: "memory_limit_reached" });
+      expect(memory.body.error.message).toContain("more memory than");
+      expect(await h.counts()).toEqual(before);
+    } finally {
+      await setQuota(roomFor);
+    }
+  });
+
+  it("#130: the list shows the status the page shows, from the readings of the components of the revision that runs", async () => {
+    const db = h.dbClient.db;
+    const live = async (name: string, readings: Record<string, [string, number]>) => {
+      const stackId = await deployed(name);
+      await settle(stackId, "running");
+      const row = await stackRow(stackId);
+      await db.update(appStacks).set({ appliedRevisionId: row.desiredRevisionId }).where(eq(appStacks.id, stackId));
+      const now = Date.now();
+      for (const [componentKey, [health, ageMs]] of Object.entries(readings)) {
+        await db
+          .update(appStackComponents)
+          .set({ health: health as "healthy", healthObservedAt: new Date(now - ageMs) })
+          .where(and(eq(appStackComponents.stackId, stackId), eq(appStackComponents.componentKey, componentKey)));
+      }
+      return stackId;
+    };
+    const fresh = 30_000;
+    const stale = 10 * 60_000;
+    const stacks = {
+      well: await live("shown-well", { app: ["healthy", fresh], cache: ["healthy", fresh] }),
+      crashed: await live("shown-crashed", { app: ["stopped", fresh], cache: ["healthy", fresh] }),
+      old: await live("shown-old", { app: ["healthy", stale], cache: ["healthy", fresh] }),
+    };
+
+    const list = await h.call(h.a.token, "GET", `${base(h.a)}?limit=100`);
+    expect(list.status, list.raw).toBe(200);
+    const shown = new Map<string, Json>((list.body.data as Json[]).map((s) => [s.id as string, s]));
+    const expected = { well: "running", crashed: "failed", old: "unknown" } as const;
+    for (const [key, stackId] of Object.entries(stacks) as [keyof typeof stacks, string][]) {
+      const page = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+      expect(page.status, page.raw).toBe(200);
+      expect(page.body.data.status, key).toBe(expected[key]);
+      expect(shown.get(stackId)?.status, key).toBe(page.body.data.status);
+      expect(shown.get(stackId)?.unhealthyCount, key).toBe(page.body.data.unhealthyCount);
+      // The buttons follow the stored status, not the shown one.
+      expect(page.body.data.allowedActions, key).toEqual(expect.arrayContaining(["stack.stop"]));
+    }
+  });
+
+  it("#208: the components of a stopped application keep their stopped reading however old, in the page and in the health route", async () => {
+    const db = h.dbClient.db;
+    const stackId = await deployed("stopped-long-ago");
+    await settle(stackId, "running");
+    const row = await stackRow(stackId);
+    const longAgo = new Date(Date.now() - 3 * 60 * 60_000);
+    await db.update(appStacks).set({ status: "stopped", appliedRevisionId: row.desiredRevisionId }).where(eq(appStacks.id, stackId));
+    await db.update(appStackComponents).set({ health: "stopped", healthObservedAt: longAgo }).where(eq(appStackComponents.stackId, stackId));
+
+    const page = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+    expect(page.status, page.raw).toBe(200);
+    expect(page.body.data.status).toBe("stopped");
+    expect(page.body.data.unhealthyCount).toBe(0);
+    for (const component of page.body.data.components as Json[]) {
+      expect(component.health, component.key).toBe("stopped");
+      expect(component.healthObservedAt, component.key).toBe(longAgo.toISOString());
+    }
+    // The route says the reading is old (`stale`, a fact of the stored time) and still what it was.
+    const health = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/app/health`);
+    expect(health.status, health.raw).toBe(200);
+    expect(health.body.data).toMatchObject({ componentKey: "app", health: "stopped", observedAt: longAgo.toISOString(), stale: true });
+
+    // The same readings of an application that runs are old: unknown, in the page and in the route.
+    await db.update(appStacks).set({ status: "running" }).where(eq(appStacks.id, stackId));
+    const running = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+    expect(running.body.data.status).toBe("unknown");
+    for (const component of running.body.data.components as Json[]) expect(component.health, component.key).toBe("unknown");
+    expect((await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/app/health`)).body.data.health).toBe("unknown");
   });
 
   // Last: it leaves organisation B at its limit.

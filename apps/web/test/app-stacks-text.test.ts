@@ -64,6 +64,39 @@ describe("application refusal texts", () => {
     expect(appStackRefusalText(m, "ALREADY_EXISTS", "name_taken")).toBe(m.apps.reasons.name_taken);
   });
 
+  const WORDS = {
+    it: {
+      cpu_limit_reached:
+        "Le tue applicazioni userebbero più processore di quello che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
+      memory_limit_reached:
+        "Le tue applicazioni userebbero più memoria di quella che hai a disposizione su questo server. Elimina un'applicazione che non ti serve o chiedi all'amministratore.",
+    },
+    en: {
+      cpu_limit_reached:
+        "Your applications would use more processor than you have on this server. Delete an application you no longer need, or ask your administrator.",
+      memory_limit_reached:
+        "Your applications would use more memory than you have on this server. Delete an application you no longer need, or ask your administrator.",
+    },
+  } as const;
+
+  it.each(locales)("%s: a refusal for processor or memory says which one, not the generic limit (issue #151)", (name, m) => {
+    const reasons: Record<string, string> = m.apps.reasons;
+    for (const reason of ["cpu_limit_reached", "memory_limit_reached"] as const) {
+      const text = appStackRefusalText(m, "QUOTA_EXCEEDED", reason);
+      expect(text, reason).toBe(WORDS[name][reason]);
+      expect(reasons[reason], reason).toBe(WORDS[name][reason]);
+      expect(text, reason).not.toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+      expect(text, reason).not.toBe(m.apps.codes.QUOTA_EXCEEDED);
+      expect(text, reason).not.toMatch(/proxy|docker|container|contenitor|limite|limit\b/i);
+      // An install, an upgrade and a rollback read the same sentence as any other action.
+      expect(appStackChangeRefusalText(m, "QUOTA_EXCEEDED", reason, "running"), reason).toBe(text);
+    }
+    expect(reasons.cpu_limit_reached).not.toBe(reasons.memory_limit_reached);
+    // The application limit keeps its sentence, and so does the problem of a deployment (where no bound is known).
+    expect(appStackRefusalText(m, "QUOTA_EXCEEDED", "STACK_QUOTA_EXCEEDED")).toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+    expect(appStackProblemText(m, "STACK_QUOTA_EXCEEDED")).toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+  });
+
   it.each(locales)("%s: appTemplateRefusalText has its own sentence for every APP_STACK_REASONS value and the admin reasons", (_n, m) => {
     const generic = errorMessage(m, "VALIDATION_ERROR");
     const reasons = m.admin.appTemplates.reasons as Record<string, string>;
@@ -120,6 +153,15 @@ describe("application refusal texts", () => {
     for (const c of CODES) expect(appStackProblemText(m, c), c).toBe((m.apps.codes as Record<string, string>)[c]);
     expect(appStackProblemText(m, "OPERATION_AMBIGUOUS")).not.toBe(m.apps.history.problemGeneric);
     for (const p of ["OPERATION_INTERRUPTED", "name_taken", "constructor"]) expect(appStackProblemText(m, p), p).toBe(m.apps.history.problemGeneric);
+  });
+
+  it.each(locales)("%s: an image folder no volume covers is the server administrator's to fix, with no retry and no folder name (#98)", (_n, m) => {
+    const text = appStackProblemText(m, "STACK_IMAGE_VOLUME_UNCOVERED")!;
+    expect(text).toMatch(/administrator|amministratore/i);
+    expect(text).not.toMatch(/try again|riprova|riprov/i);
+    expect(text).not.toContain("/");
+    expect(appStackRefusalText(m, "HOST_POLICY_DENIED", "STACK_IMAGE_VOLUME_UNCOVERED")).toBe(text);
+    expect(text).not.toBe((m.apps.reasons as Record<string, string>).STACK_IMAGE_NOT_ALLOWED);
   });
 
   it.each(locales)("%s: a setting only the application decides has its own sentence", (_n, m) => {

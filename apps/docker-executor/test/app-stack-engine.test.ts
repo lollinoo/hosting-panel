@@ -246,6 +246,125 @@ describe("pullAppStackImage (5.8)", () => {
     expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: expect.stringContaining("(HTTP 500)") });
     expect(err).not.toHaveProperty("reason");
   });
+
+  // #98: a folder an image declares (VOLUME) gets a hidden writable volume from Docker at create unless a mount sits at
+  // exactly that folder. The image step is the last one before anything changes, so it refuses.
+  describe("a folder the image declares (#98)", () => {
+    const mountAt = (containerPath: string) => [{ volumeKey: "data", containerPath, readOnly: false }];
+    /** The test plan with both components, on the one image, mounting the volume at `containerPath`. */
+    const bothMountAt = (containerPath: string) =>
+      appStackTestPlan({ components: appStackTestPlan().components.map((c) => ({ ...c, volumes: mountAt(containerPath) })) });
+    /** The test plan with the web component alone, which mounts nothing. */
+    const webAlone = () => appStackTestPlan({ components: appStackTestPlan().components.filter((c) => c.key === "web"), volumes: [] });
+    const declare = (h: Harness, volumes: unknown) => {
+      h.fake.images.set(IMAGE, { repoDigests: [IMAGE] });
+      h.fake.declaredVolumes.set(IMAGE, volumes);
+    };
+    const uncovered = (folder: string, owner: string) => ({
+      reason: "STACK_IMAGE_VOLUME_UNCOVERED",
+      code: "HOST_POLICY_DENIED",
+      message: `The image of component ${owner} declares the folder ${folder} and no volume of the component is mounted at exactly that folder`,
+    });
+
+    it("refuses a declared folder that no mount covers, and creates and removes nothing", async () => {
+      const h = await setup();
+      declare(h, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(h.fake.log).toEqual([inspect]);
+      expect([...h.fake.containers.keys()]).toEqual([PROXY]);
+      expect(h.fake.networks.size).toBe(0);
+      expect(h.fake.volumes.size).toBe(0);
+    });
+
+    it("refuses after a pull too, and keeps the downloaded image", async () => {
+      const h = await setup();
+      h.fake.pullable.add(IMAGE);
+      h.fake.declaredVolumes.set(IMAGE, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(h.fake.log).toEqual([inspect, pull, inspect]);
+      expect(h.fake.images.has(IMAGE)).toBe(true);
+      expect(h.fake.volumes.size).toBe(0);
+    });
+
+    it("names the component that mounts nothing when another component of the same image does mount it", async () => {
+      const h = await setup();
+      declare(h, { "/data": {} });
+      // The worker mounts the volume at /data, the web component does not.
+      await expect(h.engine.pullAppStackImage({ plan, image: IMAGE })).rejects.toMatchObject(uncovered("/data", "web"));
+      expect(mutations(h.fake.log)).toEqual([]);
+    });
+
+    it.each([
+      ["/data", "/data"],
+      ["/data/", "/data"],
+      ["/data/./", "/data"],
+      ["//data", "/data"],
+      ["/data//", "/data"],
+    ])("passes a declared folder %s that every component mounts at %s", async (declared, mount) => {
+      const h = await setup();
+      declare(h, { [declared]: {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt(mount), image: IMAGE })).resolves.toEqual({ image: IMAGE, pulled: false });
+      expect(h.fake.log).toEqual([inspect]);
+    });
+
+    it.each([
+      ["a mount at the parent folder", "/srv/data", "/srv"],
+      ["a mount inside the folder", "/srv", "/srv/data"],
+      ["a mount at a sibling", "/data", "/data2"],
+    ])("refuses a declared folder with %s", async (_name, declared, mount) => {
+      const h = await setup();
+      declare(h, { [declared]: {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt(mount), image: IMAGE })).rejects.toMatchObject(uncovered(declared, "web"));
+      expect(mutations(h.fake.log)).toEqual([]);
+    });
+
+    it("refuses when one of two declared folders is not covered, and names that one", async () => {
+      const h = await setup();
+      declare(h, { "/data": {}, "/cache": {} });
+      await expect(h.engine.pullAppStackImage({ plan: bothMountAt("/data"), image: IMAGE })).rejects.toMatchObject(uncovered("/cache", "web"));
+    });
+
+    it.each([
+      ["null", null],
+      ["an empty map", {}],
+      ["no Volumes key", undefined],
+    ])("passes an image whose Config.Volumes is %s", async (_name, volumes) => {
+      const h = await setup();
+      declare(h, volumes);
+      await expect(h.engine.pullAppStackImage({ plan, image: IMAGE })).resolves.toEqual({ image: IMAGE, pulled: false });
+      expect(h.fake.log).toEqual([inspect]);
+    });
+
+    it("does not copy a folder name that is not a plain path into the message", async () => {
+      const h = await setup();
+      declare(h, { "/da ta\u0007<x>": {} });
+      const err = await h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE }).catch((e: Error) => e);
+      expect(err).toMatchObject({ reason: "STACK_IMAGE_VOLUME_UNCOVERED", code: "HOST_POLICY_DENIED" });
+      expect(String(err)).not.toContain("da ta");
+      expect(String(err)).not.toContain("\u0007");
+      expect((err as Error).message).toBe(
+        "The image of component web declares a folder with an unusual name and no volume of the component is mounted at exactly that folder",
+      );
+    });
+
+    it.each([
+      ["a list", ["/data"]],
+      ["a string", "/data"],
+    ])("treats Config.Volumes that is %s as malformed data, not as no folder", async (_name, volumes) => {
+      const h = await setup();
+      declare(h, volumes);
+      const err = await h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE }).catch((e: Error & { reason?: string }) => e);
+      expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The container engine answered with malformed data" });
+      expect(err).not.toHaveProperty("reason");
+    });
+
+    it("checks the digest first: a mismatching image is refused for its digest, not for its folders", async () => {
+      const h = await setup();
+      h.fake.images.set(IMAGE, { repoDigests: [`registry.test/acme/web@sha256:${"d".repeat(64)}`] });
+      h.fake.declaredVolumes.set(IMAGE, { "/data": {} });
+      await expect(h.engine.pullAppStackImage({ plan: webAlone(), image: IMAGE })).rejects.toMatchObject({ reason: "STACK_IMAGE_DIGEST_MISMATCH" });
+    });
+  });
 });
 
 describe("prepareAppStack (5.9)", () => {
@@ -561,6 +680,157 @@ describe("createAppStackComponents (5.10)", () => {
   });
 });
 
+describe("a create refused before its first removal or create says so (#111)", () => {
+  const plan = appStackTestPlan();
+  type Refusal = { readonly beforeChange?: unknown; readonly reason?: unknown; readonly code?: unknown };
+  const refusalOf = async (call: Promise<unknown>): Promise<Refusal> => {
+    const err = await call.then(
+      () => null,
+      (e: unknown) => e as Refusal,
+    );
+    expect(err).not.toBeNull();
+    return err as Refusal;
+  };
+  const markOf = async (call: Promise<unknown>) => (await refusalOf(call)).beforeChange === true;
+  const JOB = `hp_bk_op_${"7".repeat(32)}-apply_rs_data`;
+
+  const refusing = (name: string, arrange: (h: Harness) => Promise<unknown>, asked: ApprovedStackPlan = plan) => [name, arrange, asked] as const;
+  it.each([
+    refusing("no network", async (_h: Harness) => undefined),
+    refusing(
+      "no volume",
+      async (h: Harness) => {
+        await h.engine.prepareAppStack({ plan });
+        h.fake.volumes.clear();
+      },
+    ),
+    refusing("no image", async (h: Harness) => void (await h.engine.prepareAppStack({ plan }))),
+    refusing(
+      "an image of another digest",
+      async (h: Harness) => {
+        await h.engine.prepareAppStack({ plan });
+        h.fake.images.set(IMAGE, { repoDigests: [] });
+      },
+    ),
+    refusing(
+      "a foreign container holding a derived name",
+      async (h: Harness) => {
+        h.fake.images.set(IMAGE, { repoDigests: [IMAGE] });
+        await h.engine.prepareAppStack({ plan });
+        await foreignContainer(h, WORKER);
+      },
+    ),
+    refusing(
+      "a container of another organisation under the stack id",
+      async (h: Harness) => {
+        h.fake.images.set(IMAGE, { repoDigests: [IMAGE] });
+        await h.engine.prepareAppStack({ plan });
+        await foreignContainer(h, "intruder", { [APP_STACK_LABELS.stackId]: ID, [APP_STACK_LABELS.organizationId]: "org_other" });
+      },
+    ),
+    refusing(
+      "a plan asking for more processors than the server has",
+      async (h: Harness) => {
+        await deployed(h);
+        h.fake.info.NCPU = 1;
+      },
+      rehash({ ...plan, components: plan.components.map((c) => ({ ...c, resources: { ...c.resources, cpuMilli: 1_001 } })) }),
+    ),
+  ])("refuses with %s: it carries the mark and nothing was removed or created", async (_name, arrange, asked) => {
+    const h = await setup();
+    await arrange(h);
+    h.fake.log.length = 0;
+    expect(await markOf(h.engine.createAppStackComponents({ plan: asked }))).toBe(true);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it("a plan the executor refuses, a plan that does not match its hash and a secret entry outside the plan carry it", async () => {
+    const h = await setup();
+    const tampered = { ...plan, components: plan.components.map((c) => ({ ...c, environment: [] })) };
+    const invalid = { ...plan, components: plan.components.map((c) => ({ ...c, resources: { ...c.resources, cpuMilli: 16_001 } })) };
+    for (const refused of [tampered, invalid]) {
+      expect(await markOf(h.engine.createAppStackComponents({ plan: refused }))).toBe(true);
+    }
+    const extra = [{ parameterKey: "not_in_plan", version: 1, content: SECRET }];
+    expect(await markOf(h.engine.createAppStackComponents({ plan, secretContents: extra }))).toBe(true);
+    expect(h.fake.log).toEqual([]);
+  });
+
+  it("a body refused by the hardening check, which has no reason, carries it", async () => {
+    const h = await setup({ secretsRootDir: "/var/run/hp-app-engine-test" });
+    const [webComponent, workerComponent] = plan.components;
+    await prepared(h, appStackTestPlan({ components: [webComponent!, { ...workerComponent!, secretFiles: [] }] }));
+    const webWithSecret = { ...webComponent!, secretFiles: [{ envName: "SHARED_KEY_FILE", parameterKey: "shared_key", version: 1 }] };
+    const err = await refusalOf(h.engine.createAppStackComponents({ plan: appStackTestPlan({ components: [webWithSecret], volumes: [] }) }));
+    expect([err.code, err.reason, err.beforeChange]).toEqual(["HOST_POLICY_DENIED", undefined, true]);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it("a change of the same application that is running, a task, a backup lane and a backup job container carry it", async () => {
+    const h = await setup();
+    await prepared(h);
+    const held = h.fake.hold(/^GET \/networks\/hp_appnet_/);
+    const first = h.engine.prepareAppStack({ plan });
+    expect(await markOf(h.engine.createAppStackComponents({ plan }))).toBe(true);
+    held.release();
+    await first;
+
+    const withDeps = (extra: object) =>
+      new AppStackEngine({ ...h, request: h.fake.request, secretsRootDir: h.root, pullMissingImages: true, allowlist: TEST_ALLOWLIST, ...extra });
+    expect(await markOf(withDeps({ taskRunning: () => true }).createAppStackComponents({ plan }))).toBe(true);
+    expect(await markOf(withDeps({ backupLanes: { holdAppStackLane: () => null } }).createAppStackComponents({ plan }))).toBe(true);
+
+    await foreignContainer(h, JOB, { "io.hostingpanel.role": "site_job", "io.hostingpanel.app_backup_of": ID });
+    await h.fake.request("POST", `/containers/${JOB}/start`);
+    h.fake.log.length = 0;
+    expect(await markOf(h.engine.createAppStackComponents({ plan }))).toBe(true);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it("an engine that cannot be read before the change is not marked: it is not a refusal", async () => {
+    const h = await setup();
+    await prepared(h);
+    h.fake.failNext(/^GET \/info/, 500);
+    expect(await markOf(h.engine.createAppStackComponents({ plan }))).toBe(false);
+    h.fake.images.delete(IMAGE);
+    h.fake.failNext(/^GET \/images\//, 500);
+    expect(await markOf(h.engine.createAppStackComponents({ plan }))).toBe(false);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it.each([
+    [409, "STACK_NAMESPACE_CONFLICT"],
+    [404, "STACK_COMPONENT_NOT_READY"],
+    [500, undefined],
+  ])("a create answered %s after the first container was created does not carry it", async (status, reason) => {
+    const h = await setup();
+    h.fake.images.set(IMAGE, { repoDigests: [IMAGE] });
+    await h.engine.prepareAppStack({ plan });
+    h.fake.failNext(new RegExp(`^POST /containers/create\\?name=${WORKER}`), status);
+    const err = await refusalOf(h.engine.createAppStackComponents({ plan }));
+    expect([err.reason, err.beforeChange === true]).toEqual([reason, false]);
+    expect(h.fake.containers.has(WEB)).toBe(true);
+  });
+
+  it("a refusal after a stale component was removed does not carry it", async () => {
+    const h = await setup();
+    await deployed(h);
+    const only = appStackTestPlan({ components: [appStackTestPlan().components[0]!], volumes: [] });
+    const changed = rehash({ ...only, components: only.components.map((c) => ({ ...c, environment: [{ name: "APP_MODE", value: "staging" }] })) });
+    h.fake.failNext(new RegExp(`^POST /containers/create\\?name=${WEB}`), 409);
+    expect(await markOf(h.engine.createAppStackComponents({ plan: changed }))).toBe(false);
+    expect(h.fake.containers.has(WORKER)).toBe(false);
+  });
+
+  it("a refusal of start or restart never carries it", async () => {
+    const h = await setup();
+    await prepared(h);
+    const web = { plan, componentKey: "worker", secretFileContents: SECRETS };
+    expect(await markOf(h.engine.startAppStackComponent(web))).toBe(false);
+    expect(await markOf(h.engine.restartAppStackComponent(web))).toBe(false);
+  });
+});
+
 describe("start and restart (5.11)", () => {
   const plan = appStackTestPlan();
 
@@ -596,6 +866,31 @@ describe("start and restart (5.11)", () => {
       reason: "STACK_COMPONENT_NOT_READY",
       message: "Component web is not created",
     });
+  });
+
+  it("refuses a component that is removed between the read and the start as not created", async () => {
+    const h = await setup();
+    await prepared(h);
+    const held = h.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+    const refused = expect(starting).rejects.toMatchObject({ reason: "STACK_COMPONENT_NOT_READY", message: "Component web is not created" });
+    await vi.waitFor(() => expect(h.fake.log).toContain(`POST /containers/${idOf(h, WEB)}/start`));
+    h.fake.containers.delete(WEB);
+    held.release();
+    await refused;
+  });
+
+  it("refuses a start that is answered 404 for a missing network, with no network or id in the text", async () => {
+    const h = await setup();
+    await prepared(h);
+    h.fake.networks.delete(NET);
+    const error = await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }).catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      reason: "STACK_COMPONENT_NOT_READY",
+      code: "RESOURCE_LOCKED",
+      message: "Component web is attached to a network that is missing",
+    });
+    expect(mutations(h.fake.log)).toEqual([`POST /containers/${idOf(h, WEB)}/start`]);
   });
 
   it("refuses a foreign container under the derived name", async () => {
@@ -716,6 +1011,64 @@ async function deployedWithout(h: Harness) {
   await h.fake.request("POST", `/containers/${WEB}/start`);
   h.fake.log.length = 0;
 }
+
+describe("the order of a stop and a remove after an upgrade moved the positions (#100)", () => {
+  /** An older version put web after worker's position: web, which worker uses, carries the later label. */
+  async function shifted() {
+    const h = await setup();
+    await deployed(h);
+    h.fake.containers.get(WEB)!.Labels[APP_STACK_LABELS.startIndex] = "2";
+    h.fake.containers.get(WORKER)!.Labels[APP_STACK_LABELS.startIndex] = "1";
+    h.fake.log.length = 0;
+    return h;
+  }
+  const stopLines = (h: Harness, ...names: string[]) => names.map((name) => `POST /containers/${idOf(h, name)}/stop?t=10`);
+
+  it("a request without an order goes by the labels, as before", async () => {
+    const h = await shifted();
+    await expect(h.engine.stopAppStack(REF)).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "stopped" },
+        { componentKey: "worker", outcome: "stopped" },
+      ],
+    });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WEB, WORKER));
+  });
+
+  it("an order stops what uses a component before it, whatever the labels say", async () => {
+    const h = await shifted();
+    await expect(h.engine.stopAppStack({ ...REF, order: ["web", "worker"] })).resolves.toEqual({
+      components: [
+        { componentKey: "worker", outcome: "stopped" },
+        { componentKey: "web", outcome: "stopped" },
+      ],
+    });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WORKER, WEB));
+  });
+
+  it("a container whose key is not in the order goes first, and so do all of them when none is", async () => {
+    const h = await setup();
+    await deployed(h);
+    await h.engine.stopAppStack({ ...REF, order: ["worker"] });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WEB, WORKER));
+    const other = await shifted();
+    await other.engine.stopAppStack({ ...REF, order: ["ghost"] });
+    expect(mutations(other.fake.log)).toEqual(stopLines(other, WEB, WORKER));
+  });
+
+  it("a remove takes the containers in the same order, and by the labels without one", async () => {
+    const removed = async (order?: string[]) => {
+      const h = await shifted();
+      const [web, worker] = [idOf(h, WEB), idOf(h, WORKER)];
+      const result = await h.engine.removeAppStack({ ...REF, removeVolumes: false, ...(order === undefined ? {} : { order }) });
+      const deleted = mutations(h.fake.log).filter((line) => line.startsWith("DELETE /containers/"));
+      return { components: result.removedComponents, deleted: deleted.map((line) => (line.includes(web) ? "web" : line.includes(worker) ? "worker" : line)) };
+    };
+    await expect(removed(["web", "worker"])).resolves.toEqual({ components: ["worker", "web"], deleted: ["worker", "web"] });
+    await expect(removed()).resolves.toEqual({ components: ["web", "worker"], deleted: ["web", "worker"] });
+    await expect(removed(["worker"])).resolves.toEqual({ components: ["web", "worker"], deleted: ["web", "worker"] });
+  });
+});
 
 describe("stopAppStack (5.12)", () => {
   it("stops in reverse start order, keeps secrets and routes, and a re-run is a no-op", async () => {

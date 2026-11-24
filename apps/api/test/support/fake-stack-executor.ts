@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   APP_STACK_EXECUTOR_REASON_CODES,
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
   type AppStackComponentObservation,
@@ -24,6 +25,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ErrorCode,
 } from "@hosting-panel/contracts";
@@ -53,17 +55,19 @@ export interface FakeStackModel {
   routes: AppStackRouteWire[];
 }
 
-const failure = (code: ErrorCode, reason: string | undefined, ambiguousOutcome: boolean): Error =>
+const failure = (code: ErrorCode, reason: string | undefined, ambiguousOutcome: boolean, beforeChange = false): Error =>
   Object.assign(new Error("simulated executor failure"), {
     code,
     ambiguousOutcome,
-    details: reason === undefined ? [] : [{ field: "stack", reason }],
+    // The reason first, then the executor's mark that nothing was changed, as the executor sends them.
+    details: [...(reason === undefined ? [] : [{ field: "stack", reason }]), ...(beforeChange ? [APP_STACK_REFUSED_BEFORE_CHANGE] : [])],
   });
-const definite = (reason?: string): Error =>
+const definite = (reason?: string, beforeChange = false): Error =>
   failure(
     (APP_STACK_EXECUTOR_REASON_CODES as Readonly<Record<string, ErrorCode>>)[reason ?? ""] ?? "DOCKER_ENGINE_UNAVAILABLE",
     reason,
     false,
+    beforeChange,
   );
 const hostnamesOf = (routes: readonly AppStackRouteWire[]): string[] => routes.flatMap((r) => r.hosts.map((h) => h.hostname)).sort();
 
@@ -77,7 +81,7 @@ export class FakeStackExecutor implements StackExecutorPort {
   public readonly volumesInUse = new Set<string>();
   /** Scripted answers of resolveAppStackImage (reference -> "sha256:<hex>"). */
   public readonly imageDigests = new Map<string, string>();
-  readonly #faults: { method: FakeStackMethod; mode: "definite" | "ambiguous"; reason?: string }[] = [];
+  readonly #faults: { method: FakeStackMethod; mode: "definite" | "ambiguous"; reason?: string; beforeChange: boolean }[] = [];
   readonly #health = new Map<string, "healthy" | "unhealthy">();
   readonly #unhealthyReads = new Map<string, number>();
 
@@ -96,9 +100,12 @@ export class FakeStackExecutor implements StackExecutorPort {
     return fake as FakeStackExecutor & DockerExecutorPort;
   }
 
-  /** The next call of `method` throws: "definite" before any effect, "ambiguous" (OPERATION_AMBIGUOUS) after it. */
-  public failNext(method: FakeStackMethod, mode: "definite" | "ambiguous", reason?: string): void {
-    this.#faults.push({ method, mode, ...(reason === undefined ? {} : { reason }) });
+  /**
+   * The next call of `method` throws: "definite" before any effect, "ambiguous" (OPERATION_AMBIGUOUS) after it.
+   * `beforeChange` makes a definite refusal carry the executor's mark that it changed nothing (a create refused early).
+   */
+  public failNext(method: FakeStackMethod, mode: "definite" | "ambiguous", reason?: string, options: { readonly beforeChange?: boolean } = {}): void {
+    this.#faults.push({ method, mode, beforeChange: options.beforeChange === true, ...(reason === undefined ? {} : { reason }) });
   }
 
   /** A running component with a health check probes this way from now on. */
@@ -124,7 +131,7 @@ export class FakeStackExecutor implements StackExecutorPort {
     this.calls.push({ method, request, ...(componentKey === undefined ? {} : { componentKey }) });
     const index = this.#faults.findIndex((f) => f.method === method);
     const fault = index < 0 ? undefined : this.#faults.splice(index, 1)[0];
-    if (fault?.mode === "definite") throw definite(fault.reason);
+    if (fault?.mode === "definite") throw definite(fault.reason, fault.beforeChange);
     const result = effect();
     if (fault) throw failure("OPERATION_AMBIGUOUS", undefined, true);
     return result;
@@ -193,7 +200,7 @@ export class FakeStackExecutor implements StackExecutorPort {
     return this.#call("restartAppStackComponent", req, () => this.#start(req, true), req.componentKey);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.#call("stopAppStack", req, () => ({
       components: [...this.stack(req.stackId).components.entries()].reverse().map(([componentKey, c]) => {
         const running = c.state === "running" || c.state === "restarting";

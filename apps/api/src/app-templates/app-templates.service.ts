@@ -55,6 +55,7 @@ import {
 } from "@hosting-panel/database";
 import { computeAppTemplateSpecHash } from "@hosting-panel/hosting-domain";
 import { previewAppTemplateSource, validateAppTemplateSource, type AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
+import { appStackDisplayStatuses } from "../app-stacks/app-stack-display-status.js";
 import { paginateItems, type PaginationParams } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
 import { adminTemplateInvalid, appNotFound, guardedApp, mapAppTemplateError } from "./app-template-errors.js";
@@ -353,6 +354,8 @@ export class AppTemplatesService {
         organizationName: organizations.name,
         versionNumber: appTemplateVersions.versionNumber,
         status: appStacks.status,
+        appliedRevisionId: appStacks.appliedRevisionId,
+        appliedRoutesHash: appStacks.appliedRoutesHash,
       })
       .from(appStacks)
       .innerJoin(organizations, eq(organizations.id, appStacks.organizationId))
@@ -360,7 +363,21 @@ export class AppTemplatesService {
       .where(and(eq(appStacks.templateId, templateId), isNull(appStacks.deletedAt)))
       .orderBy(asc(organizations.name), asc(appStacks.name), asc(appStacks.id))
       .limit(ADMIN_APP_TEMPLATE_USAGE_MAX + 1);
-    return { templateId, stacks: rows.slice(0, ADMIN_APP_TEMPLATE_USAGE_MAX), truncated: rows.length > ADMIN_APP_TEMPLATE_USAGE_MAX };
+    const kept = rows.slice(0, ADMIN_APP_TEMPLATE_USAGE_MAX);
+    // The status the customer sees (ADR-0035), not the stored one.
+    const shown = await appStackDisplayStatuses(db, kept, new Date());
+    return {
+      templateId,
+      stacks: kept.map((r) => ({
+        id: r.id,
+        name: r.name,
+        organizationId: r.organizationId,
+        organizationName: r.organizationName,
+        versionNumber: r.versionNumber,
+        status: shown.get(r.id) ?? r.status,
+      })),
+      truncated: rows.length > ADMIN_APP_TEMPLATE_USAGE_MAX,
+    };
   }
 
   /** Every organization's live stacks for the administrator's list; same joins and order as usage(), without the template filter. */
@@ -375,6 +392,8 @@ export class AppTemplatesService {
         templateName: appTemplates.name,
         versionNumber: appTemplateVersions.versionNumber,
         status: appStacks.status,
+        appliedRevisionId: appStacks.appliedRevisionId,
+        appliedRoutesHash: appStacks.appliedRoutesHash,
       })
       .from(appStacks)
       .innerJoin(organizations, eq(organizations.id, appStacks.organizationId))
@@ -396,7 +415,21 @@ export class AppTemplatesService {
       const own = domains.filter((d) => d.stackId === id).sort((a, b) => byText(a.hostname, b.hostname));
       return (own.find((d) => d.status === "active") ?? own[0])?.hostname ?? null;
     };
-    return { stacks: kept.map((r) => ({ ...r, primaryHostname: primary(r.id) })), truncated: rows.length > ADMIN_APP_STACKS_MAX };
+    // The status the customer sees (ADR-0035), not the stored one.
+    const shown = await appStackDisplayStatuses(db, kept, new Date());
+    return {
+      stacks: kept.map((r) => ({
+        id: r.id,
+        name: r.name,
+        organizationName: r.organizationName,
+        templateId: r.templateId,
+        templateName: r.templateName,
+        versionNumber: r.versionNumber,
+        status: shown.get(r.id) ?? r.status,
+        primaryHostname: primary(r.id),
+      })),
+      truncated: rows.length > ADMIN_APP_STACKS_MAX,
+    };
   }
 
   public async listForCustomer(): Promise<CustomerAppTemplatesDto> {
