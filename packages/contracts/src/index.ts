@@ -30,6 +30,7 @@ export * from "./app-templates/index.js";
 export * from "./app-templates/stack-ids.js";
 export * from "./app-templates/stack-status.js";
 export * from "./app-templates/stack-operations.js";
+export * from "./app-templates/stack-backups.js";
 export * from "./app-templates/stack-links.js";
 export * from "./app-templates/admin-dto.js";
 export * from "./app-templates/stack-dto.js";

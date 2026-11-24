@@ -2,7 +2,7 @@
 // Lock order of every stack writer: organizations row FOR NO KEY UPDATE → app_templates row FOR SHARE → app_stacks row
 // FOR UPDATE → resource_quotas row FOR UPDATE → tls_publish_state → hostname advisory lock (0025 triggers).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   APP_STACK_BUSY_STATUSES,
   APP_STACK_KEY_PATTERN,
@@ -585,6 +585,39 @@ export async function enqueueAppStackOperationTransactional(
       idempotentReplay: false,
     };
   });
+}
+
+/**
+ * Brings an application back after a backup or a restore (ADR-0038): a normal `stack.start` when it is stopped, a
+ * `stack.restart` when the stop left it degraded. Call it from the `after` hook of `settleOperation`, once the source
+ * operation is terminal: one active operation per `stack:<id>` lock. Null when there is nothing to start (deleted,
+ * never installed, or in a status neither action accepts).
+ */
+export async function enqueueAppStackResumeTransactional(
+  tx: DatabaseExecutor,
+  input: StackScope & { readonly requestedByUserId: string | null; readonly sourceOperationId: string },
+): Promise<{ deployment: AppStackDeploymentRow; operation: OperationRow; kind: AppStackOperationKind } | null> {
+  const [stack] = await tx
+    .select()
+    .from(appStacks)
+    .where(and(eq(appStacks.id, input.stackId), eq(appStacks.organizationId, input.organizationId), isNull(appStacks.deletedAt)))
+    .for("update");
+  if (!stack || stack.desiredRevisionId === null) return null;
+  const kind = stack.status === "stopped" ? "stack.start" : stack.status === "degraded" ? "stack.restart" : null;
+  const target = kind === null ? null : appStackEnqueueTarget(kind, stack.status);
+  if (kind === null || target === null) return null;
+  const key = `resume:${input.sourceOperationId}`;
+  const queued = await enqueueDeployment(tx, {
+    organizationId: stack.organizationId,
+    stackId: stack.id,
+    kind,
+    revisionId: stack.desiredRevisionId,
+    requestedByUserId: input.requestedByUserId,
+    idempotencyKey: key,
+    requestHash: createHash("sha256").update(key).digest("hex"),
+  });
+  await tx.update(appStacks).set({ status: target, updatedAt: new Date() }).where(eq(appStacks.id, stack.id));
+  return { ...queued, kind };
 }
 
 async function lockStack(db: DatabaseExecutor, scope: StackScope, liveOnly: boolean): Promise<AppStackRow> {

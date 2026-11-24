@@ -1,5 +1,6 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
+  APP_STACK_BACKUP_OPERATION_KINDS,
   APP_STACK_OPERATION_KINDS,
   ERROR_CODES,
   HOST_JOB_KIND,
@@ -94,6 +95,12 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
 const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
 const HOST_LANE_KINDS = [HOST_JOB_KIND, PANEL_CONTAINER_APPLY_KIND] as const satisfies readonly OperationKind[];
 const STACK_LANE_KINDS: readonly OperationKind[] = APP_STACK_OPERATION_KINDS;
+// An application's backup or restore can run for hours: in the stack lane it would hold up every other application.
+const STACK_BACKUP_LANE_KINDS = ["stack.backup", "stack.restore"] as const satisfies readonly OperationKind[];
+// A queued clean-up holds its application's lock, so the nightly ones never wait behind a backup (ADR-0038 K6).
+const STACK_PRUNE_LANE_KINDS = ["stack.prune"] as const satisfies readonly OperationKind[];
+/** Every kind AppStackRuntime runs and recovers, whatever its lane; the lock `stack:<id>` keeps one per application. */
+const APP_STACK_RUNTIME_KINDS: readonly OperationKind[] = [...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS];
 // host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
 const hostJobs = () => import("../host/host-jobs.js");
 export const BACKUP_OPERATION_KINDS = [
@@ -165,7 +172,7 @@ export class OutboxWorkerService {
         ...BACKUP_OPERATION_KINDS,
         ...WORDPRESS_LANE_KINDS,
         ...HOST_LANE_KINDS,
-        ...STACK_LANE_KINDS,
+        ...APP_STACK_RUNTIME_KINDS,
       ],
     },
     activePromise: null,
@@ -200,6 +207,18 @@ export class OutboxWorkerService {
   // A ten-minute application deploy never holds up site work; stacks run one after another here.
   readonly #stackLane: OutboxLaneState = {
     filter: { includeKinds: STACK_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #stackBackupLane: OutboxLaneState = {
+    filter: { includeKinds: STACK_BACKUP_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #stackPruneLane: OutboxLaneState = {
+    filter: { includeKinds: STACK_PRUNE_LANE_KINDS },
     activePromise: null,
     scheduledImmediate: null,
     pendingTrigger: false,
@@ -269,13 +288,24 @@ export class OutboxWorkerService {
     this.#triggerLane(this.#wordpressLane);
     this.#triggerLane(this.#hostLane);
     this.#triggerLane(this.#stackLane);
+    this.#triggerLane(this.#stackBackupLane);
+    this.#triggerLane(this.#stackPruneLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
     this.#stopping.abort();
 
-    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane, this.#hostLane, this.#stackLane]) {
+    for (const lane of [
+      this.#mainLane,
+      this.#fileLane,
+      this.#backupLane,
+      this.#wordpressLane,
+      this.#hostLane,
+      this.#stackLane,
+      this.#stackBackupLane,
+      this.#stackPruneLane,
+    ]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
         clearImmediate(lane.scheduledImmediate);
@@ -295,6 +325,8 @@ export class OutboxWorkerService {
       this.#wordpressLane.activePromise?.catch(() => undefined),
       this.#hostLane.activePromise?.catch(() => undefined),
       this.#stackLane.activePromise?.catch(() => undefined),
+      this.#stackBackupLane.activePromise?.catch(() => undefined),
+      this.#stackPruneLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -349,6 +381,8 @@ export class OutboxWorkerService {
       this.#runLane(this.#wordpressLane, batchSize),
       this.#runLane(this.#hostLane, batchSize),
       this.#runLane(this.#stackLane, batchSize),
+      this.#runLane(this.#stackBackupLane, batchSize),
+      this.#runLane(this.#stackPruneLane, batchSize),
     ]);
     return {
       claimed: results.reduce((n, r) => n + r.claimed, 0),
@@ -466,7 +500,7 @@ export class OutboxWorkerService {
         await this.#wordpressImportApplier.apply(op);
       } else if ((WORDPRESS_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
         await this.#wordpressApplier.apply(op);
-      } else if (STACK_LANE_KINDS.includes(op.kind)) {
+      } else if (APP_STACK_RUNTIME_KINDS.includes(op.kind)) {
         await this.#appStacks.apply(op, payload);
       } else {
         throw new ControlPlaneError(
@@ -1007,11 +1041,11 @@ export class OutboxWorkerService {
           op.kind === "site.wordpress.update" ||
           op.kind === WORDPRESS_IMPORT_KIND ||
           op.kind === HOST_JOB_KIND ||
-          STACK_LANE_KINDS.includes(op.kind)
+          APP_STACK_RUNTIME_KINDS.includes(op.kind)
         ) {
           // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
-            STACK_LANE_KINDS.includes(op.kind)
+            APP_STACK_RUNTIME_KINDS.includes(op.kind)
               ? await this.#appStacks.recover(op)
               : op.kind === HOST_JOB_KIND
               ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateCsrfAndOrigin } from "@/lib/bff-guard";
+import { validateCsrfAndOrigin, validateOrigin } from "@/lib/bff-guard";
 import type { SessionData } from "@/lib/session";
 
 const session = { accessToken: "tok", csrfToken: "SENTINEL-csrf" } as SessionData;
@@ -55,5 +55,36 @@ describe("validateCsrfAndOrigin", () => {
       code: "PERMISSION_DENIED",
       message: "Token CSRF non valido o non corrispondente",
     });
+  });
+});
+
+// The routes that work without a session (sign-in, sign-out, password reset) have no CSRF token to rely on.
+describe("validateOrigin", () => {
+  const post = (headers: Record<string, string>) =>
+    new Request("http://localhost:3000/api/session/login", { method: "POST", headers });
+
+  it("lets through the same origin, a matching Host or forwarded host, also when the Origin is required", () => {
+    for (const headers of <Record<string, string>[]>[
+      { Origin: "http://localhost:3000" },
+      { Origin: "https://panel.example.test", Host: "panel.example.test" },
+      { Origin: "https://panel.example.test", "X-Forwarded-Host": "panel.example.test" },
+    ]) {
+      expect(validateOrigin(post(headers), { required: true })).toBeNull();
+    }
+  });
+
+  it("refuses a foreign Origin and an Origin that is no URL with 403", async () => {
+    for (const origin of ["http://evil.example.test", "null", "::not a url::"]) {
+      expect(await body(validateOrigin(post({ Origin: origin }), { required: true }))).toEqual(FOREIGN);
+    }
+  });
+
+  it("refuses a missing Origin when it is required; otherwise lets it through as the CSRF guard does", async () => {
+    expect(await body(validateOrigin(post({}), { required: true }))).toEqual({
+      status: 403,
+      code: "PERMISSION_DENIED",
+      message: "Intestazione Origin mancante",
+    });
+    expect(validateOrigin(post({}))).toBeNull();
   });
 });

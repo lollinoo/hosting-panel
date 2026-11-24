@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   UpdateAppStackDomainInputSchema,
+  type AppStackBackupsDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
@@ -95,6 +96,7 @@ const DETAIL: AppStackDetailDto = {
   templateVersionId: "atv_notes_2",
   createdAt: NOW,
   activeOperationId: null,
+  platformWork: null,
   revisionNumber: 3,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
@@ -135,6 +137,26 @@ const DOMAIN: AppStackDomainDto = {
   compression: false,
   protection: null,
   pathRoutes: [],
+};
+const BACKUPS: AppStackBackupsDto = {
+  backups: [
+    {
+      id: "sbak_0123456789abcdef01234567",
+      kind: "manual",
+      status: "succeeded",
+      problem: null,
+      sizeBytes: 5 * MIB,
+      volumeKeys: ["notes"],
+      copies: [{ priority: 1, status: "succeeded", problem: null }],
+      startedAt: NOW,
+      finishedAt: NOW,
+      restore: null,
+      restorable: true,
+      incompleteData: false,
+    },
+  ],
+  unavailableReason: null,
+  goBackTo: null,
 };
 const LINK: AppStackLinkDto = {
   id: "slnk_1",
@@ -217,7 +239,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   loc.value = "en";
   mockData.getCustomerContext.mockResolvedValue(context());
-  answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]), [`${UP}/links`]: ok(LINKS) });
+  answer({
+    [UP]: ok(DETAIL),
+    [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS),
+    [`${UP}/domains`]: ok([DOMAIN]),
+    [`${UP}/backups`]: ok(BACKUPS),
+    [`${UP}/links`]: ok(LINKS),
+  });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -267,18 +295,22 @@ describe("detail page", () => {
     expect(await page()).toMatch(open);
   });
 
-  it("reads the application, its history, its addresses and its databases and renders every section in order", async () => {
+  it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
     const h = await page();
-    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/links`]);
+    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`]);
     expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
     expect(h).toContain(en.apps.status.degraded);
     expect(h).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 2 }));
     expect(h).toContain(format(en.apps.detail.releaseLine, { n: 3 }));
     const s = en.apps.detail.section;
-    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.links, s.domains, s.data, s.resources, s.history, s.danger]);
+    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.links, s.domains, s.data, s.backups, s.resources, s.history, s.danger]);
     expect(h).toContain("orders-db");
     for (const id of [...h.matchAll(/aria-labelledby="([^"]+)"/g)].map((x) => x[1])) expect(h).toContain(`id="${id}"`);
-    expect(h.split(en.apps.detail.backupUnavailable)).toHaveLength(2);
+    // the backups section: its explanation once, the button, one row with a restore button, no address of a route
+    expect(h.split(en.apps.backups.intro)).toHaveLength(2);
+    expect(h).toContain(`>${en.apps.backups.create}</button>`);
+    expect(h).toContain(`>${en.apps.backups.restore}</button>`);
+    expect(h).toContain(en.apps.backups.kind.manual);
     expect(h).toContain(en.apps.delete.open);
     expect(h).toContain("notes.example.test");
     expect(h).toContain(en.apps.history.kind.upgrade);
@@ -310,11 +342,12 @@ describe("detail page", () => {
     expect(d).not.toContain(itMsgs.apps.detail.releaseLine.replace(" {n}", ""));
   });
 
-  it("a failed history, address or database read shows the section error and the page still renders", async () => {
+  it("a failed history, address, backup or database read shows the section error and the page still renders", async () => {
     answer({ [UP]: ok(DETAIL) });
     const h = await page();
-    expect(h.split(en.apps.detail.sectionError)).toHaveLength(4);
+    expect(h.split(en.apps.detail.sectionError)).toHaveLength(5);
     expect(h2s(h)).toContain(en.apps.detail.section.links);
+    expect(h).not.toContain(en.apps.backups.create);
     expect(h).toContain(en.apps.detail.section.danger);
   });
 
@@ -331,6 +364,19 @@ describe("detail page", () => {
   it("an operation in progress is followed on the page", async () => {
     answer({ [UP]: ok({ ...DETAIL, status: "deploying", activeOperationId: "op_7" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     expect(await page()).toContain(en.apps.progress.title.deploy);
+    expect(await page()).not.toContain(en.apps.detail.platformWork.backups_cleanup);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: work of the platform on the application says what it is, with nothing to follow", async (locale, m) => {
+    loc.value = locale;
+    answer({ [UP]: ok({ ...DETAIL, platformWork: "backups_cleanup" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    const h = await page();
+    expect(h.split(m.apps.detail.platformWork.backups_cleanup)).toHaveLength(2);
+    expect(h).not.toContain(m.apps.progress.title.prune);
+    expect(h).not.toMatch(/op_|stack\.prune|org_platform/);
   });
 });
 
@@ -355,13 +401,13 @@ describe("sections", () => {
     expect(html(AppStackSettings({ parameters: [], m: en }))).toContain(en.apps.settings.none);
   });
 
-  it("data: a word per status, the keep note and the one backup line; none → the empty line", () => {
+  it("data: a word per status and the keep note; none → the empty line", () => {
     const h = html(AppStackData({ volumes: DETAIL.volumes, m: en }));
     expect(h).toContain("notes");
     expect(h).toContain(en.apps.data.status.present);
-    for (const t of [en.apps.data.keptNote, en.apps.detail.backupUnavailable]) expect(h).toContain(t);
+    expect(h).toContain(en.apps.data.keptNote);
     const none = html(AppStackData({ volumes: [], m: en }));
-    for (const t of [en.apps.data.none, en.apps.data.keptNote, en.apps.detail.backupUnavailable]) expect(none).toContain(t);
+    for (const t of [en.apps.data.none, en.apps.data.keptNote]) expect(none).toContain(t);
   });
 
   it("resources: the total and one line per component", () => {

@@ -241,7 +241,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   private readonly siteServices = new Map<string, Set<string>>();
   public readonly files: SimulatedSiteFiles;
   public readonly databases = new SimulatedSiteDatabases();
-  public readonly backupState = new SimulatedBackups();
+  public readonly backupState = new SimulatedBackups({
+    appStackReadiness: (stackId, organizationId, volumeKeys) =>
+      this.appStacks.backupReadiness(stackId, organizationId, volumeKeys),
+  });
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -317,6 +320,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       ingress: this.ingressFileManager,
       ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
       assertEngineAvailable: () => this.assertEngineAvailable(),
+      holdBackupLane: (stackId) => this.backupState.holdAppStackLane(stackId),
     });
   }
 

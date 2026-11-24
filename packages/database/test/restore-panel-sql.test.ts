@@ -92,7 +92,29 @@ const SEED = `
     ('slnk_pending','o','stk_gone','stk_del','pending'),
     ('slnk_removing','o','stk_del','stk_run','removing');
   INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status,
-    cert_expires_at, dns_next_check_at) VALUES ('dom_run','stk_run','o','app',8080,'app.example','active','active', now(), '2027-01-01');`;
+    cert_expires_at, dns_next_check_at) VALUES ('dom_run','stk_run','o','app',8080,'app.example','active','active', now(), '2027-01-01');
+
+  INSERT INTO app_stack_backups (id, stack_id, organization_id, kind, status, operation_id, volume_keys, size_bytes, problem,
+    finished_at, restore_operation_id, restore_status, restore_problem, restored_at) VALUES
+    ('sbak_run','stk_run','o','manual','running','op_sb_run','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+    ('sbak_half','stk_run','o','manual','running','op_sb_half','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+    ('sbak_opt','stk_run','o','pre_restore','running','op_sb_opt','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+    ('sbak_none','stk_gone','o','manual','running','op_sb_none','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+    ('sbak_src','stk_run','o','manual','succeeded','op_sb_src','["data"]',70,NULL,'2026-11-02T03:00:00Z','op_sb_opt','running',NULL,NULL),
+    ('sbak_src_b','stk_run','o','manual','succeeded','op_sb_src_b','["data"]',70,NULL,'2026-11-02T03:00:00Z','op_sb_safe_b','running',NULL,NULL),
+    ('sbak_safe_b','stk_run','o','pre_restore','running','op_sb_safe_b','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
+    ('sbak_old','stk_run','o','manual','partial','op_sb_old','["data"]',60,'unreachable','2026-11-01T03:00:00Z','op_sb_rst_old','failed','timeout','2026-11-01T04:00:00Z'),
+    ('sbak_done','stk_gone','o','manual','succeeded','op_sb_done','["data"]',50,NULL,'2026-11-01T03:00:00Z','op_sb_rst_done','succeeded',NULL,'2026-11-01T05:00:00Z');
+  INSERT INTO app_stack_backup_copies (id, backup_id, target_id, priority, required, status, snapshot_id, size_bytes, problem, finished_at) VALUES
+    ('sbc_run','sbak_run','t_local',1,TRUE,'running',NULL,NULL,NULL,NULL),
+    ('sbc_half_ok','sbak_half','t_local',1,TRUE,'succeeded','${SNAP}',40,NULL,'2026-11-03T03:00:00Z'),
+    ('sbc_half_run','sbak_half','t_s3',2,TRUE,'running',NULL,NULL,NULL,NULL),
+    ('sbc_opt_ok','sbak_opt','t_local',1,TRUE,'succeeded','${SNAP}',30,NULL,'2026-11-03T03:00:00Z'),
+    ('sbc_opt_run','sbak_opt','t_s3',2,FALSE,'running',NULL,NULL,NULL,NULL),
+    ('sbc_src','sbak_src','t_local',1,TRUE,'succeeded','${SNAP}',70,NULL,'2026-11-02T03:00:00Z'),
+    ('sbc_old_ok','sbak_old','t_local',1,TRUE,'succeeded','${SNAP}',60,NULL,'2026-11-01T03:00:00Z'),
+    ('sbc_old_bad','sbak_old','t_s3',2,TRUE,'failed',NULL,NULL,'unreachable','2026-11-01T03:00:00Z'),
+    ('sbc_done','sbak_done','t_s3',1,TRUE,'succeeded','${SNAP_2}',50,NULL,'2026-11-01T03:00:00Z');`;
 
 const LEGACY_SETTINGS = `
   INSERT INTO backup_settings (id, endpoint, region, bucket, prefix, access_key_id, secret_access_key_ciphertext_base64,
@@ -127,6 +149,10 @@ const LEDGER = `
   UNION ALL SELECT 'ac', component_key, health, NULL, health_observed_at::text FROM app_stack_components
   UNION ALL SELECT 'av', volume_key, status, NULL, NULL FROM app_stack_volumes
   UNION ALL SELECT 'am', id, status, cert_status, concat_ws('|', cert_expires_at, dns_next_check_at <= now()) FROM app_stack_domains
+  UNION ALL SELECT 'ab', id, status, problem, concat_ws('|', COALESCE(size_bytes::text, '-'), COALESCE(finished_at::text, '-'),
+    COALESCE(restore_status, '-'), COALESCE(restore_problem, '-'), COALESCE(restored_at::text, '-'), left_incomplete::text) FROM app_stack_backups
+  UNION ALL SELECT 'ax', id, status, problem, concat_ws('|', COALESCE(snapshot_id, '-'), COALESCE(size_bytes::text, '-'),
+    COALESCE(finished_at::text, '-')) FROM app_stack_backup_copies
   ORDER BY 1, 2`;
 
 describe.each([
@@ -232,6 +258,46 @@ describe.each([
       { id: "sec_gone", version: 1 },
       { id: "sec_run", version: 1 },
     ]);
+  });
+
+  it("closes the backups and restores of applications left open, and follows the copies that are good (ADR-0038)", () => {
+    const cols = (t: string, id: string) => String(byId(t, id)?.x).split("|");
+    // no good copy: the backup failed, with the reason
+    expect(byId("ax", "sbc_run")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(cols("ax", "sbc_run").slice(0, 2)).toEqual(["-", "-"]);
+    expect(cols("ax", "sbc_run")[2]).not.toBe("-");
+    expect(byId("ab", "sbak_run")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(cols("ab", "sbak_run")[0]).toBe("-");
+    expect(cols("ab", "sbak_run")[1]).not.toBe("-");
+    // a backup that never got a copy row
+    expect(byId("ab", "sbak_none")).toMatchObject({ status: "failed", problem: "interrupted" });
+    // one good copy and one that was still open: partial, with the size of the good copy
+    expect(byId("ax", "sbc_half_ok")).toEqual(before.find((r) => r.t === "ax" && r.id === "sbc_half_ok"));
+    expect(byId("ax", "sbc_half_run")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(byId("ab", "sbak_half")).toMatchObject({ status: "partial", problem: "interrupted" });
+    expect(cols("ab", "sbak_half")[0]).toBe("40");
+    // the copy that was open was not required: the backup is good
+    expect(byId("ax", "sbc_opt_run")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(byId("ab", "sbak_opt")).toMatchObject({ status: "succeeded", problem: null });
+    expect(cols("ab", "sbak_opt")[0]).toBe("30");
+    // a restore that was running failed; the backup it read stays good
+    expect(byId("ab", "sbak_src")).toMatchObject({ status: "succeeded", problem: null });
+    expect(cols("ab", "sbak_src").slice(2, 4)).toEqual(["failed", "interrupted"]);
+    expect(cols("ab", "sbak_src")[4]).not.toBe("-");
+    // its safety backup was good, so the restore may have begun writing: that backup holds the data to go back to
+    expect(byId("ab", "sbak_opt")).toMatchObject({ status: "succeeded" });
+    expect(cols("ab", "sbak_opt")[5]).toBe("true");
+    // a safety backup that reached no destination means nothing was written
+    expect(byId("ab", "sbak_safe_b")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(cols("ab", "sbak_safe_b")[5]).toBe("false");
+    expect(cols("ab", "sbak_src_b").slice(2, 4)).toEqual(["failed", "interrupted"]);
+    expect(before.filter((r) => r.t === "ab" && String(r.x).split("|")[5] === "true")).toEqual([]);
+    // settled rows are not touched, the backups of a deleted application included
+    for (const [t, id] of [["ab", "sbak_old"], ["ab", "sbak_done"], ["ax", "sbc_src"], ["ax", "sbc_old_ok"], ["ax", "sbc_old_bad"], ["ax", "sbc_done"]] as const) {
+      expect(byId(t, id), id).toEqual(before.find((r) => r.t === t && r.id === id));
+    }
+    expect(first.filter((r) => (r.t === "ab" || r.t === "ax") && r.status === "running")).toEqual([]);
+    expect(first.filter((r) => r.t === "ab" && String(r.x).split("|")[2] === "running")).toEqual([]);
   });
 
   it("is idempotent: a second run changes nothing", async () => {

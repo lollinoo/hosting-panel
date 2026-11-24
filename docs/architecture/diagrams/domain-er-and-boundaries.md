@@ -611,7 +611,50 @@ Note di lettura:
 - `app_stack_volumes` non perde mai un volume da sola: `retention_policy = 'destroy'` lo scrive solo una cancellazione che chiede di eliminare i dati; altrimenti il volume resta `retained` dopo la cancellazione dello stack.
 - `organizations.max_app_stacks` non ha chiavi esterne: il limite si controlla sotto il blocco di riga dell'organizzazione, sugli stack non cancellati, e gli stack non contano mai fra i siti.
 
-### 2.4 Estensione ADR-0039: collegamenti fra un database e un'applicazione
+### 2.4 Estensione ADR-0038: backup delle applicazioni
+
+La migrazione `0027_app_stack_backups.sql` (`ADR-0038`) è additiva: due tabelle nuove, nessuna tabella esistente cambia forma e nessuna riga è riscritta.
+
+```mermaid
+erDiagram
+    app_stack_backups ||--o{ app_stack_backup_copies : "backup_id (CASCADE)"
+    backup_targets ||--o{ app_stack_backup_copies : "target_id (RESTRICT)"
+
+    app_stack_backups {
+        text id PK "sbak_<id>"
+        text stack_id "senza chiave esterna verso app_stacks"
+        text organization_id "senza chiave esterna"
+        text kind "manual, pre_restore"
+        text status "running, succeeded, partial, failed"
+        text operation_id UK "una riga per operazione"
+        jsonb volume_keys "i volumi copiati, fissati alla richiesta"
+        boolean resume_after "l'applicazione era accesa: riparte alla fine"
+        text problem "classe stabile o NULL"
+        text restore_operation_id "l'ultimo ripristino da questo backup"
+        text restore_status "running, succeeded, failed o NULL"
+        boolean incomplete_data "ha copiato dati lasciati a metà da un ripristino fallito"
+        boolean left_incomplete "pre_restore: il suo ripristino ha lasciato i dati a metà"
+    }
+    app_stack_backup_copies {
+        text id PK
+        text backup_id FK
+        text target_id FK "la destinazione"
+        integer priority "1 o 2"
+        boolean required
+        text job_id "il lavoro dell'esecutore"
+        text status "running, succeeded, failed"
+        text snapshot_id "obbligatorio quando succeeded"
+    }
+```
+
+Note di lettura:
+
+- `app_stack_backups` non ha chiavi esterne verso `app_stacks` né verso `organizations`: i backup di un'applicazione cancellata restano finché il periodo di conservazione non è passato, e li toglie solo la pulizia notturna (`stack.prune`).
+- Una copia punta alla sua destinazione con `RESTRICT`: una destinazione che conserva copie di applicazioni non si cancella.
+- `left_incomplete` ha senso solo sulle righe `pre_restore`, `incomplete_data` su tutte (K5): finché l'ultima operazione dell'applicazione che decide (un ripristino non annullato o un'altra azione riuscita; mai un backup o una pulizia) è un ripristino il cui backup di sicurezza ha `left_incomplete`, la più recente di dati interi non è mai rimossa (K7) e la pagina la indica per tornare indietro.
+- `snapshot_id` non esce mai dal database verso un DTO, una riga di audit o un payload dell'outbox.
+
+### 2.5 Estensione ADR-0039: collegamenti fra un database e un'applicazione
 
 La migrazione `0028_app_stack_links.sql` (`ADR-0039`) è additiva: una tabella nuova, nessuna tabella esistente cambia forma e nessuna riga è riscritta.
 
@@ -672,6 +715,9 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
 | `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`; il cancello `app-format-v2` (`ADR-0036`) conta, tra quelle, gli stack su una versione di modello con `spec_version >= 2` o con una revisione il cui piano non ha `schemaVersion` 1. |
+| `app_stack_backups` | `UNIQUE uq_app_stack_backups_operation (operation_id)` e nessuna chiave esterna verso `app_stacks` (`0027`) | Un'operazione crea al più un backup; i backup sopravvivono alla cancellazione dell'applicazione, e il cancello del downgrade `app-stack-backups` conta ogni riga. |
+| `app_stack_backup_copies` | `FOREIGN KEY (backup_id) REFERENCES app_stack_backups(id) ON DELETE CASCADE`, `FOREIGN KEY (target_id) REFERENCES backup_targets(id) ON DELETE RESTRICT`, `UNIQUE uq_app_stack_backup_copies_backup_target (backup_id, target_id)` e `uq_app_stack_backup_copies_backup_priority (backup_id, priority)` (`0027`) | Un backup ha al più una copia per destinazione e per priorità (1 o 2); una destinazione con copie di applicazioni non si cancella. |
+| `app_stack_backup_copies` | `CHECK ck_app_stack_backup_copies_snapshot (status <> 'succeeded' OR snapshot_id IS NOT NULL)` e `UNIQUE INDEX uq_app_stack_backup_copies_job (job_id) WHERE job_id IS NOT NULL` (`0027`) | Una copia riuscita ha sempre il suo snapshot; un lavoro dell'esecutore appartiene a una sola copia. |
 | `app_stack_links` | `FOREIGN KEY fk_app_stack_links_consumer_org (consumer_stack_id, organization_id)` e `fk_app_stack_links_provider_org (provider_stack_id, organization_id) REFERENCES app_stacks(id, organization_id) ON DELETE CASCADE` (`0028`) | **Invariante BOLA dei collegamenti**: un database e l'applicazione che lo usa appartengono alla stessa organizzazione; nessuna riga può unire due clienti. |
 | `app_stack_links` | `UNIQUE uq_app_stack_links_pair (consumer_stack_id, provider_stack_id)`, `CHECK ck_app_stack_links_distinct (consumer_stack_id <> provider_stack_id)` e `CHECK app_stack_links_state_check (state IN ('pending', 'active', 'removing'))` (`0028`) | Una coppia ha al più un collegamento e un'applicazione non si collega a se stessa; il cancello del downgrade `app-stack-links` conta ogni riga, in qualunque stato. |
 
@@ -701,6 +747,10 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Cinque `CHECK`: `ck_app_stack_domains_redirect_not_self`, `ck_app_stack_domains_access_pair` (nome utente e verificatore insieme), `ck_app_stack_domains_access_shape` (le stesse forme dei contratti: una password in chiaro non può finire nella colonna), `ck_app_stack_domains_path_routes` (un array di al massimo quattro regole) e `ck_app_stack_domains_redirect_alone` (un indirizzo che reindirizza non ha protezione né regole di percorso).
   - Una colonna nulla su `app_stacks`: `applied_addresses_hash`, l'impronta degli indirizzi e delle opzioni da cui è stata fatta l'ultima pubblicazione riuscita delle route, legata ad `applied_routes_hash`; `routesPending` confronta con essa gli indirizzi salvati.
   - Nessun backfill: un indirizzo senza opzioni resta la riga che era; la release precedente, dopo un rollback automatico, ignora le colonne.
+- **Versione 0027 (`0027_app_stack_backups.sql`, `ADR-0038`, additiva)**:
+  - Due tabelle: `app_stack_backups` (un backup di un'applicazione, con l'esito dell'ultimo ripristino fatto da quel backup) e `app_stack_backup_copies` (una copia per destinazione, al più due).
+  - Nessuna chiave esterna verso `app_stacks`: i backup restano dopo la cancellazione dell'applicazione, fino alla pulizia notturna.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
 - **Versione 0028 (`0028_app_stack_links.sql`, `ADR-0039`, additiva)**:
   - Una tabella: `app_stack_links` (un collegamento fra un database e un'applicazione dello stesso cliente, con lo stato `pending`, `active` o `removing`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora la tabella nuova.

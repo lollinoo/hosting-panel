@@ -25,6 +25,7 @@ import {
   type DatabaseExecutor,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
+import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../app-stacks/app-stack-backup-retention.js";
 import { BACKUP_OPERATION_KINDS, OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
@@ -47,7 +48,7 @@ function isResourceLockedError(err: unknown): boolean {
   );
 }
 
-/** Schedules nightly UTC site backups one site at a time, then queues orphan prunes and the panel copy. */
+/** Schedules nightly UTC site backups one site at a time, then queues orphan prunes, the clean-up of application backups and the panel copy. */
 @Injectable()
 export class BackupSchedulerService {
   #timer: NodeJS.Timeout | null = null;
@@ -219,6 +220,19 @@ export class BackupSchedulerService {
           }
         }
 
+        // Applications: backups past the retention rule go, and rows an interrupted action left open are closed
+        // (ADR-0038 K7). A busy application is asked again the next night.
+        let applicationsQueued = 0;
+        const applications = await listAppStackPruneCandidates(tx, now);
+        if (applications.length > 0) {
+          await ensurePlatformOpsOrg(tx);
+          for (const stackId of applications) {
+            if (await enqueueAppStackPrune(tx, stackId)) {
+              applicationsQueued += 1;
+            }
+          }
+        }
+
         const counts = await countNightlyRunResults(tx, runStartedAt);
         await appendAuditEvent(tx as unknown as HostingPanelDatabase, {
           actorId: null,
@@ -237,7 +251,7 @@ export class BackupSchedulerService {
         const panelQueued = await this.#enqueuePanelBackup(tx, runState.lastNightlyRunOn ?? today);
         await finishNightlyRun(tx);
 
-        return pruned > 0 || panelQueued;
+        return pruned > 0 || applicationsQueued > 0 || panelQueued;
       });
     } finally {
       this.#inFlightTicks -= 1;

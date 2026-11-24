@@ -859,6 +859,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         method: "POST",
         headers: {
           Host: "localhost:3000",
+          Origin: "http://localhost:3000",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
@@ -918,6 +919,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         method: "POST",
         headers: {
           Host: "localhost:3000",
+          Origin: "http://localhost:3000",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
@@ -1097,6 +1099,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         method: "POST",
         headers: {
           Host: "localhost:3000",
+          Origin: "http://localhost:3000",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
@@ -1110,6 +1113,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         method: "POST",
         headers: {
           Host: "localhost:3000",
+          Origin: "http://localhost:3000",
           Cookie: cookiePair,
         },
       })
@@ -1157,6 +1161,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           method: "POST",
           headers: {
             Host: "localhost:3000",
+            Origin: "http://localhost:3000",
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ email: "owner@acme.it", password: "pw" }),
@@ -1248,6 +1253,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         method: "POST",
         headers: {
           Host: "localhost:3000",
+          Origin: "http://localhost:3000",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ email: "owner@acme.it", password: "pw" }),
@@ -1383,6 +1389,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           method: "POST",
           headers: {
             Host: "localhost:3000",
+            Origin: "http://localhost:3000",
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
@@ -1515,7 +1522,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     return await postLogin(
       new Request("http://localhost:3000/api/session/login", {
         method: "POST",
-        headers: { Host: "localhost:3000", "Content-Type": "application/json" },
+        headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "Content-Type": "application/json" },
         body: JSON.stringify({ email, password: "pw" }),
       })
     );
@@ -1769,5 +1776,49 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       { method: "PATCH", path: "/v1/me/locale" },
       { method: "POST", path: "/v1/admin/backups/sites/site_1/run" },
     ]);
+  });
+
+  it("17. sign-in and sign-out refuse a foreign Origin, a missing Origin and a body not sent as JSON before the upstream (L46)", async () => {
+    const cookiePair = extractCookiePair(await loginAs("admin@platform.local"));
+    const credentials = JSON.stringify({ email: "admin@platform.local", password: "pw" });
+    const login = (headers: Record<string, string>) =>
+      postLogin(
+        new Request("http://localhost:3000/api/session/login", {
+          method: "POST",
+          headers: { Host: "localhost:3000", ...headers },
+          body: credentials,
+        })
+      );
+    const logout = (headers: Record<string, string>) =>
+      postLogout(
+        new Request("http://localhost:3000/api/session/logout", {
+          method: "POST",
+          headers: { Host: "localhost:3000", Cookie: cookiePair, "X-CSRF-Token": "any", ...headers },
+        })
+      );
+    const json = { "Content-Type": "application/json" };
+    const hitsBefore = upstreamRequests.length;
+
+    const refusals: Array<[Response, number, string]> = [
+      [await login({ ...json, Origin: "https://evil.example.test" }), 403, "PERMISSION_DENIED"],
+      [await login({ ...json, Origin: "null" }), 403, "PERMISSION_DENIED"],
+      [await login(json), 403, "PERMISSION_DENIED"],
+      // What a cross-site form posts without a preflight: refused even with the panel's own Origin.
+      [await login({ Origin: "http://localhost:3000", "Content-Type": "text/plain" }), 415, "VALIDATION_ERROR"],
+      [await login({ Origin: "http://localhost:3000", "Content-Type": "application/x-www-form-urlencoded" }), 415, "VALIDATION_ERROR"],
+      [await logout({ Origin: "https://evil.example.test" }), 403, "PERMISSION_DENIED"],
+      [await logout({}), 403, "PERMISSION_DENIED"],
+    ];
+    for (const [res, status, code] of refusals) {
+      expect(res.status).toBe(status);
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(ApiErrorEnvelopeSchema.parse(await res.json()).error.code).toBe(code);
+    }
+    expect(upstreamRequests.length).toBe(hitsBefore);
+
+    // The panel's own pages: fetch from the same origin with a JSON body.
+    const ok = await login({ Origin: "http://localhost:3000", "Content-Type": "application/json; charset=utf-8" });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=`);
   });
 });

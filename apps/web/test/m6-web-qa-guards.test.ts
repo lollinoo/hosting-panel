@@ -37,6 +37,8 @@ const EXPECTED_ROUTES = [
   "app/api/admin/app-templates/route.ts",
   "app/api/admin/app-templates/validate/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/[action]/route.ts",
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/[backupId]/restore/route.ts",
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route.ts",
@@ -95,7 +97,7 @@ describe("M6 web guards: browser-side hazards", () => {
 });
 
 describe("M6 web guards: the BFF route inventory", () => {
-  it("is exactly the thirteen routes of the design and the two of the database links (ADR-0039), no more (no ports, backups, Git, health, admin stack routes)", () => {
+  it("is exactly the fifteen routes of the design and the two of the database links (ADR-0039), no more (no ports, Git, health, admin stack routes)", () => {
     expect(routeFiles.map(rel).sort()).toEqual(EXPECTED_ROUTES);
   });
 
@@ -150,8 +152,9 @@ describe("M6 web guards: the BFF route inventory", () => {
   });
 });
 
-describe("M6 web guards: no UI for Wave P, Wave G or stack backups", () => {
-  const banned = /stackPublicPortsAvailable|gitBuildsAvailable|\/ports\b|\/backups\b|\/git\b|publicPort|gitUrl|gitRef|buildContext/;
+// Application backups shipped with ADR-0038: their two routes are in the inventory above.
+describe("M6 web guards: no UI for Wave P or Wave G", () => {
+  const banned = /stackPublicPortsAvailable|gitBuildsAvailable|\/ports\b|\/git\b|publicPort|gitUrl|gitRef|buildContext/;
   it("none of the new files mentions the future waves", () => {
     for (const f of allNew) expect(code(f), rel(f)).not.toMatch(banned);
   });
