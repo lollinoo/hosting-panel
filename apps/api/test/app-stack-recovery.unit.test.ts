@@ -482,9 +482,31 @@ describe("recoverAppStackOperation (RT4)", () => {
 
     expect(trace()).toEqual(["getAppStackStatus"]);
     await expectInterrupted(upgrade);
-    expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, appliedRoutesHash: routesHash });
+    // The create step never started, so nothing of the new revision exists: its target is taken back.
+    expect(await stackOf(stackId)).toMatchObject({
+      status: "running",
+      appliedRevisionId: rev.revisionId,
+      desiredRevisionId: rev.revisionId,
+      appliedRoutesHash: routesHash,
+    });
     expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
     expect(fake.stack(stackId).routes).toHaveLength(1);
+  });
+
+  it("(8b) an upgrade in doubt at create keeps its target even while the previous revision is what shows: it may be creating", async () => {
+    const { stackId, rev } = await running();
+    const components = new Map(fake.stack(stackId).components);
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("createAppStackComponents", "ambiguous");
+    await parked(upgrade);
+    // The answer was lost before the executor replaced anything.
+    for (const [key, value] of components) fake.stack(stackId).components.set(key, { ...value });
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(await stepsOf(upgrade)).toMatchObject({ pull: "succeeded", prepare: "succeeded", create: "failed" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
   });
 
   it("(9) routes observed published keep the stored routes hash", async () => {

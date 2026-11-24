@@ -3054,6 +3054,7 @@ x-hp-ingress:
     detail: {
       versionLine: "{name}, version {n}",
       releaseLine: "Release #{n}",
+      notInstalledLine: "Version {version} (release #{release}) was not installed.",
       draftBody: "The application is not installed yet: set the required private values and press Install.",
       unknownBody: "We do not know yet whether the last operation succeeded. Nothing is repeated automatically.",
       platformWork: {

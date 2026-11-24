@@ -596,6 +596,10 @@ export const appStackDeployments = pgTable(
     problem: text("problem"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    // 0032: the desired revision a request that wrote a new one replaced; null when it replaced none.
+    replacedRevisionId: text("replaced_revision_id"),
+    // 0032: the stack status the request replaced; null for the first deploy of a create and for the start after a backup.
+    replacedStatus: text("replaced_status").$type<AppStackStatus>(),
   },
   (t) => [
     unique("uq_app_stack_deployments_operation").on(t.operationId),
@@ -604,6 +608,11 @@ export const appStackDeployments = pgTable(
       columns: [t.revisionId, t.stackId],
       foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
       name: "fk_app_stack_deployments_revision",
+    }),
+    foreignKey({
+      columns: [t.replacedRevisionId, t.stackId],
+      foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
+      name: "fk_app_stack_deployments_replaced_revision",
     }),
     index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
   ],

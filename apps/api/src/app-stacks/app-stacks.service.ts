@@ -3,6 +3,7 @@ import {
   APP_AUDIT_ACTIONS,
   APP_IMAGE_ALLOWLIST,
   APP_STACK_HEALTH_STALE_AFTER_MS,
+  APP_STACK_REVISION_KINDS,
   APP_STACK_SECRET_ENV_LIMITS,
   AppTemplateSpecSchema,
   PLATFORM_OPS_ORG_ID,
@@ -40,6 +41,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackRevisions,
   appStacks,
   appTemplates,
   appTemplateVersions,
@@ -65,6 +67,8 @@ import {
   listAppStackVolumes,
   newAppEntityId,
   operations,
+  operationSteps,
+  or,
   setAppStackSecretTransactional,
   sql,
   type AppStackRevisionRow,
@@ -288,6 +292,15 @@ export class AppStacksService {
     const kept = rows.slice(0, page.limit);
     if (kept.length === 0) return { data: [], total, page: EMPTY_PAGE };
     const stackIds = kept.map((s) => s.id);
+    // What runs, where it is not the desired revision: the list names that version, as the detail does.
+    const appliedIds = kept.flatMap((s) => (s.appliedRevisionId !== null && s.appliedRevisionId !== s.desiredRevisionId ? [s.appliedRevisionId] : []));
+    const applied =
+      appliedIds.length === 0
+        ? []
+        : await db
+            .select({ id: appStackRevisions.id, revisionNumber: appStackRevisions.revisionNumber, templateVersionId: appStackRevisions.templateVersionId })
+            .from(appStackRevisions)
+            .where(and(eq(appStackRevisions.organizationId, organizationId), inArray(appStackRevisions.id, appliedIds)));
     const [templates, versions, components, domains] = await Promise.all([
       db
         .select({ id: appTemplates.id, name: appTemplates.name })
@@ -296,7 +309,7 @@ export class AppStacksService {
       db
         .select({ id: appTemplateVersions.id, versionNumber: appTemplateVersions.versionNumber })
         .from(appTemplateVersions)
-        .where(inArray(appTemplateVersions.id, [...new Set(kept.map((s) => s.templateVersionId))])),
+        .where(inArray(appTemplateVersions.id, [...new Set([...kept.map((s) => s.templateVersionId), ...applied.map((r) => r.templateVersionId)])])),
       db
         .select()
         .from(appStackComponents)
@@ -308,17 +321,20 @@ export class AppStacksService {
     ]);
     const names = new Map(templates.map((t) => [t.id, t.name]));
     const numbers = new Map(versions.map((v) => [v.id, v.versionNumber]));
+    const appliedById = new Map(applied.map((r) => [r.id, r]));
     const now = new Date();
-    const data = kept.map((stack) =>
-      appStackSummaryDto({
+    const data = kept.map((stack) => {
+      const running = stack.appliedRevisionId === null ? undefined : appliedById.get(stack.appliedRevisionId);
+      return appStackSummaryDto({
         stack,
         templateName: names.get(stack.templateId) ?? "",
         templateVersionNumber: numbers.get(stack.templateVersionId) ?? 1,
+        installed: running ? { revisionNumber: running.revisionNumber, templateVersionNumber: numbers.get(running.templateVersionId) ?? 1 } : null,
         components: components.filter((c) => c.stackId === stack.id),
         domains: domains.filter((d) => d.stackId === stack.id),
         now,
-      }),
-    );
+      });
+    });
     const hasMore = rows.length > page.limit;
     return { data, total, page: { nextCursor: hasMore ? kept[kept.length - 1]!.id : null, hasMore } };
   }
@@ -329,7 +345,7 @@ export class AppStacksService {
     const version = await this.#version(stack);
     const [template] = await db.select().from(appTemplates).where(eq(appTemplates.id, stack.templateId));
     if (!template) throw damaged("The stored application is damaged.");
-    const [desired, components, volumes, domains, parameters, secrets, revisions, [active]] = await Promise.all([
+    const [desired, components, volumes, domains, parameters, secrets, revisions, [active], ran] = await Promise.all([
       this.#desired(stack),
       listAppStackComponents(db, scope),
       listAppStackVolumes(db, scope),
@@ -343,6 +359,21 @@ export class AppStacksService {
         .from(operations)
         .where(and(eq(operations.lockKey, appStackLockKey(stack.id)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
         .limit(1),
+      // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
+      // (only the routes were refused, and that revision was applied).
+      db
+        .selectDistinct({ revisionId: appStackDeployments.revisionId })
+        .from(appStackDeployments)
+        .innerJoin(operations, eq(operations.id, appStackDeployments.operationId))
+        .leftJoin(operationSteps, and(eq(operationSteps.operationId, operations.id), eq(operationSteps.key, "health")))
+        .where(
+          and(
+            eq(appStackDeployments.organizationId, stack.organizationId),
+            eq(appStackDeployments.stackId, stack.id),
+            or(eq(appStackDeployments.status, "succeeded"), eq(operationSteps.status, "succeeded")),
+            inArray(operations.kind, [...APP_STACK_REVISION_KINDS]),
+          ),
+        ),
     ]);
     const own = active?.organizationId === stack.organizationId ? active : undefined;
     // Of an operation of the platform the customer learns the kind of work, never the operation.
@@ -356,8 +387,19 @@ export class AppStacksService {
       defaultVersionId !== stack.templateVersionId
         ? await getAppTemplateVersion(db, { templateId: template.id, versionId: defaultVersionId })
         : null;
-    const previous = desired ? revisions.find((r) => r.revisionNumber < desired.revision.revisionNumber) : undefined;
+    // The way back is an earlier revision that ran (never an attempt that failed) and whose plan is not the current one.
+    const ranIds = new Set(ran.map((d) => d.revisionId));
+    const previous = desired
+      ? revisions.find(
+          (r) => r.revisionNumber < desired.revision.revisionNumber && r.planHash !== desired.revision.planHash && ranIds.has(r.id),
+        )
+      : undefined;
     const previousVersion = previous ? await this.#version(stack, previous.templateVersionId) : null;
+    // What runs is the applied revision: after a change that failed once create had started, not the desired one.
+    const applied = stack.appliedRevisionId !== stack.desiredRevisionId ? revisions.find((r) => r.id === stack.appliedRevisionId) : undefined;
+    const installed = applied
+      ? { revisionNumber: applied.revisionNumber, templateVersionNumber: (await this.#version(stack, applied.templateVersionId)).versionNumber }
+      : null;
     return appStackDetailDto({
       stack,
       templateName: template.name,
@@ -371,6 +413,7 @@ export class AppStacksService {
       parameters,
       secrets,
       activeOperationId: own?.id ?? null,
+      installed,
       platformWork,
       upgrade:
         latest && latest.versionNumber > version.versionNumber ? { templateVersionId: latest.id, versionNumber: latest.versionNumber } : null,

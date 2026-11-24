@@ -3082,6 +3082,7 @@ x-hp-ingress:
     detail: {
       versionLine: "{name}, versione {n}",
       releaseLine: "Rilascio n. {n}",
+      notInstalledLine: "La versione {version} (rilascio n. {release}) non è stata installata.",
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
       platformWork: {

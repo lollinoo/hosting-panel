@@ -871,7 +871,14 @@ describe("@hosting-panel/database — application backups", () => {
         requestedByUserId: CUSTOMER,
         idempotencyKey: `resume:${written.operation.id}`,
       });
-      expect(queued.deployment).toMatchObject({ operationId: queued.operation.id, status: "queued", revisionId: stack.desiredRevisionId });
+      // The platform stopped it, not the customer: no replaced status, so a resume refused before create ends failed.
+      expect(queued.deployment).toMatchObject({
+        operationId: queued.operation.id,
+        status: "queued",
+        revisionId: stack.desiredRevisionId,
+        replacedRevisionId: null,
+        replacedStatus: null,
+      });
       expect((await stackOf(stack.id)).status).toBe("starting");
       const event = await eventOf(queued.operation.id);
       expect(event?.payload).toMatchObject({ kind: "stack.start", stackId: stack.id, deploymentId: queued.deployment.id });
