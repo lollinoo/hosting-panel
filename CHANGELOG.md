@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### A failed upgrade keeps the application on the version that runs (2026-11-24)
+*hosting-panel v0.12.1*
+
+**Bug Fixes & Stability**
+- **apps**: A failed upgrade keeps the application on the version that runs
+
+---
+
 ### Backup and restore of applications (2026-11-24)
 *hosting-panel v0.12.0*
 
