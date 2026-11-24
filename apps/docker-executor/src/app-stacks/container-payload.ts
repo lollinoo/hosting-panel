@@ -4,6 +4,7 @@ import {
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
   APP_STACK_PIDS_LIMIT,
+  APP_STACK_PROCESS_MARK_PATTERN,
   APP_STACK_SECRET_ENV_LIMITS,
   APP_STACK_STANDARD_PIDS_LIMIT,
   APP_TEMPLATE_LIMITS,
@@ -102,6 +103,10 @@ export function expandAppStackSecretEnvironment(
       .join("");
     if (Buffer.byteLength(value, "utf8") > APP_STACK_SECRET_ENV_LIMITS.expandedBytes) {
       throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} is too long`);
+    }
+    // Every piece passed the mark rule alone; joined they can still spell a mark the terminal's clean-up looks for (ADR-0041 §4).
+    if (APP_STACK_PROCESS_MARK_PATTERN.test(value)) {
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} holds the mark of a platform process`);
     }
     return `${entry.name}=${value}`;
   });
