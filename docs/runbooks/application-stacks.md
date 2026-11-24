@@ -307,3 +307,11 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
    one second after a shell ended by itself. Either stays inside the component's limits, and nobody is connected to
    it: the customer's **Riavvia** on the application ends it. After a downgrade to the previous release, a shell left
    in a component is not cleaned by the old executor (it cleans sites only): **Riavvia** ends it as well.
+10. **A value that holds a platform mark.** No value of an application (a setting, a private value, a template's
+    text or argument) may contain `HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`: the clean-up finds what a session or a
+    task run started by that text, so a component that carried it could have its own programs killed (`ADR-0041` §4).
+    Other `HP_` or `PHP_` text is accepted. A new value is refused with its reason. A revision or a private value saved
+    before this rule that holds such text is refused after the update: the application's page answers an error and a
+    start is refused. Applications were first switched on in release 0.10.0, so none is expected. If one exists,
+    correct the value (the customer replaces a private value from the application's page), or stop the application
+    or delete it (procedure 3).
