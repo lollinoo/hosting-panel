@@ -3267,6 +3267,8 @@ x-hp-ingress:
     backups: {
       intro: "Un backup è una copia dei dati dell'applicazione a cui puoi tornare. Non viene fatto da solo: lo crei tu da qui.",
       stopNote: "Durante la copia l'applicazione viene fermata e i suoi indirizzi web non rispondono; alla fine riparte da sola.",
+      busy: "Non è possibile adesso: l'applicazione è occupata da un'altra operazione. Attendi che finisca.",
+      notAllowed: "Al momento il tuo account non può creare o ripristinare i backup di questa applicazione.",
       keptNote:
         "Restano i {kept} backup fatti a mano più recenti e i {safety} più recenti fatti prima di un ripristino: quelli più vecchi vengono tolti durante la notte.",
       none: "Nessun backup finora.",

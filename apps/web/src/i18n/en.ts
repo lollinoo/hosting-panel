@@ -3239,6 +3239,8 @@ x-hp-ingress:
     backups: {
       intro: "A backup is a copy of the application's data that you can go back to. It is not made automatically: you create it from here.",
       stopNote: "During the copy the application is stopped and its web addresses do not answer; at the end it starts again by itself.",
+      busy: "Not possible right now: the application is busy with another operation. Wait for it to end.",
+      notAllowed: "Your account cannot create or restore backups of this application at the moment.",
       keptNote:
         "The {kept} most recent backups made by hand and the {safety} most recent made before a restore are kept: older ones are removed during the night.",
       none: "No backups yet.",

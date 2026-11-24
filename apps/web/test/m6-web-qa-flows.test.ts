@@ -141,7 +141,7 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
-  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
   outcomeUnknown: false,
   revisionNumber: 1,
   installed: null,
@@ -475,8 +475,9 @@ describe("application page", () => {
     expect(web.split(m.apps.backups.unavailable.no_data)).toHaveLength(2);
     expect(web).not.toContain(`>${m.apps.backups.create}<`);
     expect(web).not.toMatch(/<(button|a|input)[^>]*(backup|restore)/i);
-    // worker + storage keeps data: the button and the empty list
-    const worker = await page(workerStack({ status: "running" }), m, { backups: [], unavailableReason: null, goBackTo: null });
+    // worker + storage keeps data: the button and the empty list (a settled running application: the detail offers it)
+    const running = { status: "running", outcomeUnknown: false, allowedActions: webStack().allowedActions } as const;
+    const worker = await page(workerStack(running), m, { backups: [], unavailableReason: null, goBackTo: null });
     expect(worker.split(`>${m.apps.backups.create}</button>`)).toHaveLength(2);
     expect(worker).toContain(m.apps.backups.none);
     expect(worker).not.toMatch(/<button[^>]*\sdisabled=""[^>]*>[^<]*backup/i);

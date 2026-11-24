@@ -97,7 +97,7 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
-  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
   outcomeUnknown: false,
   revisionNumber: 3,
   installed: null,
@@ -329,6 +329,27 @@ describe("detail page", () => {
       expect(doubt).not.toContain(m.apps.detail.staleBody);
     }
     expect(en.apps.detail.staleBody).not.toBe(en.apps.detail.unknownBody);
+  });
+
+  it("issue #106: the backups section follows the list, not the status shown", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      const t = m.apps.backups;
+      // A stale reading shows unknown while the stored running takes a backup and a restore.
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), ...routes });
+      const stale = await page();
+      expect(stale).toContain(`>${t.create}<`);
+      expect(stale).not.toMatch(disabled(t.create));
+      expect(stale).not.toMatch(disabled(t.restore));
+      // An operation of the customer holds the application: the list is empty, and the line says it is busy.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_1", allowedActions: [] }), ...routes });
+      const held = await page();
+      expect(held).toMatch(disabled(t.create));
+      expect(held).toMatch(disabled(t.restore));
+      expect(held).toContain(t.busy);
+    }
   });
 
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {

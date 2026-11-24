@@ -61,6 +61,8 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
   const ids = { orgId, stackId, csrfToken };
   // The version that runs: after a change that failed once its components were being created, not the one asked for.
   const shown = s.installed ?? { templateVersionNumber: s.templateVersionNumber, revisionNumber: s.revisionNumber };
+  // `unknown` only because the components could not be read lately: the stored status is another (issue #106).
+  const stale = s.status === "unknown" && !s.outcomeUnknown;
 
   return (
     <div className="space-y-8">
@@ -83,7 +85,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
             <AlertDescription>{d.unknownBody}</AlertDescription>
           </Alert>
         ) : (
-          s.status === "unknown" && (
+          stale && (
             <Alert variant="warning" role="status">
               <AlertDescription>{d.staleBody}</AlertDescription>
             </Alert>
@@ -123,7 +125,15 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackData volumes={s.volumes} m={m} />
       </Section>
       <Section id="backups" title={d.section.backups}>
-        <AppStackBackups {...ids} stackName={s.name} status={s.status} backups={backups} />
+        <AppStackBackups
+          {...ids}
+          stackName={s.name}
+          status={s.status}
+          stale={stale}
+          actions={s.allowedActions}
+          busy={s.activeOperationId !== null || s.platformWork !== null}
+          backups={backups}
+        />
       </Section>
       <Section id="resources" title={d.section.resources}>
         <AppStackResources cpuMilli={s.cpuMilli} memoryBytes={s.memoryBytes} components={s.components} m={m} />

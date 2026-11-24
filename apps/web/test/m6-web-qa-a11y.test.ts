@@ -220,7 +220,7 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
-  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
   outcomeUnknown: false,
   revisionNumber: 3,
   components: [
@@ -494,7 +494,17 @@ const LINKS: AppStackLinksDto = {
 };
 const DATABASE_LINKS: AppStackLinksDto = { stackId: "stk_db1", role: "database", connection: LINK.connection, links: [LINK], candidates: [], limit: 8 };
 const linksProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: LINKS as AppStackLinksDto | null };
-const backupsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", status: "running" as const, backups: BACKUPS as AppStackBackupsDto | null };
+const backupsProps = {
+  orgId: ORG,
+  stackId: "stk_a1",
+  csrfToken: "csrf",
+  stackName: "team-notes",
+  status: "running" as const,
+  stale: false,
+  actions: DETAIL.allowedActions,
+  busy: false,
+  backups: BACKUPS as AppStackBackupsDto | null,
+};
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);
 const adminDetail = (m: Messages, tpl: AdminAppTemplateDetailDto, usage: AdminAppTemplateUsageDto | null, state: Record<number, unknown> = {}) =>
@@ -642,7 +652,7 @@ const SCENARIOS: Scenario[] = [
         m,
       ),
   },
-  { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const }, m) },
+  { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const, actions: [] }, m) },
   { name: "backups · kept from before, none can be made", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { ...BACKUPS, unavailableReason: "no_destination" } }, m) },
   ...(["not_available", "no_destination", "no_data"] as const).map((unavailableReason) => ({
     name: `backups · unavailable (${unavailableReason})`,
