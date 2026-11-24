@@ -4,7 +4,7 @@ import * as React from "react";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppStackBackupsDto, AppStackDetailDto, AppStackPlanDiffDto, AppTemplateParameter, CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import type { AppStackBackupsDto, AppStackDetailDto, AppStackPlanDiffDto, CustomerAppTemplateDto } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
@@ -64,7 +64,7 @@ const locales = [
 ] as const;
 
 // ---- fixtures: two harmless applications ------------------------------------------------------------------------------
-const WEB_PARAMS: AppTemplateParameter[] = [
+const WEB_PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "site_title", label: "Board title", type: "string", default: "My board", customer: true },
   { key: "admin_password", label: "Admin password", type: "secret", required: true, customer: true },
   { key: "cache_size", label: "Hidden cache size", type: "size", default: "64m", customer: false },
@@ -88,7 +88,7 @@ const WEB_APP: CustomerAppTemplateDto = {
     { key: "web", cpuMilli: 250, memoryBytes: String(128 * MIB) },
   ],
 };
-const WORKER_PARAMS: AppTemplateParameter[] = [
+const WORKER_PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "queue_name", label: "Queue name", type: "string", default: "jobs", customer: true },
   { key: "concurrency", label: "Parallel jobs", type: "integer", min: 1, max: 8, default: 2, customer: true },
   { key: "shard_hint", label: "Hidden shard hint", type: "enum", options: ["a", "b"], default: "a", customer: false },
@@ -143,6 +143,8 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   secretParameters: [{ key: "admin_password", label: "Admin password", required: true, isSet: true, version: 1, setAt: NOW }],
   volumes: [],
   ingress: [{ componentKey: "web", port: 8080 }],
+  pathTargets: [{ componentKey: "web", port: 8080 }],
+  routesPending: false,
   cpuMilli: 500,
   memoryBytes: String(256 * MIB),
   upgrade: null,

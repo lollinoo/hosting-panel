@@ -4,6 +4,7 @@ import {
   AppStackComponentActionIpcResultSchema,
   AppStackComponentsRemoveIpcResultSchema,
   AppStackCreateIpcResultSchema,
+  AppStackImageResolveIpcResultSchema,
   AppStackLogsIpcResultSchema,
   AppStackPrepareIpcResultSchema,
   AppStackPullIpcResultSchema,
@@ -15,7 +16,10 @@ import {
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
   type AppStackCreateIpcResult,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPrepareIpcResult,
@@ -194,6 +198,7 @@ export const APP_STACK_ROUTES_TIMEOUT_MS = 300_000; // may run ensureIngressProx
 export const APP_STACK_REMOVE_TIMEOUT_MS = 180_000;
 export const APP_STACK_STATUS_TIMEOUT_MS = 60_000; // GET; probes run in parallel, each <= 30 s
 export const APP_STACK_LOGS_TIMEOUT_MS = 35_000; // GET
+export const APP_STACK_RESOLVE_TIMEOUT_MS = 40_000; // GET; engine registry lookup budget 30 s
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -639,7 +644,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: AppStackPrepareIpcResultSchema }).parse(json).data;
   }
 
-  public async createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/create", req, APP_STACK_CREATE_TIMEOUT_MS);
     return z.object({ data: AppStackCreateIpcResultSchema }).parse(json).data;
   }
@@ -692,6 +697,12 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     const pathWithQuery = `/v1/app-stacks/${encodeURIComponent(req.stackId)}/components/${encodeURIComponent(req.componentKey)}/logs?${query}`;
     const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_LOGS_TIMEOUT_MS);
     return z.object({ data: AppStackLogsIpcResultSchema }).parse(json).data;
+  }
+
+  public async resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    const pathWithQuery = `/v1/app-stacks/image-digest?${new URLSearchParams({ image: req.image })}`;
+    const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_RESOLVE_TIMEOUT_MS);
+    return z.object({ data: AppStackImageResolveIpcResultSchema }).parse(json).data;
   }
 
   private async sendServiceAction(

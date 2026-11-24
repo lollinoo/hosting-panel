@@ -13,6 +13,8 @@ EnvironmentFile=/etc/hosting-panel/web.env
 Environment=NODE_ENV=production
 Environment=PORT=3000
 ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/web/node_modules/next/dist/bin/next start --hostname ${HP_WEB_BIND_ADDRESS} --port 3000
+# next start exits 143 (128 + SIGTERM) after a graceful stop: count it as clean, not as a failure.
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=5s
 UMask=0027

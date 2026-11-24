@@ -58,8 +58,9 @@ UPDATE app_stack_components SET health = 'missing', health_observed_at = NULL, u
 UPDATE app_stack_volumes SET status = 'missing', updated_at = now() WHERE status IN ('pending','present','retained');
 UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expires_at = NULL, dns_next_check_at = now(),
        updated_at = now() WHERE status <> 'pending' OR cert_status <> 'none';
-UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, updated_at = now() WHERE status = 'deleting';
-UPDATE app_stacks SET status = 'failed', applied_routes_hash = NULL, updated_at = now()
+UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, applied_addresses_hash = NULL, updated_at = now()
+ WHERE status = 'deleting';
+UPDATE app_stacks SET status = 'failed', applied_routes_hash = NULL, applied_addresses_hash = NULL, updated_at = now()
  WHERE deleted_at IS NULL AND status NOT IN ('draft','failed','delete_failed','deleting');
 -- Backups of applications (ADR-0038): a copy still open did not finish. Its backup then follows its copies by the
 -- rule of settleAppStackBackupAggregate: a copy that succeeded stays good, its snapshot is on the destination.

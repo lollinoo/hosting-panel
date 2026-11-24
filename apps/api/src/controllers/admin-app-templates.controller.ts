@@ -4,6 +4,7 @@ import {
   AdminAppTemplateListQuerySchema,
   ArchiveAppTemplateInputSchema,
   CreateAppTemplateInputSchema,
+  ImportComposeInputSchema,
   UpdateAppTemplateInputSchema,
   ValidateAppTemplateInputSchema,
   type AdminAppTemplateDetailDto,
@@ -12,12 +13,14 @@ import {
   type AdminAppTemplateVersionCreatedDto,
   type AdminAppTemplateVersionDto,
   type AppTemplateValidationDto,
+  type ComposeImportDto,
   type CursorPage,
   type ReadMeta,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
 import { APP_FEATURE_GATE_TOKEN, requireAppFeature, type AppFeatureGate } from "../app-stacks/app-feature-gate.js";
 import { AppTemplatesService, type AppTemplateActor } from "../app-templates/app-templates.service.js";
+import { ComposeImportService } from "../app-templates/compose-import.service.js";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { parsePaginationQuery, resolveRequestId } from "../common/control-plane.error.js";
@@ -30,11 +33,13 @@ const LIST_DEFAULT_LIMIT = 100;
  * Server administrator catalogue of application templates (ADR-0035). `requireServerAdmin` runs before the capability
  * gate and before any body or query is parsed, so a customer sending a malformed body still gets 403. The routes are
  * synchronous: no Idempotency-Key. Each write is audited in its own transaction, never with the source or the spec.
+ * `validate` and `import-compose` store nothing and are not audited.
  */
 @Controller("v1/admin/app-templates")
 export class AdminAppTemplatesController {
   public constructor(
     @Inject(AppTemplatesService) private readonly templates: AppTemplatesService,
+    @Inject(ComposeImportService) private readonly imports: ComposeImportService,
     @Inject(AuthzContextService) private readonly authz: AuthzContextService,
     @Inject(APP_FEATURE_GATE_TOKEN) private readonly gate: AppFeatureGate,
   ) {}
@@ -60,6 +65,18 @@ export class AdminAppTemplatesController {
   public async validate(@Req() req: FastifyRequest, @Body() raw: unknown): Promise<{ data: AppTemplateValidationDto }> {
     await this.#admin(req, null);
     return { data: this.templates.validate(ValidateAppTemplateInputSchema.parse(raw ?? {})) };
+  }
+
+  /**
+   * A Docker Compose file read into a draft template, with the report of what the importer changed, dropped or refused
+   * (ADR-0036 §2.8). The only route here that waits for the Docker Engine: it asks the digest of each image the file
+   * names without one. The file may carry secrets written in the clear: neither it nor the draft is stored or logged.
+   */
+  @Post("import-compose")
+  @HttpCode(HttpStatus.OK)
+  public async importCompose(@Req() req: FastifyRequest, @Body() raw: unknown): Promise<{ data: ComposeImportDto }> {
+    await this.#admin(req, null);
+    return { data: await this.imports.importCompose(ImportComposeInputSchema.parse(raw ?? {})) };
   }
 
   @Post()

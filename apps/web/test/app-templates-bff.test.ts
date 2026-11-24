@@ -14,6 +14,7 @@ vi.mock("@/lib/server-session", () => ({
 import { MAX_BFF_BODY_BYTES } from "@/lib/bff-proxy";
 import * as templatesRoute from "@/app/api/admin/app-templates/route";
 import * as validateRoute from "@/app/api/admin/app-templates/validate/route";
+import * as importRoute from "@/app/api/admin/app-templates/import-compose/route";
 import * as templateRoute from "@/app/api/admin/app-templates/[templateId]/route";
 import * as versionsRoute from "@/app/api/admin/app-templates/[templateId]/versions/route";
 import * as archiveRoute from "@/app/api/admin/app-templates/[templateId]/archive/route";
@@ -22,6 +23,7 @@ import * as serverApi from "@/lib/server-api";
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
 
 const SOURCE = "version: HCP-STACK/v1\nservices:\n  web:\n    image: registry.test/web@sha256:" + "a".repeat(64) + "\n";
+const COMPOSE = "services:\n  web:\n    image: nginx:1.27\n";
 const T = "atpl_notes";
 const create = { slug: "notes", source: SOURCE };
 
@@ -75,6 +77,32 @@ const cases: Case[] = [
     timeoutMs: 20_000,
     status: 200,
     badBodies: [{}, { source: "" }, { source: 3 }, { source: SOURCE, slug: "notes" }, { source: SOURCE, builtIn: true }, { source: "x".repeat(65_537) }],
+  },
+  {
+    name: "Compose import",
+    handler: importRoute.POST as unknown as Handler,
+    params: {},
+    method: "POST",
+    path: "v1/admin/app-templates/import-compose",
+    body: { compose: COMPOSE, name: "Notes", category: "productivity" },
+    idempotency: false,
+    // One registry lookup may take 40 s: the route waits longer than the others.
+    timeoutMs: 60_000,
+    status: 200,
+    badBodies: [
+      {},
+      { compose: "" },
+      { compose: 3 },
+      { source: COMPOSE },
+      { compose: COMPOSE, slug: "notes" },
+      { compose: COMPOSE, digests: {} },
+      { compose: COMPOSE, name: "" },
+      { compose: COMPOSE, name: "n".repeat(81) },
+      { compose: COMPOSE, category: "Web" },
+      { compose: COMPOSE, category: "c".repeat(33) },
+      { compose: "x".repeat(65_537) },
+      [],
+    ],
   },
   {
     name: "template update",

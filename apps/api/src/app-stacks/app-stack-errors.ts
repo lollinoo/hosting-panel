@@ -70,6 +70,10 @@ function mapRepositoryError(err: AppStackRepositoryError): ControlPlaneError {
       const message = "A web address still points at a part this version removes. Remove the address first.";
       return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "domain_target_removed" });
     }
+    case "PATH_IN_USE": {
+      const message = "A path of a web address still points at a part this version removes. Remove the path first.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "path_target_removed" });
+    }
   }
 }
 
@@ -86,6 +90,18 @@ function mapDomainError(err: AppStackDomainError): ControlPlaneError {
     case "VALIDATION_ERROR": {
       const message = "This web address cannot point at that part of the application.";
       return appRefusal("VALIDATION_ERROR", message, { field: "componentKey", message, reason: "unknown_ingress" });
+    }
+    case "REDIRECT_TARGET": {
+      const message = "Choose another web address of this application.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "redirectToDomainId", message, reason: "redirect_target" });
+    }
+    case "REDIRECT_CHAIN": {
+      const message = "A web address that redirects cannot be the destination of another one.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "redirectToDomainId", message, reason: "redirect_chain" });
+    }
+    case "PASSWORD_REQUIRED": {
+      const message = "Choose a password for this web address.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "protection.password", message, reason: "password_required" });
     }
   }
 }

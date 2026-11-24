@@ -9,10 +9,11 @@ It does not say the feature is ready: the owner gates below are open.
 
 ## Gate status
 
-- **Gate W6 not met.** `applicationTemplatesAvailable`, `applicationStacksAvailable`,
-  `stackPublicPortsAvailable` and `gitBuildsAvailable` are `false` on every backend. Turning the
-  first two on for `linux-systemd`, the live acceptance on the owner's VMs, the reboot test (`B6`) and
-  the merge are the owner's (BLOCKED.md #2).
+- **Gate W6 not met.** When this report was written, `applicationTemplatesAvailable`,
+  `applicationStacksAvailable`, `stackPublicPortsAvailable` and `gitBuildsAvailable` were `false` on
+  every backend. Since `ADR-0036` (§2.10) the first two are `true` on `linux-systemd`. The live
+  acceptance on the owner's VMs, the reboot test (`B6`) and the other checks under «What stays with the
+  owner» are still open (BLOCKED.md #2).
 - **Gate W0.** The owner approved decisions D1–D12 and `ADR-0035` on 2026-11-22 (BLOCKED.md #1) and
   kept one branch and one PR (#37, BLOCKED.md #3); the image allowlist and the three seed digests still
   wait for the owner (BLOCKED.md #4).
@@ -152,8 +153,9 @@ its engineer's report.
   `HP_ACCEPT_ROOT_CASES=1`, and the metadata drop on a VM that has a metadata service (`A11`).
 - **ACME on a real hostname** for a stack domain (`A14`, `B3`).
 - **A real update** between two releases with `hp-update` (`A20`).
-- **Turning the feature on:** `applicationTemplatesAvailable` and `applicationStacksAvailable` on
-  `linux-systemd`, then a live acceptance with a real customer organisation (BLOCKED.md #2).
+- **A live acceptance with a real customer organisation** on a server where
+  `applicationTemplatesAvailable` and `applicationStacksAvailable` are on (`linux-systemd`, `ADR-0036`
+  §2.10; BLOCKED.md #2).
 - **Approvals:** the image allowlist and the three digests above (BLOCKED.md #4). D1–D12, `ADR-0035`
   and the PR shape were approved on 2026-11-22.
 

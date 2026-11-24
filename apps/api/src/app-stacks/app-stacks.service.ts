@@ -3,11 +3,13 @@ import {
   APP_AUDIT_ACTIONS,
   APP_IMAGE_ALLOWLIST,
   APP_STACK_HEALTH_STALE_AFTER_MS,
+  APP_STACK_SECRET_ENV_LIMITS,
   AppTemplateSpecSchema,
   PLATFORM_OPS_ORG_ID,
   ApprovedStackPlanSchema,
   appStackLockKey,
   appStackPlanImageProblems,
+  appTemplateHiddenSecretKeys,
   effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
@@ -52,6 +54,7 @@ import {
   getAppTemplateVersion,
   getPublishedAppTemplateVersion,
   inArray,
+  insertGeneratedAppStackSecrets,
   listAppStackComponents,
   listAppStackDeployments,
   listAppStackDomains,
@@ -75,12 +78,13 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
-import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
+import { appTemplateEnvironmentSecretKeys, type AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { appNotFound, appRefusal, guardedApp } from "../app-templates/app-template-errors.js";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
 import { ControlPlaneError, type PaginationParams } from "../common/control-plane.error.js";
 import { canonicalRequestHash } from "../common/request-hash.js";
 import { LogReadGate } from "../sites/log-read-gate.js";
+import { appSecretsToGenerate, generateAppSecretValues, type AppSecretToGenerate } from "./app-secret-generate.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import {
   carryOverParameters,
@@ -88,13 +92,14 @@ import {
   domainTargetsMissing,
   entriesOf,
   parameterValuesOf,
+  pathTargetsMissing,
   revisionFromPlan,
   sameEntries,
   secretVersionsOf,
   validatedSpec,
 } from "./app-stack-compile.js";
 import { diffAppStackPlans } from "./app-stack-diff.js";
-import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto } from "./app-stack-dto.js";
+import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
 
@@ -117,6 +122,8 @@ type Candidate = {
   readonly revision: NewAppStackRevision;
   readonly entries: readonly AppTemplateParameterEntry[];
   readonly newRevision: boolean;
+  /** Generated secrets this revision is the first to need (ADR-0036): its plan pins their version 1, stored when it is queued. */
+  readonly generate?: readonly AppSecretToGenerate[];
 };
 const EMPTY_PAGE: CursorPage = { nextCursor: null, hasMore: false };
 const ACTIONS: Readonly<Record<AppStackOperationKind, string>> = {
@@ -212,10 +219,17 @@ export class AppStacksService {
     });
     const stackId = newAppEntityId("stk");
     const ids = { stackId, organizationId, hostAllocationId: allocation.id, templateVersionId: input.templateVersionId };
+    // The secrets the template asks the platform to generate get their version 1 with the stack, draft or not.
+    const generate = appSecretsToGenerate(spec, new Map());
     let revision: NewAppStackRevision | null = null;
     if (input.deploy) {
       revision = compileRevision(
-        { source, parameters: input.parameters, secretVersions: new Map(), ids: { ...ids, revisionId: newAppEntityId("srev") } },
+        {
+          source,
+          parameters: input.parameters,
+          secretVersions: new Map(generate.map(({ parameterKey }) => [parameterKey, 1])),
+          ids: { ...ids, revisionId: newAppEntityId("srev") },
+        },
         this.validation,
       ).revision;
     } else {
@@ -232,14 +246,20 @@ export class AppStacksService {
           : { ...common, deploy: null, parameters: parameterValuesOf(input.parameters), componentKeys: spec.services.map((s) => s.key) },
       );
       if (r.idempotentReplay) return r;
+      const generated = await this.#storeGenerated(tx, { organizationId, stackId }, generate);
       if (input.domains.length > 0) {
-        const entries = input.domains.map((d) => ({ hostname: d.hostname, componentKey: d.componentKey, internalPort: d.port }));
+        const entries = input.domains.map((d) => ({
+          hostname: d.hostname,
+          componentKey: d.componentKey,
+          internalPort: d.port,
+          compression: d.compression,
+        }));
         for (const row of await addAppStackDomainsTransactional(tx, { organizationId, stackId, entries })) {
           await ctx.audit(tx, {
             action: APP_AUDIT_ACTIONS.domainAssign,
             targetType: "app_stack",
             targetId: stackId,
-            details: { domainId: row.id, hostname: row.hostname, componentKey: row.componentKey, internalPort: row.internalPort },
+            details: assignedAddressDetails(row),
           });
         }
       }
@@ -252,6 +272,7 @@ export class AppStacksService {
           revisionId: r.revision?.id ?? null,
           operationId: r.operation?.id ?? null,
           status: r.stack.status,
+          ...(generated.length > 0 ? { generatedParameterKeys: generated } : {}),
         },
       });
       return r;
@@ -343,6 +364,7 @@ export class AppStacksService {
       templateVersionNumber: version.versionNumber,
       spec: this.#displaySpec(version),
       desired,
+      appliedPlan: await this.#appliedPlan(stack, desired),
       components,
       volumes,
       domains,
@@ -370,10 +392,16 @@ export class AppStacksService {
           : await this.#deployCandidate(stack, input.parameters);
     if (candidate.newRevision) await this.#assertDomainTargets(stack, candidate.plan);
     const desired = await this.#desired(stack);
+    const fromVersion = desired ? await this.#version(stack, desired.revision.templateVersionId) : null;
+    const hidden = new Set(
+      [candidate.version, ...(fromVersion ? [fromVersion] : [])].flatMap((version) => [
+        ...appTemplateHiddenSecretKeys(this.#displaySpec(version).parameters),
+      ]),
+    );
     return {
       planHash: candidate.plan.planHash,
       fromRevisionId: desired?.revision.id ?? null,
-      fromVersionNumber: desired ? (await this.#version(stack, desired.revision.templateVersionId)).versionNumber : null,
+      fromVersionNumber: fromVersion?.versionNumber ?? null,
       toTemplateVersionId: candidate.version.id,
       toVersionNumber: candidate.version.versionNumber,
       newRevision: candidate.newRevision,
@@ -382,6 +410,7 @@ export class AppStacksService {
         to: candidate.plan,
         fromParameters: desired?.revision.parameters ?? [],
         toParameters: candidate.entries,
+        hidden,
       }),
     };
   }
@@ -405,7 +434,7 @@ export class AppStacksService {
     const candidate = await this.#upgradeCandidate(stack, input.templateVersionId, input.parameters);
     assertReviewed(candidate, input.planHash);
     await this.#assertDomainTargets(stack, candidate.plan);
-    return this.#enqueue(ctx, stack, "stack.upgrade", input, candidate.revision);
+    return this.#enqueue(ctx, stack, "stack.upgrade", input, candidate.revision, false, candidate.generate);
   }
 
   /** A new revision with the plan and public parameters of an earlier one; volumes and their data are left as they are. */
@@ -489,8 +518,14 @@ export class AppStacksService {
   public async setSecret(ctx: AppStackRequestContext, stack: AppStackRow, input: SetAppStackSecretInput): Promise<AppStackSecretStateDto> {
     if (stack.status === "deleting" || stack.status === "delete_failed") throw statusLocked(stack.status);
     const spec = validatedSpec((await this.#version(stack)).source, this.validation);
-    if (!spec.parameters.some((p) => p.key === input.parameterKey && p.type === "secret")) {
+    // A secret the customer may not replace (generated, `customer: false`) answers like a key that does not exist.
+    if (!spec.parameters.some((p) => p.key === input.parameterKey && p.type === "secret" && p.customer)) {
       throw refusal("parameterKey", "STACK_PARAMETER_INVALID", "This setting is not a secret of this application.");
+    }
+    // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit.
+    const { secretBytes } = APP_STACK_SECRET_ENV_LIMITS;
+    if (appTemplateEnvironmentSecretKeys(spec).has(input.parameterKey) && Buffer.byteLength(input.value, "utf8") > secretBytes) {
+      throw refusal("value", "value_too_long", `This value is too long for this application: at most ${String(secretBytes)} bytes.`);
     }
     const meta = await this.#write(async (tx) => {
       const stored = await setAppStackSecretTransactional(tx, {
@@ -518,6 +553,7 @@ export class AppStacksService {
     body: unknown,
     revision: NewAppStackRevision | null,
     destroyData = false,
+    generate: readonly AppSecretToGenerate[] = [],
   ): Promise<AppStackWriteResult> {
     const action = ACTIONS[kind];
     const requestHash = canonicalRequestHash({ route: action, organizationId: ctx.organizationId, stackId: stack.id, body });
@@ -533,6 +569,8 @@ export class AppStacksService {
         destroyData,
       });
       if (!r.idempotentReplay) {
+        // After the queue accepted the request: a locked or replayed one stores nothing.
+        const generated = await this.#storeGenerated(tx, { organizationId: ctx.organizationId, stackId: stack.id }, generate);
         await ctx.audit(tx, {
           action,
           targetType: "app_stack",
@@ -544,6 +582,7 @@ export class AppStacksService {
             templateVersionId: r.stack.templateVersionId,
             status: r.stack.status,
             ...(kind === "stack.delete" ? { destroyData } : {}),
+            ...(generated.length > 0 ? { generatedParameterKeys: generated } : {}),
           },
         });
       }
@@ -593,16 +632,20 @@ export class AppStacksService {
     }
     if (stack.desiredRevisionId === null) throw draftOutdated();
     const spec = validatedSpec(version.source, this.validation);
+    // A generated secret this version brings and the stack never had: version 1, stored when the upgrade is queued.
+    const secretVersions = secretVersionsOf(await listAppStackSecretMetadata(db, scope));
+    const generate = appSecretsToGenerate(spec, secretVersions);
+    for (const { parameterKey } of generate) secretVersions.set(parameterKey, 1);
     const c = compileRevision(
       {
         source: version.source,
         parameters: parameters ?? carryOverParameters(spec, entriesOf(await listAppStackParameters(db, scope))),
-        secretVersions: secretVersionsOf(await listAppStackSecretMetadata(db, scope)),
+        secretVersions,
         ids: this.#ids(stack, version.id),
       },
       this.validation,
     );
-    return { version, ...c, newRevision: true };
+    return { version, ...c, newRevision: true, generate };
   }
 
   /** Today's checks must still accept the earlier revision (spec §10.3); its plan is reused under a new revision id. */
@@ -626,6 +669,10 @@ export class AppStacksService {
     if (domainTargetsMissing(domains, plan.ingress).length > 0) {
       throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
     }
+    // A path rule to a removed part would stop routing unseen, and every later save of its options would be refused.
+    if (pathTargetsMissing(domains, plan.ingress).length > 0) {
+      throw refusal("domains", "path_target_removed", "A path of a web address still points at a part this version removes. Remove the path first.");
+    }
   }
 
   async #keyUsed(ctx: AppStackRequestContext): Promise<boolean> {
@@ -645,6 +692,21 @@ export class AppStacksService {
       templateVersionId,
       revisionId: newAppEntityId("srev"),
     };
+  }
+
+  /** Fresh values for `wanted`, stored as version 1 in the caller's transaction; the parameter keys it stored, sorted. */
+  async #storeGenerated(
+    tx: DatabaseExecutor,
+    scope: { readonly organizationId: string; readonly stackId: string },
+    wanted: readonly AppSecretToGenerate[],
+  ): Promise<string[]> {
+    if (wanted.length === 0) return [];
+    const stored = await insertGeneratedAppStackSecrets(tx, {
+      ...scope,
+      masterKey: this.config.secretsMasterKey,
+      values: generateAppSecretValues(wanted),
+    });
+    return stored.map((row) => row.parameterKey).sort();
   }
 
   #write<T>(work: (tx: HostingPanelDatabase) => Promise<T>): Promise<T> {
@@ -674,5 +736,19 @@ export class AppStacksService {
     const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
     if (!revision || !plan?.success) throw damaged("The stored revision is damaged.");
     return { revision, plan: plan.data };
+  }
+
+  /** The plan of the revision that runs, whose routes are published (ADR-0037); null when none was applied. */
+  async #appliedPlan(stack: AppStackRow, desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null): Promise<ApprovedStackPlan | null> {
+    if (stack.appliedRevisionId === null) return null;
+    if (desired?.revision.id === stack.appliedRevisionId) return desired.plan;
+    const revision = await getAppStackRevision(this.dbClient.db, {
+      organizationId: stack.organizationId,
+      stackId: stack.id,
+      revisionId: stack.appliedRevisionId,
+    });
+    const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
+    if (!plan?.success) throw damaged("The stored revision is damaged.");
+    return plan.data;
   }
 }

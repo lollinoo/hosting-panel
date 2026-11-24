@@ -98,6 +98,7 @@ describe("controller routes and docs/api/openapi.yaml agree", () => {
     for (const route of [
       "GET /v1/admin/app-templates",
       "POST /v1/admin/app-templates/validate",
+      "POST /v1/admin/app-templates/import-compose",
       "POST /v1/admin/app-templates",
       "GET /v1/admin/app-templates/{templateId}",
       "PATCH /v1/admin/app-templates/{templateId}",

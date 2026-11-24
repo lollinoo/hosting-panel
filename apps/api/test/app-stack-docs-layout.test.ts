@@ -12,8 +12,20 @@ const between = (text: string, from: string, to?: string) => {
   return text.slice(start, end < 0 ? undefined : end);
 };
 
-const digests = [...new Set(APP_BUILT_IN_TEMPLATES.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0])))];
-const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
+const digestsOf = (templates: readonly (typeof APP_BUILT_IN_TEMPLATES)[number][]) => [
+  ...new Set(templates.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))),
+];
+// The seeds of the first format are recorded in ADR-0035, the one of the extended format in ADR-0036.
+const isExtended = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.source.startsWith("x-hp-stack:\n  schemaVersion: 2\n");
+const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t)));
+const extendedDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter(isExtended));
+const scripts = [
+  "accept-app-stack-engine.mjs",
+  "accept-app-stack-http-cache.mjs",
+  "accept-app-stack-worker-storage.mjs",
+  "accept-app-stack-wordpress.mjs",
+  "accept-app-routing-options.mjs",
+];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
   it("ADR-0035 is approved and cites existing paths", () => {
@@ -30,6 +42,20 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     expect(digests.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("ADR-0036 records the extended format and the images of its built-in template", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0036-.*\.md$/.test(f));
+    expect(adrs).toHaveLength(1);
+    const file = `docs/architecture/adr/${adrs[0]!}`;
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    expect(extendedDigests).toHaveLength(2);
+    for (const s of ["HCP-STACK/v2", "ADR-0035", "atpl_wordpress_mariadb", ...extendedDigests]) expect(adr, s).toContain(s);
+    expect(extendedDigests.filter((d) => digests.includes(d))).toEqual([]);
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    expect([...paths], file).toContain("infra/linux/accept-app-stack-wordpress.mjs");
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+  });
+
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
     const readme = read("README.md");
     for (const s of ["ADR-0035", "app-stacks", "docs/runbooks/application-stacks.md", "docs/security/hcp-spec-005-acceptance-report.md"]) {
@@ -37,10 +63,12 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     }
     expect(readme).not.toContain("HCP-SPEC-005");
     const table = between(readme, "## 2. Stato di Implementazione", "## 3. Mappa del Monorepo").split("\n").filter((l) => l.startsWith("|"));
-    for (const flag of ["applicationTemplatesAvailable", "applicationStacksAvailable", "stackPublicPortsAvailable", "gitBuildsAvailable"]) {
+    // The catalog and the stacks are on for linux-systemd (ADR-0036 §2.10); public ports and Git builds ship nowhere.
+    const flags = { applicationTemplatesAvailable: true, applicationStacksAvailable: true, stackPublicPortsAvailable: false, gitBuildsAvailable: false };
+    for (const [flag, on] of Object.entries(flags)) {
       const rows = table.filter((l) => l.includes(flag));
       expect(rows, flag).toHaveLength(1);
-      expect(rows[0], flag).toContain(`\`${flag}: false\``);
+      expect(rows[0], flag).toContain(`\`${flag}: ${on}\``);
     }
     const harness = read("HARNESS.md");
     const runbook = read("docs/runbooks/application-stacks.md");
@@ -98,6 +126,15 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
         "container-hardening", "worker-writes-storage", "network-shape", "idempotent-reapply", "data-survives-upgrade-and-rollback",
         "pull-failure-consistent", "network-failure-consistent", "health-timeout-consistent", "recovery-reads-only",
         "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
+      ],
+      "accept-app-stack-wordpress.mjs": [
+        "gate-self-test", "preflight", "snapshot-before", "plan-compiles-from-seed", "refused-before-docker",
+        "deploy-creates-exact-set", "container-standard-profile", "secrets-reach-only-their-component", "network-shape",
+        "no-control-plane-reach", "route-published-after-health", "wordpress-installs", "logs-mask-environment-secrets",
+        "data-survives-stop-and-start", "idempotent-reapply", "upgrade-keeps-data", "recovery-reads-only",
+        "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left",
+        // The steps of the `--imported` run (the draft the Compose importer writes).
+        "compose-imports-to-draft", "plan-compiles-from-draft", "registry-lookup-reads-only"
       ]
     };
     const harness = read("HARNESS.md");
@@ -114,6 +151,8 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).not.toMatch(/["']-p["']|["']--publish["']/);
       const anyHost = script.split("\n").filter((l) => l.includes("0.0.0.0"));
       if (name.includes("worker-storage")) expect(anyHost, file).toEqual([]);
+      // A script that carries secrets has its gate refuse them anywhere but the environment of an own container.
+      if (name.includes("wordpress")) for (const s of ['deny("secret in the address")', 'deny("secret outside Env")']) expect(script, `${file} ${s}`).toContain(s);
       for (const line of anyHost) expect(line, file).toContain("HostIp");
       expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
       // The gate forwards only what it recognises: its judge ends in a denial.
@@ -122,6 +161,67 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).toMatch(/skipped \(not counted in n\/m\)/);
       expect(harness, name).toContain(name);
     }
+  });
+});
+
+describe("ADR-0037 docs and the routing options check", () => {
+  it("ADR-0037 has its header and cites existing paths", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0037-.*\.md$/.test(f));
+    expect(adrs).toHaveLength(1);
+    const file = `docs/architecture/adr/${adrs[0]!}`;
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    expect(adr).toMatch(/^- \*\*Stato:\*\* `(?:PROPOSTO|APPROVATO)`/m);
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    expect(paths.size, file).toBeGreaterThanOrEqual(10);
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    for (const s of ["ADR-0035", "0026_app_routing_options.sql", "app-routing-options", "accept-app-routing-options.mjs", "R12"]) expect(adr, s).toContain(s);
+  });
+
+  it("README, HARNESS, runbook, ER diagram and the decisions name the options", () => {
+    const readme = read("README.md");
+    for (const s of ["ADR-0037", "docs/architecture/adr/0037-application-routing-options.md", "app-routing-options"]) expect(readme, s).toContain(s);
+    const harness = read("HARNESS.md");
+    for (const s of ["ADR-0037", "0026_app_routing_options.sql", "accept-app-routing-options.mjs"]) expect(harness, s).toContain(s);
+    // The guards the forbidden action names are files of this repository.
+    const rule = harness.split("\n").filter((l) => l.includes("`ADR-0037`; guarded by"));
+    expect(rule).toHaveLength(1);
+    const guards = [...rule[0]!.matchAll(/`((?:apps|packages|infra)\/[^`\s]+)`/g)].map((m) => m[1]!);
+    expect(guards.length).toBeGreaterThanOrEqual(4);
+    for (const p of guards) expect(existsSync(join(root, p)), `HARNESS: ${p}`).toBe(true);
+    const runbook = read("docs/runbooks/application-stacks.md");
+    expect(runbook).toMatch(/^## 10\. Routing options of an address$/m);
+    for (const s of ["ADR-0037", "app-routing-options", "accept-app-routing-options.mjs"]) expect(runbook, s).toContain(s);
+    // No procedure tells the operator to read the password verifier out of the database.
+    for (const line of runbook.split("\n").filter((l) => l.includes("psql"))) expect(line).not.toContain("access_password_hash");
+    const er = read("docs/architecture/diagrams/domain-er-and-boundaries.md");
+    for (const s of ["0026_app_routing_options.sql", "redirect_to_domain_id", "path_routes"]) expect(er, s).toContain(s);
+    expect(read(".agents/brain/decisions.md")).toContain("ADR-0037");
+  });
+
+  it("the routing options check is registered and machine-safe", () => {
+    const file = "infra/linux/accept-app-routing-options.mjs";
+    const script = read(file);
+    for (const s of ["TraefikIngressFileManager", "writeAppStackRoutes", "buildIngressProxyContainerPayload", "buildTraefikStaticYaml", "apr1Verifier",
+      "APP_BUILT_IN_TEMPLATES", "hp_swarmtest_rt_", "swarmtest_"]) expect(script, `${file} ${s}`).toContain(s);
+    for (const step of ["preflight", "snapshot-before", "backends-up", "test-network-is-ours-only"]) expect(script, step).toContain(`step("${step}"`);
+    for (const step of ["route-file", "addresses-serve", "compression", "password", "paths", "redirect", "change-without-restart", "proxy-log",
+      "plain-http-only-redirects", "certificate-pending"]) expect(script, step).toContain(`step(\`\${p}${step}\``);
+    for (const step of ["foreign-containers-untouched", "nothing-left"]) expect(script, step).toContain(`"PASS ${step}"`);
+    expect(script, file).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script, file).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb|phpmyadmin)["'`]/);
+    expect(script, file).not.toMatch(/["'](?:prune|system|pull)["']/);
+    expect(script, file).not.toMatch(/:latest\b/);
+    // The throw-away proxy is the only thing published, and only on loopback.
+    const published = script.split("\n").filter((l) => /["']-p["']|["']--publish["']/.test(l));
+    expect(published.map((l) => l.trim())).toEqual(['"-p", `${HOST}:${String(PORT.http)}:80`, "-p", `${HOST}:${String(PORT.https)}:443`,']);
+    expect(script).toContain('const HOST = "127.0.0.1";');
+    expect(script).not.toContain("0.0.0.0");
+    // Nothing it creates carries a label: a live executor adopts what it finds labelled.
+    expect(script, file).not.toMatch(/["']--label(?:=[^"']*)?["']/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
+    expect(script, file).toMatch(/console\.log\(`RESULT \$\{/);
+    expect(script, file).toMatch(/nothing was created \(this script never pulls\)/);
   });
 });
 

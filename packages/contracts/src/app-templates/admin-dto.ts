@@ -2,7 +2,7 @@ import { z } from "zod";
 import { AppTemplateIssueSchema } from "./issues.js";
 import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_CATEGORY_PATTERN, APP_TEMPLATE_LIMITS } from "./limits.js";
 import { AppStackPreviewSchema } from "./plan.js";
-import { AppTemplateParameterSchema } from "./spec.js";
+import { AppTemplateAnyParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_TEMPLATE_STATES, AppStackStatusSchema } from "./stack-status.js";
 
@@ -55,15 +55,53 @@ export const AdminAppTemplateListQuerySchema = z
   })
   .strict();
 export type AdminAppTemplateListQuery = z.infer<typeof AdminAppTemplateListQuerySchema>;
+/** A Docker Compose file to read into a draft; the same size bound as a template source (UTF-8 bytes). */
+export const ComposeFileSchema = z
+  .string()
+  .min(1)
+  .refine((s) => new TextEncoder().encode(s).length <= APP_TEMPLATE_LIMITS.sourceBytes, { message: "The Compose file is larger than 64 KiB." });
+/** Body of POST /v1/admin/app-templates/import-compose. Without name or category the importer reads the file's header comments. */
+export const ImportComposeInputSchema = z
+  .object({ compose: ComposeFileSchema, name: TemplateNameSchema.optional(), category: TemplateCategorySchema.optional() })
+  .strict();
+export type ImportComposeInput = z.infer<typeof ImportComposeInputSchema>;
 
 // ---- responses ----
 export const AppTemplateValidationDtoSchema = z.object({
   valid: z.boolean(),
   issues: z.array(AppTemplateIssueSchema), // [] when valid; sorted, ≤ 50
-  parameters: z.array(AppTemplateParameterSchema), // all of spec.parameters (customer:false and secret too); [] when invalid
+  parameters: z.array(AppTemplateAnyParameterSchema), // all of spec.parameters (customer:false and secret too); [] when invalid
   preview: AppStackPreviewSchema.nullable(), // null when invalid
 });
 export type AppTemplateValidationDto = z.infer<typeof AppTemplateValidationDtoSchema>;
+
+/** What the importer did with one part of the file: kept with a remark, changed, left out, or refused. */
+export const COMPOSE_IMPORT_LEVELS = ["info", "changed", "dropped", "refused"] as const;
+export type ComposeImportLevel = (typeof COMPOSE_IMPORT_LEVELS)[number];
+export const COMPOSE_IMPORT_REPORT_MAX = 200;
+export const ComposeImportNoteDtoSchema = z
+  .object({
+    level: z.enum(COMPOSE_IMPORT_LEVELS),
+    /** A fixed code of the importer (IMAGE_PINNED, PORTS_DROPPED, KEY_UNKNOWN, ...). */
+    code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+    /** Where in the file, as formatTemplatePath writes it; "" = the whole file. */
+    path: z.string().max(512),
+    /** Fixed English; never echoes a value of the file. */
+    message: z.string().min(1).max(600),
+  })
+  .strict();
+export type ComposeImportNoteDto = z.infer<typeof ComposeImportNoteDtoSchema>;
+/** Nothing is stored: the administrator reviews the draft and saves it through the template routes, which validate again. */
+export const ComposeImportDtoSchema = z
+  .object({
+    /** The draft HCP-STACK/v2 source; null when one refusal is in the report. */
+    source: AppTemplateSourceSchema.nullable(),
+    report: z.array(ComposeImportNoteDtoSchema).max(COMPOSE_IMPORT_REPORT_MAX),
+    /** The validator's verdict on the draft, as POST validate gives it; null without a draft. */
+    validation: AppTemplateValidationDtoSchema.nullable(),
+  })
+  .strict();
+export type ComposeImportDto = z.infer<typeof ComposeImportDtoSchema>;
 
 export const AdminAppTemplateSummaryDtoSchema = z.object({
   id: AppEntityIdSchema,
@@ -113,7 +151,7 @@ export const AdminAppTemplateVersionDtoSchema = z.object({
   source: z.string(),
   valid: z.boolean(),
   issues: z.array(AppTemplateIssueSchema),
-  parameters: z.array(AppTemplateParameterSchema),
+  parameters: z.array(AppTemplateAnyParameterSchema),
   preview: AppStackPreviewSchema.nullable(),
 });
 export type AdminAppTemplateVersionDto = z.infer<typeof AdminAppTemplateVersionDtoSchema>;

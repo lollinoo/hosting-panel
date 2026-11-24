@@ -94,6 +94,14 @@ describe("per-service env files and wrappers", () => {
     expect(web).toMatch(/^After=.*docker\.service/m);
   });
 
+  it("web counts the SIGTERM exit of next start as a clean stop", () => {
+    // next start exits 143 (128 + SIGTERM) on every stop; without this the unit ends up "failed".
+    const web = read("infra/systemd/hp-web.service");
+    const service = web.slice(web.indexOf("[Service]"), web.indexOf("[Install]")).split("\n");
+    expect(service.filter((l) => l.startsWith("SuccessExitStatus="))).toEqual(["SuccessExitStatus=143"]);
+    expect(service).toContain("Restart=on-failure");
+  });
+
   it.skipIf(!hasHost)("bootstrap dry-run lists the three env files with 0400", () => {
     const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
     expect(r.status).toBe(0);

@@ -85,6 +85,14 @@ describe("application refusal texts", () => {
     expect(appStackRefusalText(m, "NOPE")).toBe(m.errors.generic);
   });
 
+  it.each(locales)("%s: a stop that did not finish says what to do, not only the status", (_n, m) => {
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "stop_unfinished");
+    expect(text).toBe((m.apps.reasons as Record<string, string>).stop_unfinished);
+    expect(text).toContain(m.apps.actions.stop);
+    expect(text).toContain(m.apps.actions.restart);
+    expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
+  });
+
   it("the Italian status refusal reads as the detail page expects", () => {
     expect(appStackRefusalText(itMsgs, "RESOURCE_LOCKED", "stopped")).toBe("Non è possibile ora: l'applicazione è nello stato «Ferma».");
   });

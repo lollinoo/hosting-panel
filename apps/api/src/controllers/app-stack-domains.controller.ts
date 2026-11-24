@@ -1,5 +1,11 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
-import { AddAppStackDomainInputSchema, AppStackActionInputSchema, type AppStackDomainDto, type PermissionKey } from "@hosting-panel/contracts";
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Req } from "@nestjs/common";
+import {
+  AddAppStackDomainInputSchema,
+  AppStackActionInputSchema,
+  UpdateAppStackDomainInputSchema,
+  type AppStackDomainDto,
+  type PermissionKey,
+} from "@hosting-panel/contracts";
 import type { AppStackRow } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { APP_FEATURE_GATE_TOKEN, requireAppFeature, type AppFeatureGate } from "../app-stacks/app-feature-gate.js";
@@ -41,6 +47,24 @@ export class AppStackDomainsController {
     const { auth, stack } = await this.#require(req, orgId, stackId, "app.update");
     const input = AddAppStackDomainInputSchema.parse(raw ?? {});
     return { data: await this.domains.add(this.#context(auth, req, orgId), stack, input) };
+  }
+
+  /**
+   * Routing options of one address (ADR-0037): redirect, password protection, compression, paths. `applies` says when
+   * they reach the published address: in a few moments, or when the application next starts.
+   */
+  @Patch(":domainId")
+  public async update(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Param("domainId") domainId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: AppStackDomainDto[]; applies: "shortly" | "at_start" }> {
+    const { auth, stack } = await this.#require(req, orgId, stackId, "app.update");
+    const input = UpdateAppStackDomainInputSchema.parse(raw ?? {});
+    const { domains, applies } = await this.domains.update(this.#context(auth, req, orgId), stack, domainId, input);
+    return { data: domains, applies };
   }
 
   @Delete(":domainId")

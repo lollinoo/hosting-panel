@@ -94,7 +94,7 @@ describe("envNameProblem", () => {
 
 describe("envValueProblem", () => {
   it("accepts ordinary values, including the empty string", () => {
-    for (const value of ["", "true", "http://example.com/a", "Bearer", "Bearer short", "skate", "sk-short", "https://example.com:8080/x", "mail@example.com", "a=b", "ünï ✓", "${HP_SITE_URL}"]) {
+    for (const value of ["", "true", "http://example.com/a", "Bearer", "Bearer short", "skate", "sk-short", "https://example.com:8080/x", "http://host:8080/path@x", "https://host:8443/?to=a@b", "http://[::1]:8080/", "tcp://:8080", "mail@example.com", "a=b", "ünï ✓", "${HP_SITE_URL}"]) {
       expect(envValueProblem(value), value).toBeNull();
     }
   });
