@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AppStackTaskDto, AppStackTaskRunDto, AppStackTaskSchedule } from "@hosting-panel/contracts";
+import { appStackTaskPrintedButNotKept, type AppStackTaskDto, type AppStackTaskRunDto, type AppStackTaskSchedule } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -269,7 +269,9 @@ export function AppStackTasks({
                             <span className="text-muted-foreground">{t.trigger[run.trigger]}</span>
                           </p>
                           {run.problem && <p>{t.problem[run.problem]}</p>}
-                          {run.output !== "" ? (
+                          {appStackTaskPrintedButNotKept(run) ? (
+                            <p className="text-muted-foreground">{t.runs.notKept}</p>
+                          ) : run.output !== "" ? (
                             <>
                               <p className="text-muted-foreground">{t.runs.output}</p>
                               <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 font-mono text-xs">{run.output}</pre>

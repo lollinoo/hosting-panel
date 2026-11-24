@@ -3551,6 +3551,8 @@ x-hp-ingress:
         error: "Cannot read the runs.",
         output: "What it printed",
         noOutput: "It printed nothing.",
+        notKept:
+          "This run printed something, but it was not kept. This happens when the output is one very long line, or when the panel could not read the application's private values to hide them. If it happens again, restart the application and run the task again.",
         truncated: "Only the last lines are shown.",
       },
     },
