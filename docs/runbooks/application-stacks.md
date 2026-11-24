@@ -322,13 +322,23 @@ names only the key of a task, and the command is read from the template version 
    could not begin leaves no row in `app_stack_task_runs` and makes its time owed again this way. After 30 minutes
    the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
    at the same hour run one after another; one that cannot start within 30 minutes is skipped as `busy`.
-5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
-   the run (it restarted), or its answer to the panel's question did not have the expected shape. The panel never
-   starts it again by itself: check the application, then press «Esegui ora» if running it twice is safe. While the
-   executor still knows the run, the application stays held and the panel asks again at every recovery pass.
+5. **A run reads «esito non noto» (`unknown`).** Two causes. The answer of the executor was lost and the executor no
+   longer knows the run (it restarted), or its answer to the panel's question did not have the expected shape. Or the
+   executor answered it itself: at the time limit, or when the output of the command ended with no exit code, it could
+   not confirm that it had stopped the command (`journalctl -u hp-docker-executor | grep app_task_cleanup_failed`
+   shows the same run), so the command may still be running; it is never called «stopped». Either way the panel never
+   starts it again by itself: check the application (for the second cause, look for the process of the command in the
+   component, or restart the application), then press «Esegui ora» if running it twice is safe. The run keeps what
+   the command printed in the second case and nothing in the first. While the executor still knows the run, the
+   application stays held and the panel asks again at every recovery pass.
 6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
    (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
    a code only when that clean-up could not finish; restart the application to be sure nothing is left).
+   `app_task_cleanup_failed` after a run (not only at start) means that the executor tried to stop the command six
+   times, five seconds apart, and none was confirmed, or that the component's own environment carries the mark so
+   the clean-up cannot work (it is then written at once, not retried). The attempts are part of the run: the
+   application stays held, and the run is answered after them, up to about a minute and a half after its time limit.
+   The run reads «esito non noto» (item 5), never «stopped».
    `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
    environment (their image, or a container created before the rule against it). The clean-up kills nothing there and
    no task of such a component can run (its runs end not started, `unavailable`). Find the variable in the
