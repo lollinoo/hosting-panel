@@ -14385,6 +14385,10 @@ components:
                 minLength: 1
                 maxLength: 16384
                 writeOnly: true
+                description: >-
+                  No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+                  process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
+                  environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
     RollbackAppStackInput:
       type: object
