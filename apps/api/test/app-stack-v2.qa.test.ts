@@ -580,6 +580,50 @@ describe("application stacks in the extended format (ADR-0036): generated values
       expect(envOf(stackId, "worker")).toContain(`SESSION_KEY=${sessionKey}`);
     }, 120_000);
 
+    it("an upgrade that fails at the download is taken back but keeps its generated value; the same upgrade again reuses it", async () => {
+      const { templateId, stackId } = await running("job-retry");
+      const v1 = (await stackRow(stackId)).templateVersionId;
+      const v2 = await addVersion(templateId, JOB_V2);
+      const diff = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/plan`, { templateVersionId: v2 });
+      expect(diff.status, diff.raw).toBe(200);
+      const body = { templateVersionId: v2, planHash: diff.body.data.planHash as string };
+      const upgradeOps = async () =>
+        (await h.dbClient.db.select().from(operations).where(eq(operations.resourceId, stackId)).orderBy(asc(operations.submittedAt)))
+          .filter((o) => o.kind === "stack.upgrade")
+          .map((o) => o.status);
+
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const failed = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/upgrade`, body, idem());
+      expect(failed.status, failed.raw).toBe(202);
+      expect(await versionsOf(stackId)).toEqual(["session_key:1"]);
+      const sessionKey = await valueOf(stackId, "session_key");
+      await runUntilSettled(stackId);
+      expect(await upgradeOps()).toEqual(["failed"]);
+
+      // Back on version 1, which declares no such secret: the stored value stays, unused and never shown.
+      expect(await stackRow(stackId)).toMatchObject({ templateVersionId: v1 });
+      expect(await versionsOf(stackId)).toEqual(["session_key:1"]);
+      expect(envOf(stackId, "worker").some((entry) => entry.startsWith("SESSION_KEY="))).toBe(false);
+      const detail = await h.call(h.a.token, "GET", `${stacks()}/${stackId}`);
+      expect(detail.body.data).toMatchObject({ templateVersionNumber: 1, upgrade: { versionNumber: 2 } });
+      expect(detail.raw).not.toContain("session_key");
+
+      // The same review answers the same plan (it pins the stored version 1); the new request generates nothing.
+      const again = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/plan`, { templateVersionId: v2 });
+      expect(again.body.data.planHash).toBe(body.planHash);
+      const retried = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/upgrade`, body, idem());
+      expect(retried.status, retried.raw).toBe(202);
+      expect(await versionsOf(stackId)).toEqual(["session_key:1"]);
+      expect(await valueOf(stackId, "session_key")).toBe(sessionKey);
+      const upgrades = await audits("app.stack.upgrade", stackId);
+      expect(upgrades).toHaveLength(2);
+      expect(upgrades.filter((row) => "generatedParameterKeys" in (row.details as Json))).toHaveLength(1);
+      await runUntilSettled(stackId);
+      expect(await upgradeOps()).toEqual(["failed", "succeeded"]);
+      expect(await stackRow(stackId)).toMatchObject({ templateVersionId: v2 });
+      expect(envOf(stackId, "worker")).toContain(`SESSION_KEY=${sessionKey}`);
+    }, 120_000);
+
     it("an upgrade that is refused stores nothing", async () => {
       const { templateId, stackId } = await running("job-refused");
       const v2 = await addVersion(templateId, JOB_V2);
