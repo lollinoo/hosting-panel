@@ -5441,8 +5441,8 @@ paths:
       summary: List the applications installed from an application template, across customers (server administrator only)
       description: >-
         Deleted applications are left out; at most 200, by customer name then application name (`truncated` says
-        more exist). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
-        `applicationTemplatesAvailable` is false.
+        more exist). The `status` of a row is the one the customer's page shows (issue #130). Returns 422 NOT_SUPPORTED
+        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationTemplatesAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/AppTemplateIdParam"
       responses:
@@ -5473,8 +5473,9 @@ paths:
       summary: List every customer's applications installed from application templates (server administrator only, read-only)
       description: >-
         Deleted applications are left out; at most 200, by customer name then application name (`truncated` says
-        more exist). Never carries a secret, a setting value or a plan. Returns 422 NOT_SUPPORTED (reason
-        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+        more exist). The `status` of a row is the one the customer's page shows (issue #130). Never carries a secret, a
+        setting value or a plan. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       responses:
         "200":
           description: The applications
@@ -14792,7 +14793,13 @@ components:
         name:
           type: string
         status:
-          $ref: "#/components/schemas/AppStackStatus"
+          allOf:
+            - $ref: "#/components/schemas/AppStackStatus"
+          description: >-
+            The status the application page shows (issue #130): the stored status, except for a `running` or `degraded`
+            application with a revision applied, where it follows the health of the components of that revision (a
+            crashed essential component reads `failed`, a missing or stale reading `unknown`). The list and the page
+            compute it the same way, from the revision that runs, so they never disagree
         templateId:
           $ref: "#/components/schemas/AppEntityId"
         templateName:

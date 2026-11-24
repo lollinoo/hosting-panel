@@ -423,6 +423,9 @@ export function appStackAddressRemovable(
   return idle && stack.appliedRoutesHash === null && (stack.appliedRevisionId === null || stack.status === "stopped");
 }
 
+/** The stored statuses whose shown status is computed from the health of the components; the others are shown as stored. */
+export const APP_STACK_STATUSES_SHOWN_FROM_HEALTH: readonly AppStackStatus[] = ["running", "degraded"];
+
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */
 export function appStackDisplayStatus(input: {
   readonly stack: Pick<AppStackRow, "status" | "appliedRoutesHash">;
@@ -432,7 +435,7 @@ export function appStackDisplayStatus(input: {
   readonly now: Date;
 }): AppStackStatus {
   const { stack, plan } = input;
-  if ((stack.status !== "running" && stack.status !== "degraded") || plan === null) return stack.status;
+  if (!APP_STACK_STATUSES_SHOWN_FROM_HEALTH.includes(stack.status) || plan === null) return stack.status;
   const rows = new Map(input.components.map((c) => [c.componentKey, c]));
   const health = new Map<string, AppStackComponentHealth>();
   for (const c of plan.components) {

@@ -48,12 +48,14 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## 1. See a stack's real state
 
-1. In the panel: the application page (`/apps/<stackId>`) shows the status, each component's health with the time of
+1. In the panel: the application page (`/apps/<stackId>`) shows the status (the list shows the same one), each component's health with the time of
    the last check, the domains, the history of every action with its reason, and each component's log (the last 1 to
    500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`.
 2. The server administrator sees every live stack in **Applicazioni** (customer, template and version, status, web
    address; at most 200, read-only) and the stacks of one template in **Modelli** › the template › its usage list
-   (organisation, name, version, status). All live stacks:
+   (organisation, name, version, status). The status of a row is the one the application page shows: for a `running` or
+   `degraded` application it follows the health of its components, so a crashed one reads `failed` and a missing or
+   old reading `unknown`, while the `status` column below is the stored one. All live stacks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where deleted_at is null order by organization_id, name"
    ```
