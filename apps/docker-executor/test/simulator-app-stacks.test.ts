@@ -479,6 +479,46 @@ describe("SimulatedAppStacks idempotency and removal", () => {
   });
 });
 
+describe("SimulatedAppStacks stop and remove order (#100)", () => {
+  /** An upgrade that kept web's old label: web carries the later one although worker uses it. */
+  function shifted(sim: InMemoryDockerSimulatorAdapter): void {
+    const stacks = (sim.appStacks as unknown as { stacks: Map<string, { containers: Map<string, { labels: Record<string, string> }> }> }).stacks;
+    const containers = stacks.get(ID)?.containers;
+    if (containers === undefined) throw new Error("no stack");
+    for (const [key, index] of [["web", "5"], ["worker", "1"]] as const) {
+      const container = containers.get(key);
+      if (container === undefined) throw new Error(`no container ${key}`);
+      container.labels = { ...container.labels, [APP_STACK_LABELS.startIndex]: index };
+    }
+  }
+
+  it("stops by reverse position in the order, a key it does not list first, and by the labels without one", async () => {
+    const stopped = async (order?: string[]) => {
+      const sim = simulator();
+      await deploy(sim);
+      shifted(sim);
+      const result = await sim.stopAppStack(order === undefined ? ref : { ...ref, order });
+      return result.components.map((c) => c.componentKey);
+    };
+    expect(await stopped()).toEqual(["web", "worker"]);
+    expect(await stopped(["web", "worker"])).toEqual(["worker", "web"]);
+    expect(await stopped(["worker"])).toEqual(["web", "worker"]);
+    expect(await stopped(["ghost"])).toEqual(["web", "worker"]);
+  });
+
+  it("removes in the same order", async () => {
+    const removed = async (order?: string[]) => {
+      const sim = simulator();
+      await deploy(sim);
+      shifted(sim);
+      const result = await sim.removeAppStack(order === undefined ? { ...ref, removeVolumes: false } : { ...ref, removeVolumes: false, order });
+      return result.removedComponents;
+    };
+    expect(await removed()).toEqual(["web", "worker"]);
+    expect(await removed(["web", "worker"])).toEqual(["worker", "web"]);
+  });
+});
+
 describe("SimulatedAppStacks on disk", () => {
   it("writes real secret files only when secretsRootDir is set", async () => {
     const root = tempDir();

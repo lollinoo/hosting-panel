@@ -35,6 +35,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -302,13 +303,23 @@ function ownVolumeKey(view: VolumeView, ids: Ids): string | null {
 
 const byKey = (a: { readonly key: string }, b: { readonly key: string }) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
-/** app_start_index descending (non-numeric = 0), ties by key descending. */
-function reverseStartOrder(containers: readonly OwnContainer[]): OwnContainer[] {
+/** app_start_index descending (non-numeric = 0), ties by key descending. An upgrade keeps the label of a component it
+ *  does not replace, so after one the labels alone can put a component before what uses it: `order`, the keys of the
+ *  applied plan's components in plan order, replaces them. By descending position in it; a container whose key it does
+ *  not list (left over from an older version) goes first, those among themselves by the label as above. */
+function reverseStartOrder(containers: readonly OwnContainer[], order?: readonly string[]): OwnContainer[] {
   const index = (c: OwnContainer) => {
     const raw = c.labels[APP_STACK_LABELS.startIndex] ?? "";
     return /^[0-9]{1,3}$/.test(raw) ? Number(raw) : 0;
   };
-  return [...containers].sort((a, b) => index(b) - index(a) || byKey(b, a));
+  const byLabel = (a: OwnContainer, b: OwnContainer) => index(b) - index(a) || byKey(b, a);
+  if (order === undefined) return [...containers].sort(byLabel);
+  const position = new Map(order.map((key, at) => [key, at]));
+  return [...containers].sort((a, b) => {
+    const [pa, pb] = [position.get(a.key), position.get(b.key)];
+    if (pa === undefined || pb === undefined) return pa === pb ? byLabel(a, b) : pa === undefined ? -1 : 1;
+    return pb - pa;
+  });
 }
 
 export class AppStackEngine implements StackExecutorPort {
@@ -482,10 +493,10 @@ export class AppStackEngine implements StackExecutorPort {
     return this.runComponent(req, "restart");
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.lockedWithoutTask(req.stackId, async () => {
       const components: AppStackStopIpcResult["components"] = [];
-      for (const c of reverseStartOrder(await this.listContainers(req))) {
+      for (const c of reverseStartOrder(await this.listContainers(req), req.order)) {
         if (STOPPED_STATES.has(c.state)) {
           components.push({ componentKey: c.key, outcome: "already_stopped" });
           continue;
@@ -547,7 +558,7 @@ export class AppStackEngine implements StackExecutorPort {
       const listed = await this.listAll(req);
       await this.deps.routes.remove(req.stackId);
       const removedComponents: string[] = [];
-      for (const c of reverseStartOrder(listed.containers)) {
+      for (const c of reverseStartOrder(listed.containers, req.order)) {
         await this.removeContainer(c.id);
         removedComponents.push(c.key);
       }

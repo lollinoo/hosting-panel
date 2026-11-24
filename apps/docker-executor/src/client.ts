@@ -37,6 +37,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type AppStackTaskReadIpcRequest,
   type AppStackTaskReadIpcResult,
@@ -764,7 +765,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return this.sendChange("/v1/app-stacks/restart", req, APP_STACK_COMPONENT_TIMEOUT_MS, AppStackComponentActionIpcResultSchema);
   }
 
-  public async stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public async stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.sendChange("/v1/app-stacks/stop", req, APP_STACK_STOP_TIMEOUT_MS, AppStackStopIpcResultSchema);
   }
 

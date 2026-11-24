@@ -4,7 +4,7 @@ import http from "node:http";
 import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { createErrorEnvelope, signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
+import { APP_TEMPLATE_LIMITS, createErrorEnvelope, signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
 import { APP_STACK_EXECUTOR_METHODS, Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
@@ -214,6 +214,26 @@ describe("application stack IPC routes", () => {
       expect(fns[method], method).toHaveBeenCalledTimes(1);
       expect(fns[method].mock.calls[0]?.[0], method).toEqual(request);
     }
+  });
+
+  it("a stop and a remove carry the applied plan's order to the executor, and refuse a malformed one (#100)", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    const order = ["web", "worker"];
+    await client.stopAppStack({ ...ref, order });
+    await client.removeAppStack({ ...ref, removeVolumes: false, order });
+    expect(fns.stopAppStack.mock.calls[0]?.[0]).toEqual({ ...ref, order });
+    expect(fns.removeAppStack.mock.calls[0]?.[0]).toEqual({ ...ref, removeVolumes: false, order });
+    for (const bad of [["web", "web"], [], ["Bad_Key"], Array.from({ length: APP_TEMPLATE_LIMITS.services + 1 }, (_, i) => `c${i}`)]) {
+      for (const err of [
+        await failure(client.stopAppStack({ ...ref, order: bad })),
+        await failure(client.removeAppStack({ ...ref, removeVolumes: false, order: bad })),
+      ]) {
+        expect([err.statusCode, err.code, err.reason], JSON.stringify(bad)).toEqual([400, "VALIDATION_ERROR", undefined]);
+      }
+    }
+    expect(fns.stopAppStack).toHaveBeenCalledTimes(1);
+    expect(fns.removeAppStack).toHaveBeenCalledTimes(1);
   });
 
   it("refuses unsigned (401) and replayed (409) requests before any executor call", async () => {

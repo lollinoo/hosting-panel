@@ -4,7 +4,7 @@ import type {
   AppStackPlanIpcRequest, AppStackPrepareIpcResult, AppStackPullIpcRequest, AppStackPullIpcResult, AppStackRefIpcRequest,
   AppStackRemoveIpcRequest, AppStackRemoveIpcResult, AppStackComponentsRemoveIpcRequest, AppStackComponentsRemoveIpcResult,
   AppStackLinksIpcRequest, AppStackLinksIpcResult, AppStackRoutesIpcRequest, AppStackRoutesIpcResult,
-  AppStackStatusIpcResult, AppStackStopIpcResult,
+  AppStackStatusIpcResult, AppStackStopIpcRequest, AppStackStopIpcResult,
 } from "@hosting-panel/contracts";
 import type { ServiceLogLine } from "./port.js";
 
@@ -21,12 +21,13 @@ export interface StackExecutorPort {
   /** One component; its dependsOn containers must be running. Writes its secrets first. */
   startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult>;
   restartAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult>;
-  /** Every component, reverse start order. Secret files stay until remove. */
-  stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult>;
+  /** Every component, reverse start order, or by reverse position in `req.order` (the applied plan's keys in plan order)
+   *  when it is given. Secret files stay until remove. */
+  stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult>;
   /** Full desired route set of the stack; [] removes the file. */
   publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult>;
   unpublishAppStackRoutes(req: AppStackRefIpcRequest): Promise<AppStackRoutesIpcResult>;
-  /** Route file, containers, networks, secret files; volumes only with removeVolumes. */
+  /** Route file, containers (in the stop's order), networks, secret files; volumes only with removeVolumes. */
   removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult>;
   /** Only the named containers (+ their secret dirs); volumes, networks and routes untouched (upgrade cleanup). */
   removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult>;
