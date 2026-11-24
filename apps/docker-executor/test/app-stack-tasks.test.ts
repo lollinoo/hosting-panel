@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -42,7 +42,7 @@ import {
   type IngressCapableDockerExecutor,
 } from "../src/index.js";
 import { type MockDockerContainerRecord, type MockDockerDaemon, type MockExecPlan, startMockDockerDaemon } from "./mock-docker-daemon.js";
-import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
+import { TEST_ALLOWLIST, V2_CREATE_SECRETS, V2_SECRET_VALUES, appStackTestPlan, appStackTestPlanV2, rehash, v2SecretEntry } from "./support/app-stack-plans.js";
 
 // ADR-0042: a task of an application. The command runs in the existing container of one component, started directly
 // with no user, no folder, no terminal and no input; it ends at its time limit and what it started is killed.
@@ -1160,6 +1160,90 @@ describe("tasks in the simulator", () => {
 
     sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${CANARY}`] });
     expect((await sim.runAppStackTask(run(6, { componentKey: "worker" }))).output).toBe("key [REDACTED]");
+  });
+
+  describe("when the private values of the component cannot be established (#188)", () => {
+    // Booleans only: a failure must never print the output of a run.
+    const shown = (result: AppStackTaskRunIpcResult) => ({
+      outcome: result.outcome,
+      exitCode: result.exitCode,
+      empty: result.output === "",
+      truncated: result.outputTruncated,
+      leaks: JSON.stringify(result).includes(CANARY),
+      valid: AppStackTaskRunIpcResultSchema.safeParse(result).success,
+    });
+    const WITHHELD = { empty: true, truncated: true, leaks: false, valid: true };
+    const secretDir = (root: string) => path.join(root, appStackSecretDirKey(STACK, "worker"));
+
+    it("keeps nothing of what a run printed, in memory, when the container names a file from another folder", async () => {
+      const sim = await deployed();
+      const own = sim.appStacks.getAppStackSnapshot(plan.stackId)?.containers.worker?.payload.HostConfig.Binds ?? [];
+      sim.appStacks.setAppStackComponentBinds(plan.stackId, "worker", [`/var/lib/earlier-root/${appStackSecretDirKey(STACK, "worker")}/shared_key:/run/secrets/shared_key:ro`]);
+      sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 3, lines: [`key ${CANARY}`, "second line"] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: ["", ""] });
+      sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, lines: [`slow ${CANARY}`] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: ["GET / 200"] });
+      const withheld = await sim.runAppStackTask(run(1, { componentKey: "worker" }));
+      expect(shown(withheld)).toEqual({ outcome: "failed", exitCode: 3, ...WITHHELD });
+      expect(shown(await sim.runAppStackTask(run(2, { componentKey: "worker" })))).toEqual({
+        outcome: "succeeded", exitCode: 0, empty: true, truncated: false, leaks: false, valid: true,
+      });
+      expect(shown(await sim.runAppStackTask(run(3, { componentKey: "worker" })))).toMatchObject({ empty: true, truncated: false });
+      expect(shown(await sim.runAppStackTask(run(4, { componentKey: "worker" })))).toEqual({ outcome: "timed_out", exitCode: null, ...WITHHELD });
+      // web was given no secret file: its output is kept.
+      expect(await sim.runAppStackTask(run(5, { componentKey: "web" }))).toMatchObject({ output: "GET / 200", outputTruncated: false });
+      // The answer is the one read back later, and it holds nothing of the output.
+      expect(await sim.getAppStackTaskRun(readOf(1))).toEqual({ state: "finished", result: withheld });
+      // As soon as the container names its own folder again, the output is kept, masked.
+      sim.appStacks.setAppStackComponentBinds(plan.stackId, "worker", own);
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${CANARY}`] });
+      expect(await sim.runAppStackTask(run(6, { componentKey: "worker" }))).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+    });
+
+    it("keeps nothing of it on disk either once the secret folder is gone, as after a reboot, and masks again once it is back", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "hp-sim-task-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const sim = new InMemoryDockerSimulatorAdapter({ appImageAllowlist: TEST_ALLOWLIST, secretsRootDir: root });
+      await sim.pullAppStackImage({ plan, image: web.image });
+      await sim.prepareAppStack({ plan });
+      await sim.createAppStackComponents({ plan });
+      await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+      await sim.startAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SHARED] });
+      const printing = (n: number) => {
+        sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 2, lines: [`key ${CANARY}`] });
+        return sim.runAppStackTask(run(n, { componentKey: "worker" }));
+      };
+      expect(await printing(1)).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+      await rm(secretDir(root), { recursive: true, force: true });
+      expect(shown(await printing(2))).toEqual({ outcome: "failed", exitCode: 2, ...WITHHELD });
+      // What Docker does with a bind source that is missing: it makes a directory of it.
+      await mkdir(path.join(secretDir(root), "shared_key"), { recursive: true });
+      expect(shown(await printing(3))).toEqual({ outcome: "failed", exitCode: 2, ...WITHHELD });
+      await rm(secretDir(root), { recursive: true, force: true });
+      await sim.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SHARED] });
+      expect(await printing(4)).toMatchObject({ output: "key [REDACTED]", outputTruncated: false });
+    });
+
+    it("masks a value that only the environment of the container holds, once the secret folder is empty", async () => {
+      const plan2 = appStackTestPlanV2();
+      const root = await mkdtemp(path.join(os.tmpdir(), "hp-sim-task-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const sim = new InMemoryDockerSimulatorAdapter({ appImageAllowlist: TEST_ALLOWLIST, secretsRootDir: root });
+      for (const image of new Set(plan2.components.map((c) => c.image))) await sim.pullAppStackImage({ plan: plan2, image });
+      await sim.prepareAppStack({ plan: plan2 });
+      await sim.createAppStackComponents({ plan: plan2, secretContents: [...V2_CREATE_SECRETS] });
+      await sim.startAppStackComponent({ plan: plan2, componentKey: "db", secretFileContents: [v2SecretEntry("db_password"), v2SecretEntry("db_root_password")] });
+      await sim.startAppStackComponent({ plan: plan2, componentKey: "web", secretFileContents: [v2SecretEntry("app_key"), v2SecretEntry("db_password")] });
+      for (const entry of await readdir(root)) await rm(path.join(root, entry), { recursive: true, force: true });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`root ${V2_SECRET_VALUES.db_root_password}`] });
+      sim.appStackTasks.setNextAppStackTaskRun({ lines: [`key ${V2_SECRET_VALUES.app_key}`] });
+      const db = await sim.runAppStackTask(run(1, { componentKey: "db" }));
+      expect([db.output === "root [REDACTED]", db.outputTruncated, JSON.stringify(db).includes(V2_SECRET_VALUES.db_root_password)]).toEqual([true, false, false]);
+      // web was given a secret file that is gone: its values cannot be established.
+      const web2 = await sim.runAppStackTask(run(2, { componentKey: "web" }));
+      expect([web2.output === "", web2.outputTruncated, JSON.stringify(web2).includes(V2_SECRET_VALUES.app_key)]).toEqual([true, true, false]);
+    });
   });
 
   it("refuses a component that is not running, an unknown one and another customer's application", async () => {
