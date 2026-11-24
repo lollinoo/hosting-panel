@@ -63,6 +63,8 @@ export interface MockDockerDaemon {
   readonly failStarts: { remaining: number };
   /** The next `remaining` container inspects answer 500. */
   readonly failInspects: { remaining: number };
+  /** With `execUpgrade`: the next exec starts each write these frames (stream 1 or 2) and their inspect answers this ExitCode. */
+  readonly execReplies: Array<{ readonly frames: ReadonlyArray<readonly [1 | 2, string]>; readonly exitCode: number }>;
   /** With `execUpgrade`: the next `remaining` exec starts answer 500 instead of the stream. */
   readonly failExecStarts: { remaining: number };
   /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
@@ -119,6 +121,8 @@ export async function startMockDockerDaemon(options?: {
   const failStarts = { remaining: 0 };
   const failInspects = { remaining: 0 };
   const failExecStarts = { remaining: 0 };
+  const execReplies: MockDockerDaemon["execReplies"] = [];
+  const execExitCodes = new Map<string, number>();
   const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
   const failDeletes = { remaining: 0 };
   const pulledImages = new Set<string>();
@@ -234,7 +238,7 @@ export async function startMockDockerDaemon(options?: {
             : JSON.stringify(
                 options?.execStaysRunning
                   ? { Running: true, ExitCode: null }
-                  : { Running: false, ExitCode: options?.execExitCode ?? 0 },
+                  : { Running: false, ExitCode: execExitCodes.get(decodeURIComponent(execMatch[1]!)) ?? options?.execExitCode ?? 0 },
               ),
         );
         return;
@@ -643,6 +647,17 @@ export async function startMockDockerDaemon(options?: {
       socket.resume();
       socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
       execStreams.push({ execId: decodeURIComponent(execId), socket });
+      const reply = execReplies.shift();
+      if (reply) {
+        execExitCodes.set(decodeURIComponent(execId), reply.exitCode);
+        for (const [stream, text] of reply.frames) {
+          const payload = Buffer.from(text, "utf8");
+          const header = Buffer.alloc(8);
+          header[0] = stream;
+          header.writeUInt32BE(payload.length, 4);
+          socket.write(Buffer.concat([header, payload]));
+        }
+      }
     });
   }
 
@@ -673,6 +688,7 @@ export async function startMockDockerDaemon(options?: {
     failCreates,
     failStarts,
     failInspects,
+    execReplies,
     failExecStarts,
     deleteConflicts,
     failDeletes,

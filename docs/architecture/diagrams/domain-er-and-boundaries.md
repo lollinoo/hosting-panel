@@ -746,6 +746,32 @@ Note di lettura:
 - `notification_channel_alerts` è lo stato del confronto, non uno storico: una riga esiste finché l'avviso è aperto per quel canale. Il ripristino del pannello (`infra/linux/hp-restore-panel.sql`) la svuota.
 - `notification_deliveries` tiene l'esito di ogni messaggio per trenta giorni; il testo non è salvato, si riscrive dagli eventi.
 
+### 2.7 Estensione ADR-0041: sessioni di terminale nei componenti
+
+La migrazione `0030_app_terminal_sessions.sql` (`ADR-0041`) è additiva e non crea tabelle: nella tabella `admin_terminal_sessions` (`0016`, `ADR-0027`) `site_id` diventa facoltativa e si aggiungono due colonne nulle. La tabella non ha chiavi esterne, di proposito: una riga resta anche quando il sito, l'applicazione, l'utente o l'organizzazione non ci sono più.
+
+```mermaid
+erDiagram
+    admin_terminal_sessions {
+        text id PK "term_<id>"
+        text user_id "chi ha aperto; nessuna chiave esterna"
+        text site_id "sessione in un sito; NULL per un componente"
+        text stack_id "sessione in un componente; NULL per un sito"
+        text component_key "il componente; NULL per un sito"
+        text organization_id "il cliente del sito o dell'applicazione"
+        text container_name "il nome che il pannello ricava, mai un id di Docker"
+        timestamptz opened_at "DEFAULT NOW()"
+        timestamptz closed_at "NULL finche e aperta"
+        text close_reason "closed, shell_exited, idle, time_limit, container_gone, executor_gone, not_started"
+    }
+```
+
+Note di lettura:
+
+- Una sessione appartiene a un sito oppure a un componente di un'applicazione, mai a entrambi e mai a nessuno (`admin_terminal_sessions_target_check`).
+- I due limiti si contano sulle righe aperte, sotto un blocco della tabella: quattro sul server, siti e applicazioni insieme, e una per sito o per coppia applicazione e componente.
+- La riga non tiene niente di ciò che è stato digitato o stampato.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -789,6 +815,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `notification_channels` | `organization_id ... REFERENCES organizations(id) ON DELETE CASCADE` (`0029`) | I canali di un cliente spariscono con il cliente; il cancello del downgrade `notifications` conta ogni riga, accesa o spenta. |
 | `notification_channel_alerts`, `notification_deliveries` | `channel_id ... REFERENCES notification_channels(id) ON DELETE CASCADE` (`0029`) | Rimuovere un canale porta via ciò che sapeva e i suoi messaggi. |
 | `notification_deliveries` | `CHECK ck_notification_deliveries_pending`, `ck_notification_deliveries_sent` e `ck_notification_deliveries_failed` (`0029`) | Un messaggio è in attesa esattamente finché ha un prossimo tentativo e nessuna fine; uno consegnato non ha un motivo di errore e uno non consegnato ne ha sempre uno. |
+| `admin_terminal_sessions` | `CHECK admin_terminal_sessions_target_check` (`0030`) | Una sessione di terminale ha esattamente un bersaglio: un sito (`site_id`), oppure un componente di un'applicazione (`stack_id` e `component_key`). Le righe e le scritture della release precedente mettono sempre `site_id` e lo rispettano. |
 
 ---
 
@@ -827,6 +854,9 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Tre tabelle: `notification_channels` (un canale per tipo e per ambito), `notification_channel_alerts` (ciò che un canale sa già) e `notification_deliveries` (i messaggi con il loro esito).
   - Due indici unici parziali sui canali e due indici sui messaggi (`idx_notification_deliveries_due`, `idx_notification_deliveries_channel_created`).
   - Nessuna colonna, indice o trigger cambia su una tabella esistente e non c'è backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
+- **Versione 0030 (`0030_app_terminal_sessions.sql`, `ADR-0041`, additiva)**:
+  - `admin_terminal_sessions.site_id` diventa facoltativa; due colonne nulle, `stack_id` e `component_key`; il vincolo `admin_terminal_sessions_target_check`.
+  - Nessuna tabella nuova, nessun backfill e nessun cancello del downgrade: la release precedente, dopo un rollback automatico, continua a scrivere righe con `site_id` e chiude come `executor_gone` una riga di applicazione rimasta aperta.
 - **Versione 0032 (`0032_app_stack_deployment_replaced.sql`, `ADR-0035` §2.10, additiva)**:
   - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
   - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito (`NULL` per il primo deploy e per l'avvio che segue un backup o un ripristino, `ADR-0038`); un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.

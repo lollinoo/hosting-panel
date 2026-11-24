@@ -4,7 +4,7 @@ import * as React from "react";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppTemplateParameter, CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import { APP_STACK_PROCESS_MARKS, type AppTemplateParameter, type CustomerAppTemplateDto } from "@hosting-panel/contracts";
 
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
 const fetchUpstream = vi.hoisted(() => vi.fn());
@@ -320,6 +320,32 @@ describe("AppWizard markup", () => {
       [5, {}],
       [0, "domains"],
     ]);
+  });
+
+  it("Next refuses a private value or a text setting that carries a platform process mark, and says why (ADR-0041)", () => {
+    const values = secretsRef({ admin_password: "pw HP_TERMINAL_SESSION=term_", api_token: "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\n" });
+    const refused = wizard({ 1: "team-notes", 2: { title: "Board xHP_TASK_RUN=srun_1" }, 3: ["admin_password", "api_token"] }, { 0: values });
+    click(refused.tree, t.next);
+    expect(refused.sets).toEqual([[5, { "param:title": t.valueReserved, "param:admin_password": t.valueReserved }]]);
+    expect(JSON.stringify(refused.sets)).not.toContain("term_");
+    // The sentence names every mark, so it stays true when the list changes.
+    // A customer page names no internal word of the panel (m5b-web-qa): the sentence says what to look for, not the marks.
+    for (const m of [en, itMsgs]) {
+      expect(m.apps.wizard.valueReserved).toContain("«HP_»");
+      for (const mark of APP_STACK_PROCESS_MARKS) expect(m.apps.wizard.valueReserved).not.toContain(mark);
+    }
+  });
+
+  it("Next accepts text that only looks like a mark: PHP settings, other HP_ text", () => {
+    const values = secretsRef({ admin_password: "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\n", api_token: "SHP_X=1 HP_HOME=/x" });
+    for (const title of ["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "ends with HP_TERMINAL_"]) {
+      const ok = wizard({ 1: "team-notes", 2: { title }, 3: ["admin_password", "api_token"] }, { 0: values });
+      click(ok.tree, t.next);
+      expect(ok.sets, title).toEqual([
+        [5, {}],
+        [0, "domains"],
+      ]);
+    }
   });
 
   it("domains: labelled hostname and target per row, a named remove button, blank rows dropped on Next", () => {

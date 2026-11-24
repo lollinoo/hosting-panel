@@ -850,3 +850,67 @@ describe("0029 notifications", () => {
     expect(await rows(pg, "SELECT id, status FROM notification_deliveries")).toEqual([{ id: "ndl_srv", status: "pending" }]);
   });
 });
+
+describe("0030 terminal sessions of applications", () => {
+  // ADR-0041: after 0030 the previous release keeps opening, listing and closing terminal sessions.
+  const M0030 = "0030_app_terminal_sessions.sql";
+  let pg: PGlite;
+  // What the previous release runs: its insert always sets site_id and never names the two new columns.
+  const OLD_OPEN = (id: string, site: string) =>
+    `INSERT INTO admin_terminal_sessions (id, user_id, site_id, organization_id, container_name) VALUES ('${id}','u','${site}','o','hp_svc_${site}')`;
+  const OLD_CLOSE = (id: string, reason: string) => `
+    UPDATE admin_terminal_sessions SET closed_at = COALESCE(NULL::timestamptz, now()), close_reason = '${reason}'
+    WHERE id = '${id}' AND closed_at IS NULL
+    RETURNING site_id, container_name,
+      GREATEST(0, ROUND(EXTRACT(EPOCH FROM (closed_at - opened_at))))::int AS duration_seconds,
+      (SELECT u.id FROM users u WHERE u.id = user_id) AS actor_id,
+      (SELECT o.id FROM organizations o WHERE o.id = organization_id) AS organization_id`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0030);
+    await pg.exec(`${OLD_OPEN("term_before", "s_before")};`); // a row written before the migration
+    await pg.exec(read(M0030));
+    // A session the new release left open in a component before the rollback.
+    await pg.exec(`INSERT INTO admin_terminal_sessions (id, user_id, stack_id, component_key, organization_id, container_name)
+      VALUES ('term_app','u','stk_a','web','o','hp_app_stk_a_web');`);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("keeps the rows written before the migration", async () => {
+    expect(await rows(pg, "SELECT id, site_id, stack_id, component_key FROM admin_terminal_sessions WHERE id = 'term_before'")).toEqual([
+      { id: "term_before", site_id: "s_before", stack_id: null, component_key: null },
+    ]);
+  });
+
+  it("runs the previous release's open, list and close", async () => {
+    await pg.exec(`${OLD_OPEN("term_rb", "s_rb")};`);
+    // Its limits read every open row: the application's session counts as one more and matches no site.
+    expect(await rows(pg, "SELECT site_id FROM admin_terminal_sessions WHERE closed_at IS NULL ORDER BY id")).toEqual([
+      { site_id: null },
+      { site_id: "s_before" },
+      { site_id: "s_rb" },
+    ]);
+    expect(await rows(pg, OLD_CLOSE("term_rb", "closed"))).toMatchObject([{ site_id: "s_rb", container_name: "hp_svc_s_rb" }]);
+  });
+
+  it("lets the previous release's pass close the session of an application; its audit row has no target id", async () => {
+    const closed = await rows(pg, OLD_CLOSE("term_app", "executor_gone"));
+    expect(closed).toMatchObject([{ site_id: null, container_name: "hp_app_stk_a_web", actor_id: null, organization_id: null }]);
+    // The audit row the previous release writes next: target_type 'site' with a NULL target_id, which the column allows.
+    await pg.exec(`INSERT INTO audit_events (id, actor_type, action, target_type, target_id, details)
+      VALUES ('aud_rb','system','admin.terminal.close','site',NULL,'{"outcome":"succeeded"}')`);
+    expect(await rows(pg, "SELECT close_reason FROM admin_terminal_sessions WHERE id = 'term_app'")).toEqual([{ close_reason: "executor_gone" }]);
+  });
+
+  it("runs 0030 again on a table with both kinds of rows without harm", async () => {
+    await pg.exec(read(M0030));
+    expect(await rows(pg, "SELECT id FROM admin_terminal_sessions ORDER BY id")).toEqual([{ id: "term_app" }, { id: "term_before" }, { id: "term_rb" }]);
+    await expect(pg.exec("INSERT INTO admin_terminal_sessions (id, user_id, organization_id, container_name) VALUES ('term_none','u','o','c')")).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+});

@@ -610,12 +610,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
-    const target = await this.get<ContainerInspect>(
-      `/containers/${enc(appStackContainerName(req.stackId, req.componentKey))}/json`,
-      "inspect an application container",
-    );
-    if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-    if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
+    const target = await this.inspectAppStackComponentContainer(req);
     // Established before any line is read; the environment secrets come from this container, which outlives the tmpfs.
     const values = appStackLogMaskValues(
       req.componentKey,
@@ -632,6 +627,25 @@ export class AppStackEngine implements StackExecutorPort {
     if (res.statusCode === 404) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (res.statusCode !== 200) throw engineError("read service logs", res.statusCode);
     return maskedLogLines(res.body, values);
+  }
+
+  /**
+   * The container of one component, found by the name derived here and refused unless its labels say it is that
+   * component of that application of that customer (logs, and the terminal of ADR-0041). The id stays in the executor.
+   */
+  public async findAppStackComponentContainer(req: Ids & { readonly componentKey: string }): Promise<{ readonly id: string }> {
+    const target = await this.inspectAppStackComponentContainer(req);
+    return { id: target.Id };
+  }
+
+  private async inspectAppStackComponentContainer(req: Ids & { readonly componentKey: string }): Promise<ContainerInspect> {
+    const target = await this.get<ContainerInspect>(
+      `/containers/${enc(appStackContainerName(req.stackId, req.componentKey))}/json`,
+      "inspect an application container",
+    );
+    if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+    if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
+    return target;
   }
 
   private async locked<T>(stackId: string, fn: () => Promise<T>): Promise<T> {

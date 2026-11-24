@@ -79,6 +79,8 @@ export interface AppStackHarness {
   /** The executor behind the API: its `backupState` scripts the backup jobs. */
   readonly sim: InMemoryDockerSimulatorAdapter;
   readonly adminToken: string;
+  /** The server administrator: their user id and the secret of their authenticator, to make a six-digit code. */
+  readonly admin: { readonly userId: string; readonly totpSecret: string };
   /** Two owners, each with an active Dedicated allocation. */
   readonly a: HarnessCustomer;
   readonly b: HarnessCustomer;
@@ -101,6 +103,10 @@ export interface AppStackHarness {
 export async function startAppStackHarness(options?: {
   readonly appFeatures?: Partial<AppFeatureFlags>;
   readonly allowlist?: readonly AppImageAllowlistEntry[];
+  /** The simulator to run on, e.g. one with short terminal waits; a plain one when left out. */
+  readonly dockerExecutor?: InMemoryDockerSimulatorAdapter;
+  /** null starts no terminal pass, so a test runs it by hand; left out, the app keeps its own interval. */
+  readonly terminalSweepIntervalMs?: number | null;
   /** `linux-systemd` is the backend where backups exist (ADR-0038); the default has none. */
   readonly runtimeBackend?: "local-simulator" | "linux-systemd";
 }): Promise<AppStackHarness> {
@@ -108,7 +114,7 @@ export async function startAppStackHarness(options?: {
   await dbClient.migrate();
   await setupInstallation(dbClient.db, SETUP);
   const admin = await createServerAdmin(dbClient.db, KEY, { email: "admin@x.it", name: "Admin", password: PW });
-  const sim = new InMemoryDockerSimulatorAdapter();
+  const sim = options?.dockerExecutor ?? new InMemoryDockerSimulatorAdapter();
   const installed = options?.runtimeBackend === "linux-systemd";
   const app = await createControlPlaneApp({
     listen: true,
@@ -133,6 +139,7 @@ export async function startAppStackHarness(options?: {
     autoProcessOutbox: false,
     outboxPollIntervalMs: null,
     driftReconcileIntervalMs: null,
+    ...(options?.terminalSweepIntervalMs !== undefined ? { terminalSweepIntervalMs: options.terminalSweepIntervalMs } : {}),
     recoverUnknownOnStart: false,
     appFeatures: options?.appFeatures ?? { applicationTemplatesAvailable: true, applicationStacksAvailable: true },
     appTemplateValidation: { allowlist: options?.allowlist ?? APP_TEST_ALLOWLIST },
@@ -214,6 +221,7 @@ export async function startAppStackHarness(options?: {
     dbClient,
     sim,
     adminToken,
+    admin: { userId: admin.userId, totpSecret: admin.totpSecretBase32 },
     a,
     b,
     call,

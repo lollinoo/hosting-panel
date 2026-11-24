@@ -10,8 +10,18 @@ import { useLocale, useMessages } from "@/i18n/provider";
 export const APP_STACK_LOG_TAIL = 200;
 type Lines = AppStackComponentLogsDto["lines"];
 
-/** Recent lines of one component, loaded on request, newest first. */
-export function AppStackLogs({ orgId, stackId, componentKeys }: { orgId: string; stackId: string; componentKeys: string[] }) {
+/** Recent lines of one component, loaded on request, newest first. `basePath` replaces the address of the application's own routes. */
+export function AppStackLogs({
+  orgId,
+  stackId,
+  componentKeys,
+  basePath,
+}: {
+  orgId: string;
+  stackId: string;
+  componentKeys: string[];
+  basePath?: string;
+}) {
   const m = useMessages();
   const t = m.apps.logs;
   const locale = useLocale();
@@ -25,9 +35,8 @@ export function AppStackLogs({ orgId, stackId, componentKeys }: { orgId: string;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/bff/orgs/${orgId}/app-stacks/${stackId}/components/${encodeURIComponent(key)}/logs?tail=${APP_STACK_LOG_TAIL}`, {
-        cache: "no-store",
-      });
+      const base = basePath ?? `/api/bff/orgs/${orgId}/app-stacks/${stackId}`;
+      const res = await fetch(`${base}/components/${encodeURIComponent(key)}/logs?tail=${APP_STACK_LOG_TAIL}`, { cache: "no-store" });
       const body = await res.json().catch(() => null);
       if (res.ok && Array.isArray(body?.data?.lines)) setLines([...(body.data.lines as Lines)].reverse());
       else setError(res.status === 503 ? t.unavailable : res.status === 404 ? t.notFound : res.status === 429 ? t.busy : t.error);

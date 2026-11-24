@@ -157,8 +157,10 @@ describe("reapTerminalShells", () => {
     const mark = mockDaemon.requestedPaths.length;
     await adapter.reapTerminalShells();
     const paths = mockDaemon.requestedPaths.slice(mark).map((p) => decodeURIComponent(p.replace(/^\/v1\.\d+/, "")));
+    // The sites first, then the components of applications (ADR-0041): none here, so nothing more is inspected.
     expect(paths.filter((p) => p.startsWith("/containers/json"))).toEqual([
       `/containers/json?filters={"label":["${MANAGED_DOCKER_LABELS.siteId}"]}`,
+      '/containers/json?filters={"label":["io.hostingpanel.app_component"]}',
     ]);
     expect(paths.filter((p) => /^\/containers\/[^/]+\/json$/.test(p))).toEqual([
       "/containers/hp_site_a_id/json",

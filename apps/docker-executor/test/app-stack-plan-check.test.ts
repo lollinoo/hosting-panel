@@ -182,6 +182,14 @@ describe("assertExecutableAppStackPlan", () => {
     ["9 components", () => rehash({ ...plan, volumes: [], ingress: [], components: Array.from({ length: 9 }, (_, i) => ({ ...web, key: `c${i}` })) }), "components"],
     ["a /tmp mount", () => withComponents(web, { ...worker, volumes: [{ volumeKey: "data", containerPath: "/tmp", readOnly: false }] }), "components.1.volumes.0.containerPath"],
     ["sh as argv[0]", () => withComponents(web, { ...worker, argv: ["sh", "-c", "worker"] }), "components.1.argv.0"],
+    // ADR-0041: the executor does not trust the API to keep a terminal's mark out of a component's environment.
+    [
+      "a terminal's mark in an env value",
+      () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "x HP_TERMINAL_SESSION=term_" }] }, worker),
+      "components.0.environment.0.value",
+    ],
+    ["a task run's mark in an env value", () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "xHP_TASK_RUN=srun_1" }] }, worker), "components.0.environment.0.value"],
+    ["a task run's mark in argv", () => withComponents(web, { ...worker, argv: ["worker", "HP_TASK_RUN=srun_1"] }), "components.1.argv.1"],
   ])("A12: %s is refused before Docker", (_name, build, at) => {
     expect(refusal(check(build()))).toEqual({
       reason: "STACK_PLAN_INVALID",
@@ -189,6 +197,14 @@ describe("assertExecutableAppStackPlan", () => {
       message: `The application plan is invalid at ${at}`,
     });
   });
+
+  it.each(["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "SHP_X=1", "HP_HOME=/x", "ends with HP_TERMINAL_"])(
+    "accepts %j in an env value and in argv: only the marks of the platform's processes are refused",
+    (text) => {
+      const accepted = withComponents({ ...web, environment: [{ name: "APP_MODE", value: text }] }, { ...worker, argv: ["worker", text] });
+      expect(check(accepted)()).toEqual(accepted);
+    },
+  );
 
   it("refuses a component whose hp_app_<stackId>_<key> name would not fit one DNS label", () => {
     const named = (idLength: number) =>
