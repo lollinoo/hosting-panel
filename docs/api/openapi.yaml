@@ -1796,8 +1796,9 @@ paths:
       description: >-
         Server administrators only: a site with no known type is a generic service (ADR 0029), so the
         caller needs `site.create` in the organization and then the server-administrator permission, as
-        for `createService`. `site.create` is also a support visit's permission, so a server administrator
-        on an open support visit passes both checks. A member of another organization, or a server
+        for `createService`. `site.create` is also a support visit's permission, but a server administrator
+        on an open support visit gets 403 `PERMISSION_DENIED`, with a denied audit row whose reason is
+        `SUPPORT_ACCESS_PERMISSION_DENIED`, as for `createService`. A member of another organization, or a server
         administrator with no support visit or a closed one, gets 404 with no audit row; a server administrator
         whose visit ran out gets 403 `PERMISSION_DENIED`; a member with the permission who is not a server
         administrator gets 403 `PERMISSION_DENIED`. `initialDomain` is normalised and checked as the

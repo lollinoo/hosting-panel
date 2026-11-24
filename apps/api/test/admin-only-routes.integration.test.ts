@@ -172,8 +172,8 @@ describe("generic service routes and invitations are for the server administrato
       expect(res.rows[0]!.action).toBe(key);
     });
 
-    // site.create is one of a visit's permissions (the typed route needs it), so a visiting administrator reaches the site route.
-    if (key !== "site.create") it(`refuses ${what} with 403 and one SUPPORT_ACCESS_PERMISSION_DENIED row to an administrator on an open visit`, async () => {
+    // site.create is one of a visit's permissions (the typed route needs it), and the site route refuses the visit all the same.
+    it(`refuses ${what} with 403 and one SUPPORT_ACCESS_PERMISSION_DENIED row to an administrator on an open visit`, async () => {
       await visit(new Date(Date.now() + 60_000));
       const res = await answer(DEMO_IDS.users.infra, path, body);
       expect([res.status, res.body.error?.code, res.rows.length]).toEqual([403, "PERMISSION_DENIED", 1]);
@@ -186,13 +186,6 @@ describe("generic service routes and invitations are for the server administrato
       expect(res.rows[0]!.action).toBe("platform.users.manage");
     });
   }
-
-  it("lets an administrator on an open visit create a site with no type, since a visit carries site.create", async () => {
-    await visit(new Date(Date.now() + 60_000));
-    const res = await call(DEMO_IDS.users.infra, "/sites", { ...SITE_BODY, slug: "visit-site", initialDomain: "visit.example.test" });
-    expect(res.status).toBe(201);
-    expect(res.body.data.siteType).toBeNull();
-  });
 
   it("stores an administrator's first domain of a site the way the typed route writes it (L43)", async () => {
     for (const [slug, initialDomain, hostname] of [

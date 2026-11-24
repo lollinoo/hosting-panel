@@ -1015,6 +1015,8 @@ export class OrganizationsController {
       organizationId: orgId,
       permission: "site.create",
       targetType: "site",
+      // A visit carries site.create for the typed route; this route answers a visit as createService does.
+      refuseSupportVisit: true,
     });
     // A site with no known type is a generic service (ADR 0029 §2): it is the server administrator's, as createService is.
     await this.authzService.requirePlatformPermission(auth, req, "platform.users.manage", "site", null);
