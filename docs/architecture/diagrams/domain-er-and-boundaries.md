@@ -726,5 +726,5 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
 - **Versione 0032 (`0032_app_stack_deployment_replaced.sql`, `ADR-0035` §2.10, additiva)**:
   - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
-  - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito; un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.
+  - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito (`NULL` per il primo deploy e per l'avvio che segue un backup o un ripristino, `ADR-0038`); un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.
   - Nessun backfill: le righe esistenti restano `NULL` (nulla da riportare indietro) e la release precedente ignora le colonne.

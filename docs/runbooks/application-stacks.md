@@ -116,8 +116,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    one); **Reinstalla** tries that one again, the way back reinstalls the previous one. The way back only offers a
    version that ran (an install, upgrade or rollback of it succeeded, or failed only at publishing its routes once its
    components were healthy), never a failed attempt. A start of a stopped application refused before anything is
-   touched leaves it `stopped`; any other start or restart refused that way takes the status the containers show; the
-   history names the reason.
+   touched leaves it `stopped`; any other start or restart refused that way takes the status the containers show (so
+   does the start that follows a backup or a restore, which then ends `failed`: the panel stopped it, not the customer);
+   the history names the reason.
 
    **Reinstalla** (`stack.deploy`) recreates what differs from the plan; **Avvia** only starts components that exist.
    At API start, a stack left busy without an active operation becomes `failed` (`delete_failed` when it was deleting,

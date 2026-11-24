@@ -871,13 +871,13 @@ describe("@hosting-panel/database — application backups", () => {
         requestedByUserId: CUSTOMER,
         idempotencyKey: `resume:${written.operation.id}`,
       });
-      // An ordinary start: it replaces the status `stopped` and no revision (a start refused before create leaves it stopped).
+      // The platform stopped it, not the customer: no replaced status, so a resume refused before create ends failed.
       expect(queued.deployment).toMatchObject({
         operationId: queued.operation.id,
         status: "queued",
         revisionId: stack.desiredRevisionId,
         replacedRevisionId: null,
-        replacedStatus: "stopped",
+        replacedStatus: null,
       });
       expect((await stackOf(stack.id)).status).toBe("starting");
       const event = await eventOf(queued.operation.id);

@@ -338,7 +338,7 @@ async function enqueueDeployment(
     revisionId: string | null;
     /** The desired revision this request replaced with `revisionId`; null when it wrote none. */
     replacedRevisionId: string | null;
-    /** The stack status the request replaced; null for the first deploy of a create. */
+    /** The stack status the request replaced; null for the first deploy of a create and for the start after a backup. */
     replacedStatus: AppStackStatus | null;
     requestedByUserId: string | null;
     idempotencyKey: string;
@@ -654,7 +654,8 @@ export async function enqueueAppStackResumeTransactional(
     kind,
     revisionId: stack.desiredRevisionId,
     replacedRevisionId: null,
-    replacedStatus: stack.status,
+    // The platform stopped it, not the customer: a resume refused before create shows failed, never a quiet stopped.
+    replacedStatus: null,
     requestedByUserId: input.requestedByUserId,
     idempotencyKey: key,
     requestHash: createHash("sha256").update(key).digest("hex"),

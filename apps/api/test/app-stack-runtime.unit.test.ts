@@ -20,6 +20,7 @@ import {
   createAppTemplate,
   createDatabaseClient,
   enqueueAppStackOperationTransactional,
+  enqueueAppStackResumeTransactional,
   eq,
   hostAllocations,
   hosts,
@@ -705,6 +706,28 @@ describe("AppStackRuntime (RT3)", () => {
       expectFailure(await run(again), "STACK_SECRET_MISSING");
       expect((await stackOf(stackId)).status).toBe("stopped");
       expect(await deploymentOf(again)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
+    it("the start that follows a backup, refused at validate, ends failed: the platform stopped the application, not the customer", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      // The backup's stop: the containers are stopped and the application with them.
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      const queued = await db().transaction((tx) =>
+        enqueueAppStackResumeTransactional(tx, { organizationId: ORG, stackId, requestedByUserId: null, sourceOperationId: `op_backup_${String(n)}` }),
+      );
+      expect(queued?.kind).toBe("stack.start");
+      const resume: AppStackWriteResult = { stack: await stackOf(stackId), revision: null, deployment: queued!.deployment, operation: queued!.operation, idempotentReplay: false };
+
+      expectFailure(await run(resume), "STACK_SECRET_MISSING");
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect(await deploymentOf(resume)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING", replacedStatus: null });
+      expect((await opOf(queued!.operation.id)).status).toBe("failed");
     });
 
     it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {
