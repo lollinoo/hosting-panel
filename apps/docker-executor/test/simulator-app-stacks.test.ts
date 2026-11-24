@@ -448,6 +448,32 @@ describe("SimulatedAppStacks on disk", () => {
     expect(await web()).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
   });
 
+  it("recognises a secret file by where the container sees it, like the engine: from another folder it is refused (BUG-43)", async () => {
+    for (const sim of [simulator({ secretsRootDir: tempDir() }), simulator()]) {
+      await deploy(sim);
+      const own = sim.appStacks.getAppStackSnapshot(ID)?.containers.worker?.payload.HostConfig.Binds ?? [];
+      expect(own).toEqual([expect.stringMatching(new RegExp(`/app_${ID}__worker/shared_key:/run/secrets/shared_key:ro$`))]);
+      const source = own[0]!.split(":")[0]!;
+      sim.appStacks.setAppStackComponentLogs(ID, "worker", [{ at: null, stream: "stdout", text: "key=s3cr3t-content" }]);
+      sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: "GET / 200" }]);
+      const read = (componentKey: string) => sim.getAppStackComponentLogs({ ...ref, componentKey, tail: 5 });
+      // The same file name under an earlier secrets root, or in another component's folder: refused, though the
+      // component's own folder holds the file.
+      for (const elsewhere of [`/var/lib/earlier-root/app_${ID}__worker/shared_key`, source.replace(`__worker/`, `__web/`)]) {
+        sim.appStacks.setAppStackComponentBinds(ID, "worker", [`${elsewhere}:/run/secrets/shared_key:ro`]);
+        const err = await failure(read("worker"));
+        expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component worker cannot be masked" });
+        expect(JSON.stringify([String(err), err])).not.toContain("s3cr3t-content");
+      }
+      // A bind to another target is not a secret file, wherever it comes from.
+      sim.appStacks.setAppStackComponentBinds(ID, "web", ["/var/lib/elsewhere/token:/etc/token:ro", `${source}:/srv/key:ro`]);
+      expect(await read("web")).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+      // From the component's own folder: served, masked.
+      sim.appStacks.setAppStackComponentBinds(ID, "worker", own);
+      expect((await read("worker"))[0]?.text).toBe("key=[REDACTED]");
+    }
+  });
+
   it("refuses in memory too when the container was given a file the simulator does not hold yet", async () => {
     const sim = simulator();
     await deploy(sim);

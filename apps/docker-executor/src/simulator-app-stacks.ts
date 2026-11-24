@@ -191,6 +191,13 @@ export class SimulatedAppStacks implements StackExecutorPort {
     this.logs.set(appStackContainerName(stackId, componentKey), lines.map((line) => ({ ...line })));
   }
 
+  /** Test hook: the binds a component's container reports, as a container created elsewhere or earlier would. */
+  public setAppStackComponentBinds(stackId: string, componentKey: string, binds: readonly string[]): void {
+    const container = this.stacks.get(stackId)?.containers.get(componentKey);
+    if (container === undefined) return;
+    container.payload = { ...container.payload, HostConfig: { ...container.payload.HostConfig, Binds: [...binds] } };
+  }
+
   /** The applications a stack's components are attached to through a link, ascending; [] when it has none. */
   public getAppStackLinkedApplications(stackId: string): string[] {
     const linked = new Set<string>();

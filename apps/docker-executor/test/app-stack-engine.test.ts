@@ -1169,7 +1169,7 @@ describe("getAppStackComponentLogs (5.17)", () => {
       }
     });
 
-    it("never counts or reads a bind whose source is outside the component's folder", async () => {
+    it("never counts or reads a bind to another target, wherever its source is", async () => {
       const h = await setup();
       await deployed(h);
       const elsewhere = path.join(h.root, "elsewhere");
@@ -1178,26 +1178,58 @@ describe("getAppStackComponentLogs (5.17)", () => {
       const web = h.fake.containers.get(WEB)!;
       web.HostConfig = {
         Binds: [
-          `${path.join(elsewhere, "token")}:/run/secrets/token:ro`,
-          `${path.join(secretDir(h, "web"), "..", `app_${ID}__worker`, "shared_key")}:/run/secrets/shared_key:ro`,
-          `${path.join(elsewhere, "missing")}:/run/secrets/missing:ro`,
+          `${path.join(elsewhere, "token")}:/etc/token:ro`,
+          `${path.join(secretDir(h, "worker"), "shared_key")}:/srv/shared_key:ro`,
+          `${path.join(secretDir(h, "web"), "sub", "x")}:/run/secrets-old/x:ro`,
+          `${path.join(elsewhere, "missing")}:/run/secretsx`,
+          "app_data:/var/lib/data",
         ],
       };
       web.logs.push({ stream: "stdout", payload: `${AT} token=${TOKEN}\n` });
       await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: `token=${TOKEN}` }]);
     });
 
-    it("refuses a bind into the folder that is not one file of it, and an inspect whose binds cannot be read", async () => {
+    it("refuses, before any log read, a secret file bound from anywhere but that file of the component's folder", async () => {
+      // The container reads /run/secrets/<key> whatever its source: one made before the secrets root moved, or given
+      // another folder's file, is refused, though the component's own folder holds the file.
       const h = await setup();
       await deployed(h);
       logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
       const worker = h.fake.containers.get(WORKER)!;
       const own = worker.HostConfig?.Binds ?? [];
-      expect(own).toEqual([`${path.join(secretDir(h, "worker"), "shared_key")}:/run/secrets/shared_key:ro`]);
+      const file = path.join(secretDir(h, "worker"), "shared_key");
+      expect(own).toEqual([`${file}:/run/secrets/shared_key:ro`]);
+      const earlier = path.join(h.root, "earlier-root", `app_${ID}__worker`);
+      await mkdir(earlier, { recursive: true });
+      await writeFile(path.join(earlier, "shared_key"), SECRET);
+      for (const bind of [
+        `${path.join(earlier, "shared_key")}:/run/secrets/shared_key:ro`, // an earlier secrets root
+        `${path.join(secretDir(h, "web"), "shared_key")}:/run/secrets/shared_key:ro`, // another component's folder
+        `${path.join(h.root, "elsewhere", "token")}:/run/secrets/token:ro`,
+        `${path.join(secretDir(h, "worker"), "sub", "x")}:/run/secrets/x:ro`, // a nested path of its folder
+        `${secretDir(h, "worker")}:/run/secrets:ro`, // the folder itself
+        `${file}:/run/secrets/shared_key`, // writable
+        `${file}:/run/secrets/shared_key:rw`,
+        `${file}:/run//secrets/shared_key:ro`, // the same target spelled otherwise
+        `${path.join(h.root, "elsewhere")}:/run:ro`, // a folder that holds /run/secrets
+      ]) {
+        worker.HostConfig = { Binds: [bind] };
+        await expect(readOf(h, "worker"), bind).rejects.toMatchObject(unmaskable("worker"));
+      }
+      expect(readLogs(h)).toBe(false);
+      worker.HostConfig = { Binds: own };
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED]"]);
+    });
+
+    it("refuses an inspect whose binds cannot be read", async () => {
+      const h = await setup();
+      await deployed(h);
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
+      const worker = h.fake.containers.get(WORKER)!;
+      const own = worker.HostConfig?.Binds ?? [];
       for (const host of [
-        { Binds: [...own, `${secretDir(h, "worker")}:/run/secrets:ro`] },
-        { Binds: [...own, `${path.join(secretDir(h, "worker"), "sub", "x")}:/run/secrets/x:ro`] },
         { Binds: [...own, "no-target"] },
+        { Binds: [...own, `${path.join(secretDir(h, "worker"), "shared_key")}:`] },
         { Binds: [...own, 42] },
         { Binds: own.join(",") },
         null,

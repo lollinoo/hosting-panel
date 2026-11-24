@@ -1,10 +1,16 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { APP_STACK_KEY_PATTERN, APP_STACK_SECRET_CONTENT_MAX_CHARS, APP_STACK_SECRET_MIN_LENGTH } from "@hosting-panel/contracts";
+import {
+  APP_STACK_KEY_PATTERN,
+  APP_STACK_SECRET_CONTENT_MAX_CHARS,
+  APP_STACK_SECRET_DIR,
+  APP_STACK_SECRET_MIN_LENGTH,
+  appStackSecretFilePath,
+} from "@hosting-panel/contracts";
 import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 import { purgeServiceSecrets, writeServiceSecrets } from "../docker-engine-adapter.js";
 import { ExecutorCodedError } from "../traefik-config.js";
-import { decodeAppStackSecretEnvLabel } from "./container-payload.js";
+import { APP_STACK_SECRET_BIND_PATTERN, decodeAppStackSecretEnvLabel } from "./container-payload.js";
 import { APP_STACK_LABELS, appStackSecretDirKey } from "./names.js";
 
 export const APP_STACK_LOG_MASK = "[REDACTED]";
@@ -48,12 +54,23 @@ function appStackComponentSecretDir(secretsRootDir: string, stackId: string, com
   return path.join(path.resolve(secretsRootDir), appStackSecretDirKey(stackId, componentKey));
 }
 
-/** The names of the secret files a container was given, from the `HostConfig` of its inspect: the binds whose source
- *  lies inside the component's secret folder (derived here, compared resolved), each a plain file name of it. A bind
- *  elsewhere is not a secret file: it does not count and is never read. Binds null or absent is a container created
- *  with none (Docker's answer then). null when the binds cannot tell: no HostConfig, Binds not a list, an entry that is
- *  not a `source:target[:mode]` bind, or a source in the folder that is not a plain file name of it (the folder
- *  itself, a nested path). */
+/** Whether a bind to this target gives the container something under `/run/secrets`: that folder, a path under it, or a
+ *  folder holding it (`/run`, `/`), however the target is spelled. */
+function holdsAppStackSecretDir(target: string): boolean {
+  const seen = path.posix.normalize(`${target}/`); // one trailing slash: "/run/secrets/k/", "/run/", "/"
+  const dir = `${APP_STACK_SECRET_DIR}/`;
+  return seen.startsWith(dir) || dir.startsWith(seen);
+}
+
+/** The names of the secret files a container was given, from the `HostConfig` of its inspect. A secret file is known by
+ *  where the container sees it, not by where it comes from: every bind whose target holds `/run/secrets` (see
+ *  `holdsAppStackSecretDir`) must be exactly the bind the executor makes, `<component folder>/<key>:/run/secrets/<key>:ro`
+ *  (the folder derived here), and gives the name <key>. A bind to any other target is not a secret file: it does not
+ *  count. No path taken from a bind is ever opened. Binds null or absent is a container created with none (Docker's
+ *  answer then). null when the binds cannot tell, or tell of a file the executor cannot name: no HostConfig, Binds not
+ *  a list, an entry that is not a `source:target[:mode]` bind, or a bind to `/run/secrets` that is not the executor's
+ *  own (from another folder, such as an earlier secrets root, the folder itself, a nested path, writable, the target
+ *  spelled otherwise). */
 export function appStackContainerSecretFileNames(secretsRootDir: string, stackId: string, componentKey: string, hostConfig: unknown): string[] | null {
   if (typeof hostConfig !== "object" || hostConfig === null) return null;
   const binds: unknown = (hostConfig as { readonly Binds?: unknown }).Binds ?? [];
@@ -61,15 +78,14 @@ export function appStackContainerSecretFileNames(secretsRootDir: string, stackId
   const dir = appStackComponentSecretDir(secretsRootDir, stackId, componentKey);
   const names: string[] = [];
   for (const bind of binds as unknown[]) {
-    // Docker splits a bind at every colon, so a source never holds one.
-    const parts = typeof bind === "string" ? bind.split(":") : [];
-    const source = parts[0] ?? "";
-    if (parts.length < 2 || parts.length > 3 || source === "") return null;
-    if (!path.isAbsolute(source)) continue; // a named volume
-    const resolved = path.resolve(source);
-    if (resolved !== dir && !resolved.startsWith(`${dir}${path.sep}`)) continue;
-    const name = path.relative(dir, resolved);
-    if (name === "" || name.includes(path.sep)) return null;
+    if (typeof bind !== "string") return null;
+    // Docker splits a bind at every colon, so neither its source nor its target holds one.
+    const parts = bind.split(":");
+    const [source = "", target = ""] = parts;
+    if (parts.length < 2 || parts.length > 3 || source === "" || target === "") return null;
+    if (!holdsAppStackSecretDir(target)) continue;
+    const name = APP_STACK_SECRET_BIND_PATTERN.exec(bind)?.[1];
+    if (name === undefined || bind !== `${path.join(dir, name)}:${appStackSecretFilePath(name)}:ro`) return null;
     names.push(name);
   }
   return names;
@@ -124,10 +140,10 @@ export interface AppStackInspectedContainer {
   readonly hostConfig: unknown;
 }
 
-/** The values a reader of a component's output masks, from its inspected container alone: the secret files its binds
- *  name must all be in the component's folder (see `appStackContainerSecretFileNames`), else, like any value that
- *  cannot be established, it throws "cannot be masked" before a line is read. A container with no secret bind needs
- *  no folder. */
+/** The values a reader of a component's output masks, from its inspected container alone: every secret file it was
+ *  given must be bound from the component's folder and be a regular file there (see `appStackContainerSecretFileNames`),
+ *  else, like any value that cannot be established, it throws "cannot be masked" before a line is read. A container with
+ *  no secret bind needs no folder. */
 export async function appStackContainerMaskValues(
   secretsRootDir: string,
   ref: { readonly stackId: string; readonly componentKey: string },
