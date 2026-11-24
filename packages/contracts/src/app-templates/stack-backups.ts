@@ -62,6 +62,16 @@ export function appStackBackupEnqueueTarget(current: AppStackStatus): AppStackSt
   return current === "stopped" ? "stopped" : null;
 }
 
+/**
+ * Why the request transaction refuses a backup or a restore now, or null when its lock and status checks pass, like
+ * appStackEnqueueRefusal: an active operation holding the stack's lock first (`locked`), then the stored status
+ * (`status`). What only the request knows (data, destination, the backup to restore, the hourly limit) comes after.
+ */
+export function appStackBackupEnqueueRefusal(stored: AppStackStatus, locked: boolean): "locked" | "status" | null {
+  if (locked) return "locked";
+  return appStackBackupEnqueueTarget(stored) === null ? "status" : null;
+}
+
 export const APP_STACK_BACKUP_KINDS = ["manual", "pre_restore"] as const;
 export type AppStackBackupKind = (typeof APP_STACK_BACKUP_KINDS)[number];
 export const APP_STACK_BACKUP_STATUSES = ["running", "succeeded", "partial", "failed"] as const;

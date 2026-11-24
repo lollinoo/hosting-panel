@@ -2,6 +2,7 @@ import {
   effectiveComponentHealth,
   sumAppStackPlanResources,
   type AppStackAcceptedEnvelope,
+  type AppStackAllowedAction,
   type AppStackBackupDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
@@ -78,7 +79,7 @@ export function appStackDetailDto(input: {
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
   /** appStackAllowedActions for the caller, with the lock read for this detail. */
-  allowedActions: AppStackOperationKind[];
+  allowedActions: AppStackAllowedAction[];
   installed: { revisionNumber: number; templateVersionNumber: number } | null;
   platformWork: AppStackPlatformWork | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;

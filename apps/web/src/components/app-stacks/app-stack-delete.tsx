@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AppStackOperationKind, AppStackStatus } from "@hosting-panel/contracts";
+import type { AppStackAllowedAction, AppStackStatus } from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ export function AppStackDelete({
   /** The status shown, for the wording of a refusal. */
   status?: AppStackStatus;
   /** The detail's `allowedActions`: the button follows them, not the status. */
-  actions?: readonly AppStackOperationKind[];
+  actions?: readonly AppStackAllowedAction[];
 }) {
   const m = useMessages();
   const t = m.apps.delete;

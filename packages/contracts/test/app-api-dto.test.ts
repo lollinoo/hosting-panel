@@ -258,6 +258,14 @@ describe("a new web address and compression (ADR-0037)", () => {
   });
 });
 
+describe("the actions a detail offers (issue #106)", () => {
+  it("take the backup and the restore of the backups section, never work of the platform", () => {
+    const offered = AppStackDetailDtoSchema.shape.allowedActions;
+    expect(offered.safeParse(["stack.restart", "stack.backup", "stack.restore"]).success).toBe(true);
+    expect(offered.safeParse(["stack.prune"]).success).toBe(false);
+  });
+});
+
 describe("app API input schemas", () => {
   it.each(INPUTS)("%s: strict, and {} refused when a field is required", (_name, schema, valid, hasRequired) => {
     expect(schema.safeParse(valid).success).toBe(true);

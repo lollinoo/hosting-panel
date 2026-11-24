@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AppStackDetailDto, AppStackOperationKind, AppStackPlanDiffDto, AppStackStatus } from "@hosting-panel/contracts";
+import type { AppStackAllowedAction, AppStackDetailDto, AppStackPlanDiffDto, AppStackStatus } from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,7 @@ type Sent = Awaited<ReturnType<typeof keyedSend>>;
 type PlanTarget = { templateVersionId: string } | { revisionId: string };
 
 /** From the detail's `allowedActions`, never from the status shown: a crash shows failed but leaves the stored status the API decides with. */
-export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackOperationKind[]): boolean {
+export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackAllowedAction[]): boolean {
   return actions.includes(`stack.${action}`);
 }
 
@@ -37,7 +37,7 @@ export function AppStackActions({
   stackId: string;
   csrfToken: string;
   status: AppStackStatus;
-  actions: readonly AppStackOperationKind[];
+  actions: readonly AppStackAllowedAction[];
   upgrade: AppStackDetailDto["upgrade"];
   rollback: AppStackDetailDto["rollback"];
 }) {

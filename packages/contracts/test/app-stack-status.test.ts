@@ -8,6 +8,8 @@ import {
   APP_STACK_STATUSES,
   aggregateAppStackStatus,
   appStackAllowedActions,
+  appStackBackupEnqueueRefusal,
+  appStackBackupEnqueueTarget,
   appStackEnqueueRefusal,
   appStackEnqueueTarget,
   appTemplateState,
@@ -87,10 +89,28 @@ describe("application stack statuses", () => {
         expect(appStackEnqueueRefusal(kind, status, true), `${kind} ${status} locked`).toBe("locked");
         expect(appStackAllowedActions(status, false, all).includes(kind), `${kind} ${status}`).toBe(accepted);
       }
+      // A backup and a restore: the refusal their own enqueue throws with (ADR-0038).
+      const backup = appStackBackupEnqueueTarget(status) !== null;
+      expect(appStackBackupEnqueueRefusal(status, false), status).toBe(backup ? null : "status");
+      expect(appStackBackupEnqueueRefusal(status, true), `${status} locked`).toBe("locked");
+      for (const kind of ["stack.backup", "stack.restore"] as const) {
+        expect(appStackAllowedActions(status, false, all).includes(kind), `${kind} ${status}`).toBe(backup);
+      }
       expect(appStackAllowedActions(status, true, all), status).toEqual([]);
     }
     // A crashed component leaves the stored status running: restart is on offer, start is not.
-    expect(appStackAllowedActions("running", false, all)).toEqual(["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"]);
+    expect(appStackAllowedActions("running", false, all)).toEqual([
+      "stack.deploy",
+      "stack.stop",
+      "stack.restart",
+      "stack.upgrade",
+      "stack.rollback",
+      "stack.delete",
+      "stack.backup",
+      "stack.restore",
+    ]);
+    // A stored `deploying`, the lock aside: the delete only, never a backup or a restore.
+    expect(appStackAllowedActions("deploying", false, all)).toEqual(["stack.delete"]);
     expect(APP_STACK_KIND_PERMISSIONS).toEqual({
       "stack.deploy": "app.control",
       "stack.start": "app.control",
@@ -99,7 +119,10 @@ describe("application stack statuses", () => {
       "stack.upgrade": "app.update",
       "stack.rollback": "app.update",
       "stack.delete": "app.delete",
+      "stack.backup": "app.control",
+      "stack.restore": "app.control",
     });
+    expect(appStackAllowedActions("stopped", false, (p) => p === "app.control")).toEqual(["stack.deploy", "stack.start", "stack.backup", "stack.restore"]);
     expect(appStackAllowedActions("running", false, (p) => p === "app.update")).toEqual(["stack.upgrade", "stack.rollback"]);
     expect(appStackAllowedActions("running", false, (p) => p === "app.delete")).toEqual(["stack.delete"]);
     expect(appStackAllowedActions("running", false, () => false)).toEqual([]);

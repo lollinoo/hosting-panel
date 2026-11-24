@@ -8,7 +8,7 @@ import { AppStackPlanIngressSchema } from "./plan.js";
 import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
-import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
+import { APP_STACK_ALLOWED_ACTION_KINDS, APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
   APP_STACK_RETENTION_POLICIES,
@@ -154,9 +154,10 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   createdAt: IsoDateTimeSchema,
   activeOperationId: OperationIdSchema.nullable(), // the customer's own operation only
   platformWork: z.enum(APP_STACK_PLATFORM_WORK).nullable(), // the application is busy with work of the platform
-  // what the API accepts now from this caller (appStackAllowedActions: stored status, lock, permissions); upgrade and
-  // rollback also need their target below; [] while an operation holds the application
-  allowedActions: z.array(z.enum(APP_STACK_OPERATION_KINDS)),
+  // what the stored status, the lock and this caller's permissions allow now (appStackAllowedActions); a request can
+  // still be refused for a reason of its own; upgrade and rollback also need their target below; [] while an operation
+  // holds the application
+  allowedActions: z.array(z.enum(APP_STACK_ALLOWED_ACTION_KINDS)),
   outcomeUnknown: z.boolean(), // the stored status is `unknown`: the outcome of an operation is not known (not a stale reading)
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
   // desired plan order; a draft: spec services by key

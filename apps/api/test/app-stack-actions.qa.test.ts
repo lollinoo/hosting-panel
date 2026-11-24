@@ -25,8 +25,8 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
 
 /** storage (volume `data`) <- worker: the storage is essential, its crash shows the application failed. */
 const BASE = APP_BUILT_IN_TEMPLATES[1]!.source;
-/** What a settled application whose stored status is `running` or `degraded` accepts, for its owner. */
-const LIVE = ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"];
+/** What a settled application whose stored status is `running` or `degraded` allows its owner, backups included. */
+const LIVE = ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"];
 
 describe("the actions an application offers are the ones the API accepts (issue #106)", () => {
   let h: AppStackHarness;

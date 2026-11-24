@@ -250,7 +250,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) => {
+    return this.#queueBackup(req, orgId, stackId, "stack.backup", (ctx, stack, requester) => {
       CreateAppStackBackupInputSchema.parse(raw ?? {});
       return this.backups.create(ctx, stack, requester);
     });
@@ -266,7 +266,7 @@ export class AppStacksController {
     @Param("backupId") backupId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) =>
+    return this.#queueBackup(req, orgId, stackId, "stack.restore", (ctx, stack, requester) =>
       this.backups.restore(ctx, stack, backupId, RestoreAppStackBackupInputSchema.parse(raw ?? {}), requester),
     );
   }
@@ -295,9 +295,10 @@ export class AppStacksController {
     req: FastifyRequest,
     orgId: string,
     stackId: string,
+    kind: "stack.backup" | "stack.restore",
     run: (ctx: AppStackRequestContext, stack: AppStackRow, requester: AppStackBackupRequester) => Promise<AppStackWriteResult>,
   ): Promise<AppStackAcceptedEnvelope> {
-    const auth = await this.#guard(req, orgId, "app.control", stackId);
+    const auth = await this.#guard(req, orgId, APP_STACK_KIND_PERMISSIONS[kind], stackId);
     const ctx = this.#context(auth, req, orgId, requireIdempotencyKey(headersOf(req)));
     const stack = await this.stacks.require(orgId, stackId);
     const limited = !(auth.principal.globalRoles ?? []).includes("infrastructure_admin");
