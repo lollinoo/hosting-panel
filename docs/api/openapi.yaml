@@ -14392,8 +14392,9 @@ components:
             outcomeUnknown:
               type: boolean
               description: >-
-                The outcome of an operation of the application is not known (its stored status is `unknown` until recovery
-                settles it). `false` when `status` reads `unknown` only because the components could not be read lately
+                The outcome of the application's last operation is not known: its stored status is `unknown` (an
+                operation in doubt until recovery settles it, or a stop interrupted by an API restart). `false` when
+                `status` reads `unknown` only because the components could not be read lately
             revisionNumber:
               type: integer
               minimum: 1

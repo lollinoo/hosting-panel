@@ -98,6 +98,18 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    then the customer acts again from the application page with the status it shows. A stack can also read `unknown`
    with no open operation (an interrupted stop, repaired at API start): then **Avvia**, **Arresta**, **Riavvia**,
    **Reinstalla** and delete are all allowed.
+
+   The page enables only the buttons the API accepts at that moment: `allowedActions` of
+   `GET /v1/organizations/<orgId>/app-stacks/<stackId>`, worked out from the stored status, the stack's lock and the
+   reader's permissions, never from the status shown. While an operation holds the stack the list is empty. Two cases
+   read differently on the page than in the database:
+   - **A component crashed.** The page reads «Non riuscita» (`failed`) while the stored status stays `running` or
+     `degraded`: **Avvia** stays disabled and **Riavvia** brings the application back (it restarts every component, and
+     a stopped or crashed one starts again).
+   - **«Esito da verificare» with no operation in doubt.** The panel has no fresh reading of the components (none in the
+     last 5 minutes, or the last one failed; `outcomeUnknown` is `false` in the detail): the page says the state could
+     not be read lately and offers the actions of the stored status. Check the executor (procedure 2 step 3); the next
+     good reading puts the status back.
 5. **A stack in `failed`.** The history on the application page names the reason (the stable code is the `problem` of
    `GET /v1/organizations/<orgId>/app-stacks/<stackId>/deployments`):
    - `STACK_SECRET_MISSING`: set the value in **Valori riservati**, then **Reinstalla**;
