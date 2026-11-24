@@ -9857,7 +9857,7 @@ paths:
           description: >-
             The body does not fit the channel, or (`VALIDATION_ERROR`, `details[0].message`) `address_required`,
             `address_not_allowed` (the address resolves to one the panel never calls), `address_unreachable` (the name
-            does not resolve), `bot_token_required` or `group_not_available`
+            does not resolve, or the panel could not check it), `bot_token_required` or `group_not_available`
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -9993,7 +9993,7 @@ paths:
           description: >-
             The body does not fit the channel, or (`VALIDATION_ERROR`, `details[0].message`) `address_required`,
             `address_not_allowed` (the address resolves to one the panel never calls), `address_unreachable` (the name
-            does not resolve), `bot_token_required` or `group_not_available`
+            does not resolve, or the panel could not check it), `bot_token_required` or `group_not_available`
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"

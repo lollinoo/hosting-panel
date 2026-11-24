@@ -11,6 +11,7 @@ import {
   SetAppStackSecretInputSchema,
   type AppTemplateParameter,
   type AppTemplateParameterEntry,
+  type CreateAppStackInput,
   type CustomerAppTemplateDto,
 } from "@hosting-panel/contracts";
 import { Button } from "@/components/ui/button";
@@ -86,8 +87,15 @@ export function wizardErrorView(
 
 type Envelope = { data?: { stackId?: unknown }; error?: { code?: string; details?: { field?: string; reason?: string }[] } } | null;
 
-/** keyedSend, but a refusal keeps every detail so the form can point at each field. */
-async function post(keys: Record<string, string>, csrfToken: string, name: string, url: string, body: unknown): Promise<{ ok: boolean; data: Envelope }> {
+/** keyedSend, but a refusal keeps every detail so the form can point at each field. `known` is false when the key is kept: whether the request took effect is unknown. `settles` names the refusals that end the request for good. */
+async function post(
+  keys: Record<string, string>,
+  csrfToken: string,
+  name: string,
+  url: string,
+  body: unknown,
+  settles: (status: number, data: Envelope) => boolean = renewKeyAfter,
+): Promise<{ ok: boolean; known: boolean; status: number; data: Envelope }> {
   const key = (keys[name] ??= crypto.randomUUID());
   try {
     const res = await fetch(url, {
@@ -96,12 +104,21 @@ async function post(keys: Record<string, string>, csrfToken: string, name: strin
       body: JSON.stringify(body),
     });
     const data = (await res.json().catch(() => null)) as Envelope;
-    if (res.ok || renewKeyAfter(res.status)) delete keys[name];
-    return { ok: res.ok, data };
+    // A success whose body is lost names nothing the page can go on with: the key stays so a retry replays it.
+    const known = (res.ok && data !== null) || settles(res.status, data);
+    if (known) delete keys[name];
+    return { ok: res.ok, known, status: res.status, data };
   } catch {
-    return { ok: false, data: null };
+    return { ok: false, known: false, status: 0, data: null };
   }
 }
+
+/** A retried create is settled only by a refusal of its content; a session, access or rate answer says nothing of the attempt before it. */
+const refusesCreate = (status: number, data: Envelope) =>
+  // Only an application that holds the key answers a create this way: the first attempt may well have made it.
+  (status === 400 || status === 409 || status === 422) && data?.error?.code !== "IDEMPOTENCY_CONFLICT";
+/** Codes whose own sentence would say more than anyone knows here: «not found» reads as «no application», «key already used» as «reload and try again». */
+const UNKNOWN_CODES = new Set(["NOT_FOUND", "IDEMPOTENCY_CONFLICT"]);
 
 const selectClass = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm";
 const noteClass = (error: string | undefined) => (error ? "text-xs text-destructive" : "text-xs text-muted-foreground");
@@ -118,14 +135,27 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [createdStackId, setCreatedStackId] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string[]>([]);
+  // A create sent whose outcome is unknown: Retry sends this very body under the same key, so it replays instead of creating a second application.
+  const [unsure, setUnsure] = useState<CreateAppStackInput | null>(null);
   const secretValues = useRef(new Map<string, string>());
   const keys = useRef<Record<string, string>>({});
+  // Typed again after the application exists; an empty field keeps the value typed before.
+  const retyped = useRef(new Map<string, string>());
   useEffect(() => {
     const values = secretValues.current;
-    return () => values.clear();
+    const again = retyped.current;
+    return () => {
+      values.clear();
+      again.clear();
+    };
   }, []);
 
   const t = m.apps.wizard;
+  // Once the application exists what was sent is final: the earlier steps are closed and only the private values left are open.
+  const finishing = createdStackId !== null;
+  // Until the create's outcome is known nothing may change: any change would go out under the same key.
+  const view: WizardStep = finishing || unsure ? "install" : step;
   const params = entry.parameters.filter((p) => p.customer);
   const secretKeys = params.filter((p) => p.type === "secret").map((p) => p.key);
   const entries = buildAppParameterEntries(params, inputs);
@@ -138,6 +168,10 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     if (v) secretValues.current.set(key, v);
     else secretValues.current.delete(key);
     setTypedSecrets(secretKeys.filter((k) => (k === key ? v !== "" : typedSecrets.includes(k))));
+  };
+  const retypeSecret = (key: string, v: string) => {
+    if (v) retyped.current.set(key, v);
+    else retyped.current.delete(key);
   };
   const setRow = (i: number, row: DomainRow) => setDomains(domains.map((r, j) => (j === i ? row : r)));
 
@@ -180,14 +214,26 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     const base = `/api/bff/orgs/${orgId}/app-stacks`;
     let id = createdStackId;
     if (id === null) {
-      const r = await post(keys.current, csrfToken, "create", base, {
+      const body: CreateAppStackInput = unsure ?? {
         templateVersionId: entry.versionId,
         name: name.trim(),
         parameters: entries,
         domains: domainEntries,
         deploy: typedSecrets.length === 0,
-      });
+      };
+      const r = await post(keys.current, csrfToken, "create", base, body, unsure ? refusesCreate : renewKeyAfter);
       const created = r.ok ? r.data?.data?.stackId : undefined;
+      if (typeof created !== "string" && !r.known) {
+        setUnsure(body);
+        const code = r.data?.error?.code;
+        // A 4xx here is about the session, the access or the pace, not the create: its own sentence when the panel has one.
+        const own = code && !UNKNOWN_CODES.has(code) && renewKeyAfter(r.status) ? appStackRefusalText(m, code, r.data?.error?.details?.[0]?.reason) : null;
+        // Signed out, every Retry here is refused: the list, after signing in again, is where to look.
+        setError(r.status === 401 ? t.createSignedOut : own && own !== m.errors.generic ? own : t.createUnknown);
+        setBusy(false);
+        return;
+      }
+      setUnsure(null);
       if (typeof created !== "string") {
         const view = wizardErrorView(m, r.data?.error?.code ?? "", r.data?.error?.details ?? []);
         setError(view.error);
@@ -198,20 +244,34 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       }
       id = created;
       setCreatedStackId(id);
-      if (typedSecrets.length === 0) return router.push(detailHref(id));
+      if (body.deploy) return router.push(detailHref(id));
+    }
+    // A value typed again gets the check Next gave the first one: the server refuses a platform mark with no reason a page can show.
+    const reserved = typedSecrets.filter((k) => APP_STACK_PROCESS_MARK_PATTERN.test(retyped.current.get(k) ?? ""));
+    if (reserved.length > 0) {
+      setFieldErrors(Object.fromEntries(reserved.map((k) => [`param:${k}`, t.valueReserved])));
+      setError(t.secretFailed);
+      setBusy(false);
+      return;
     }
     const at = `${base}/${encodeURIComponent(id)}`;
     let remaining = typedSecrets;
+    let done = saved;
     for (const key of typedSecrets) {
-      const r = await post(keys.current, csrfToken, `secret:${key}`, `${at}/secrets`, { parameterKey: key, value: secretValues.current.get(key) });
+      const value = retyped.current.get(key) ?? secretValues.current.get(key);
+      const r = await post(keys.current, csrfToken, `secret:${key}`, `${at}/secrets`, { parameterKey: key, value });
       if (!r.ok) {
+        setFieldErrors({ [`param:${key}`]: appStackRefusalText(m, r.data?.error?.code ?? "", r.data?.error?.details?.[0]?.reason) });
         setError(t.secretFailed);
         setBusy(false);
         return;
       }
       secretValues.current.delete(key);
+      retyped.current.delete(key);
       remaining = remaining.filter((k) => k !== key);
+      done = [...done, key];
       setTypedSecrets(remaining);
+      setSaved(done);
     }
     const r = await post(keys.current, csrfToken, "deploy", `${at}/deploy`, {});
     if (!r.ok) {
@@ -220,6 +280,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       return;
     }
     secretValues.current.clear();
+    retyped.current.clear();
     router.push(detailHref(id));
   }
 
@@ -241,7 +302,9 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           autoComplete="new-password"
           spellCheck={false}
           maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
-          onChange={(e) => typeSecret(p.key, e.target.value)}
+          // The loop reads each value at its turn: one typed while an earlier one is sent would go out half-typed.
+          disabled={busy}
+          onChange={(e) => (finishing ? retypeSecret : typeSecret)(p.key, e.target.value)}
         />
       );
     } else {
@@ -284,20 +347,56 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
   };
 
   const shownValue = (p: AppTemplateParameter) => {
-    if (p.type === "secret") return typedSecrets.includes(p.key) ? t.secretSet : t.secretUnset;
+    if (p.type === "secret") {
+      if (saved.includes(p.key)) return t.secretSaved;
+      if (!typedSecrets.includes(p.key)) return t.secretUnset;
+      return finishing ? t.secretPending : t.secretSet;
+    }
     const given = entries.find((e) => e.key === p.key);
     return given ? String(given.value) : format(t.defaultValue, { value: String(p.default) });
   };
 
+  const summary = (
+    <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
+      <dt className="font-medium">{t.name}</dt>
+      <dd>{name.trim()}</dd>
+      <dt className="font-medium">{m.apps.list.col.version}</dt>
+      <dd>{format(t.versionLine, { name: entry.name, n: entry.versionNumber })}</dd>
+      {params.map((p) => (
+        <Fragment key={p.key}>
+          <dt className="font-medium">{p.label}</dt>
+          <dd>{shownValue(p)}</dd>
+        </Fragment>
+      ))}
+      <dt className="font-medium">{m.apps.detail.section.domains}</dt>
+      <dd>
+        {domainEntries.length === 0 ? (
+          m.apps.list.noAddress
+        ) : (
+          <ul>
+            {domainEntries.map((d) => (
+              <li key={d.hostname}>
+                {d.hostname}
+                {entry.ingress.length > 1 ? ` · ${targetText(d)}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+      </dd>
+      <dt className="font-medium">{m.apps.detail.section.resources}</dt>
+      <dd>{format(m.apps.resources.total, { cpu: formatCpu(entry.cpuMilli), memory: formatMemory(entry.memoryBytes) })}</dd>
+    </dl>
+  );
+
   return (
     <div className="space-y-6">
-      <WizardSteps current={step} />
+      <WizardSteps current={view} />
       <h1 className="text-2xl font-bold tracking-tight">{entry.name}</h1>
       <section aria-labelledby="app-step-title" className="space-y-4">
         <h2 id="app-step-title" className="text-lg font-medium">
-          {t.step[step]}
+          {t.step[view]}
         </h2>
-        {step === "configure" && (
+        {view === "configure" && (
           <>
             <div className="space-y-2">
               <Label htmlFor="app-name">{t.name}</Label>
@@ -317,7 +416,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
             {params.map(parameterField)}
           </>
         )}
-        {step === "domains" &&
+        {view === "domains" &&
           (entry.ingress.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t.noDomains}</p>
           ) : (
@@ -374,39 +473,19 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
               )}
             </>
           ))}
-        {step === "review" && (
+        {view === "review" && (
           <>
-            <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[auto_1fr]">
-              <dt className="font-medium">{t.name}</dt>
-              <dd>{name.trim()}</dd>
-              <dt className="font-medium">{m.apps.list.col.version}</dt>
-              <dd>{format(t.versionLine, { name: entry.name, n: entry.versionNumber })}</dd>
-              {params.map((p) => (
-                <Fragment key={p.key}>
-                  <dt className="font-medium">{p.label}</dt>
-                  <dd>{shownValue(p)}</dd>
-                </Fragment>
-              ))}
-              <dt className="font-medium">{m.apps.detail.section.domains}</dt>
-              <dd>
-                {domainEntries.length === 0 ? (
-                  m.apps.list.noAddress
-                ) : (
-                  <ul>
-                    {domainEntries.map((d) => (
-                      <li key={d.hostname}>
-                        {d.hostname}
-                        {entry.ingress.length > 1 ? ` · ${targetText(d)}` : ""}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </dd>
-              <dt className="font-medium">{m.apps.detail.section.resources}</dt>
-              <dd>{format(m.apps.resources.total, { cpu: formatCpu(entry.cpuMilli), memory: formatMemory(entry.memoryBytes) })}</dd>
-            </dl>
+            {summary}
             <p className="text-sm text-muted-foreground">{t.dataNote}</p>
             <p className="text-sm text-muted-foreground">{t.backupNote}</p>
+          </>
+        )}
+        {unsure && summary}
+        {finishing && (
+          <>
+            <p className="text-sm">{t.created}</p>
+            {summary}
+            {params.filter((p) => typedSecrets.includes(p.key)).map(parameterField)}
           </>
         )}
       </section>
@@ -416,15 +495,19 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       {error && (
         <div role="alert" className="space-y-1 text-sm text-destructive">
           <p>{error}</p>
-          {createdStackId && (
-            <Link href={detailHref(createdStackId)} className="font-medium underline">
-              {t.openApp}
-            </Link>
-          )}
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {step === "configure" ? (
+        {finishing ? (
+          <Button asChild variant="outline">
+            <Link href={detailHref(createdStackId)}>{t.openApp}</Link>
+          </Button>
+        ) : unsure ? (
+          // The key lives in this page only: the list is where to look before installing again from elsewhere.
+          <Button asChild variant="outline">
+            <Link href="/apps">{t.appsLink}</Link>
+          </Button>
+        ) : view === "configure" ? (
           <Button asChild variant="outline">
             <Link href="/apps/new">{t.back}</Link>
           </Button>
@@ -433,7 +516,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
             {t.back}
           </Button>
         )}
-        {step === "review" ? (
+        {view === "review" ? (
           <Button
             type="button"
             disabled={busy}
@@ -444,7 +527,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           >
             {t.install}
           </Button>
-        ) : step === "install" ? (
+        ) : view === "install" ? (
           error && (
             <Button type="button" disabled={busy} onClick={install}>
               {t.retry}
