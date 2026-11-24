@@ -81,7 +81,7 @@ describe("the built-in application templates", () => {
     const plan = planOf(seed("mariadb"));
     expect(plan.components.map((c) => c.key)).toEqual(["db"]);
     const db = component(plan, "db");
-    expect(db?.image).toBe("mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3");
+    expect(db?.image).toBe("docker.io/library/mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3");
     expect(db?.runAsUser).toBe("999:999");
     expect(db?.argv).toEqual(["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]);
     expect(db?.environment).toEqual([
@@ -104,7 +104,7 @@ describe("the built-in application templates", () => {
     const plan = planOf(seed("postgresql"));
     expect(plan.components.map((c) => c.key)).toEqual(["db"]);
     const db = component(plan, "db");
-    expect(db?.image).toBe("postgres@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1");
+    expect(db?.image).toBe("docker.io/library/postgres@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1");
     expect(db?.runAsUser).toBe("999:999");
     expect(db?.argv).toEqual(["postgres"]);
     expect(db?.environment).toEqual([
