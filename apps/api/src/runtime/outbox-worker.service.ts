@@ -1088,7 +1088,7 @@ export class OutboxWorkerService {
               ? await this.#wordpressApplier.recover(op)
               : op.kind === WORDPRESS_IMPORT_KIND
                 ? await this.#wordpressImportApplier.recover(op)
-                : await this.#backupsApplier.recover(op);
+                : await this.#backupsApplier.recover(op, this.recoveryReads);
           if (outcome === "pending") {
             continue;
           }
