@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### An upgrade asks for the private values the new version adds (2026-11-24)
+*hosting-panel v0.17.1*
+
+**Bug Fixes & Stability**
+- **apps**: An upgrade asks for the private values the new version adds
+
+---
+
 ### One-image template form for the administrator (2026-11-24)
 *hosting-panel v0.17.0*
 
