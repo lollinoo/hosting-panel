@@ -73,6 +73,8 @@ import {
 const FAILURE_WINDOW_MS = 10 * 60_000;
 const OBSERVED_STATUSES: AppStackStatus[] = ["running", "degraded", "failed", "unknown"];
 const noActiveOperation = sql`NOT EXISTS (SELECT 1 FROM ${operations} WHERE ${operations.lockKey} = 'stack:' || ${appStacks.id} AND ${inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])})`;
+/** What makes a stack worth reading; the write checks it again, because the read in between takes seconds. */
+const observable = and(isNull(appStacks.deletedAt), isNotNull(appStacks.appliedRevisionId), inArray(appStacks.status, OBSERVED_STATUSES), noActiveOperation);
 const hasDomainRows = sql<boolean>`EXISTS (SELECT 1 FROM ${appStackDomains} WHERE ${appStackDomains.stackId} = ${appStacks.id})`;
 
 interface StackRef {
@@ -278,9 +280,7 @@ export class AppStackObserverService {
     const candidates: StackRef[] = await db
       .select({ stackId: appStacks.id, organizationId: appStacks.organizationId, appliedRevisionId: appStacks.appliedRevisionId })
       .from(appStacks)
-      .where(
-        and(isNull(appStacks.deletedAt), isNotNull(appStacks.appliedRevisionId), inArray(appStacks.status, OBSERVED_STATUSES), noActiveOperation),
-      )
+      .where(observable)
       .orderBy(sql`${oldest} ASC NULLS FIRST`, asc(appStacks.id))
       .limit(APP_STACK_OBSERVE_BATCH);
     const passStart = Date.now();
@@ -289,18 +289,27 @@ export class AppStackObserverService {
       const work = async () => {
         const plan = await this.#appliedPlan(stack);
         if (plan === null) return;
+        // The reading is as old as the moment its read began: a change that settles during the read is newer than it.
+        const readAt = new Date(now.getTime() + (Date.now() - passStart));
         const observed = await port.getAppStackStatus({ stackId: stack.stackId, organizationId: stack.organizationId }).catch(() => null);
-        await db.transaction((tx) =>
-          recordAppStackComponentHealthTransactional(tx, {
+        await db.transaction(async (tx) => {
+          // Lock the row, then look again in a second statement (a single locking select would test the old snapshot): a
+          // stop, a delete or an operation that committed during the read is seen, one that comes later waits for this commit.
+          const scope = and(eq(appStacks.id, stack.stackId), eq(appStacks.organizationId, stack.organizationId));
+          const [locked] = await tx.select({ id: appStacks.id }).from(appStacks).where(scope).for("update");
+          if (locked === undefined) return;
+          const [still] = await tx.select({ id: appStacks.id }).from(appStacks).where(and(scope, observable)).limit(1);
+          if (still === undefined) return;
+          await recordAppStackComponentHealthTransactional(tx, {
             organizationId: stack.organizationId,
             stackId: stack.stackId,
-            observedAt: now,
+            observedAt: readAt,
             components:
               observed === null
                 ? plan.components.map((c) => ({ componentKey: c.key, health: "unknown" as const }))
                 : appStackHealthRows(plan, observed, "observer"),
-          }),
-        );
+          });
+        });
       };
       await work().catch(() => undefined);
     }
