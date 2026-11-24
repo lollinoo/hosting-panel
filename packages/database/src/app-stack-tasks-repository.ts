@@ -1,8 +1,9 @@
 // Tasks of applications (ADR-0042): the schedule of a task, its runs and the request side of a run.
 // A run waits for the lane of tasks under a lock of its own (one run waiting or running per application) and takes the
 // application's lock only when it begins. Lock order: app_stacks row FOR UPDATE → app_stack_task_schedules row FOR
-// UPDATE. No function here takes or returns a command: the command of a task is read from the template when the run
-// begins. What a run printed lives only in its row.
+// UPDATE; without the app_stacks row, a run's row before its schedule's (the order of the trigger of 0031). No function
+// here takes or returns a command: the command of a task is read from the template when the run begins. What a run
+// printed lives only in its row.
 
 import {
   APP_STACK_BUSY_STATUSES,
@@ -510,6 +511,8 @@ export async function closeAppStackTaskSlot(db: DatabaseExecutor, input: SlotSco
  * started, goes: a skipped time is written on its schedule, not as a run. False, with nothing written, for a run that is
  * not a queued run of a schedule, or when the schedule has moved on since (changed, or a later time served). Call it in
  * the transaction that closes the run's operation.
+ * The run's row is locked before the schedule's row, in the order of the trigger that forgets the tasks of a deleted
+ * application (its runs, then its schedules): the delete of an application never waits on this in a cycle.
  */
 export async function reopenAppStackTaskSlot(
   db: DatabaseExecutor,
@@ -518,7 +521,8 @@ export async function reopenAppStackTaskSlot(
   const [run] = await db
     .select({ stackId: appStackTaskRuns.stackId, taskKey: appStackTaskRuns.taskKey, slotAt: appStackTaskRuns.slotAt, status: appStackTaskRuns.status })
     .from(appStackTaskRuns)
-    .where(eq(appStackTaskRuns.id, input.runId));
+    .where(eq(appStackTaskRuns.id, input.runId))
+    .for("update");
   if (!run || run.status !== "queued" || run.slotAt === null) return false;
   const reopened = await db
     .update(appStackTaskSchedules)

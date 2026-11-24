@@ -135,6 +135,23 @@ describe("@hosting-panel/database — tasks of applications", () => {
     return result.run.id;
   }
 
+  /** The SQL of each statement `work` sends outside a transaction (drizzle hands each one to the client's `query`). */
+  async function statementsOf(work: () => Promise<unknown>): Promise<string[]> {
+    const pg = (db() as unknown as { $client: { query: (...args: unknown[]) => Promise<unknown> } }).$client;
+    const query = pg.query;
+    const seen: string[] = [];
+    pg.query = (...args: unknown[]) => {
+      seen.push(String(args[0]));
+      return query.apply(pg, args);
+    };
+    try {
+      await work();
+    } finally {
+      pg.query = query;
+    }
+    return seen;
+  }
+
   const scheduleOf = async (stackId: string, taskKey: string) =>
     (await db().select().from(appStackTaskSchedules).where(eq(appStackTaskSchedules.stackId, stackId))).find((row) => row.taskKey === taskKey) ?? null;
   const runsOf = (stackId: string) => db().select().from(appStackTaskRuns).where(eq(appStackTaskRuns.stackId, stackId));
@@ -942,7 +959,17 @@ describe("@hosting-panel/database — tasks of applications", () => {
       const stopD = await stop(D, "tk-wait-stop-d");
       expect(await begin(D, run)).toEqual({ outcome: "refused", reason: "busy" });
       // The time is owed again with its reason, and its run that never started goes: a skipped time is not a run.
-      expect(await reopenAppStackTaskSlot(db(), { runId: run.runId, reason: "busy" })).toBe(true);
+      let reopened: boolean | null = null;
+      const statements = await statementsOf(async () => {
+        reopened = await reopenAppStackTaskSlot(db(), { runId: run.runId, reason: "busy" });
+      });
+      expect(reopened).toBe(true);
+      // The run's row is locked before the schedule's: the order of the trigger that forgets a deleted application's
+      // tasks (its runs, then its schedules), so the two never wait on each other.
+      const runLocked = statements.findIndex((s) => /from "app_stack_task_runs".* for update$/is.test(s.trim()));
+      const scheduleChanged = statements.findIndex((s) => /^update "app_stack_task_schedules"/i.test(s.trim()));
+      expect(runLocked, statements.join("\n")).toBeGreaterThanOrEqual(0);
+      expect(runLocked).toBeLessThan(scheduleChanged);
       expect(await scheduleOf(D, "cleanup")).toMatchObject({ servedSlotAt: null, skippedSlotAt: S, skipReason: "busy" });
       expect(await runsOf(D)).toEqual([]);
       expect(await reopenAppStackTaskSlot(db(), { runId: run.runId, reason: "busy" })).toBe(false);
