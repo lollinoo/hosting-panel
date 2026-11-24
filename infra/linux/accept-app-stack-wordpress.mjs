@@ -957,8 +957,14 @@ async function main() {
       const mark = gateLog.length;
       const db = componentOf(planA, T.db);
       const wp = componentOf(planA, WORDPRESS);
+      // A volume no component mounts is refused as a plan, before the image is read: the bare plan drops it too.
+      const bare = rehash({
+        ...planA,
+        components: planA.components.map((c) => (c.key === T.db ? { ...c, volumes: [] } : c)),
+        volumes: planA.volumes.filter((v) => v.key !== db.volumes[0].volumeKey),
+      });
       const refusals = [
-        ["the database without any volume", withComponent(planA, T.db, { volumes: [] }), db.image, "/var/lib/mysql"],
+        ["the database without any volume", bare, db.image, "/var/lib/mysql"],
         ["wordpress with its volume one level up", withComponent(planA, WORDPRESS, { volumes: [{ ...wp.volumes[0], containerPath: "/var/www" }] }), wp.image, "/var/www/html"],
       ];
       for (const [what, plan, image, folder] of refusals) {

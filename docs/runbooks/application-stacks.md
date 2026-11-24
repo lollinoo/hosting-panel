@@ -141,7 +141,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    `docker image inspect --format '{{json .Config.Volumes}}' <image>` (the image of the component, as pinned by digest in
    the template). The fix is a new template version that gives each folder listed a volume whose `containerPath` is
    exactly that folder, which the customer then upgrades to. What an earlier container wrote to the hidden area is not
-   carried over to the new volume: the template author decides whether that data matters before publishing.
+   carried over to the new volume: the template author decides whether that data matters before publishing. A folder the
+   image declares at or under `/run` or `/tmp`, or at another path a volume may not use, cannot be covered: the panel
+   cannot run that image, and the template needs another one.
 
    An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
    request replaced: the version, settings, components and quota asked for before that request (usually those of the
