@@ -6578,7 +6578,10 @@ paths:
         The component and port must be an entry point of the application (`VALIDATION_ERROR`,
         `details[0].reason: unknown_ingress`); at most 8 web addresses (`details[0].field: domains`,
         `details[0].reason: STACK_QUOTA_EXCEEDED`). A hostname already on this application adds nothing and writes no
-        audit row. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        audit row. On a running application the route refresh is queued in the same request (ADR-0037); while a run
+        of a task of the application executes (ADR-0042, at most its time limit) the address is saved all the same and
+        nothing is queued: the application's `routesPending` stays true until the panel's first pass after the run
+        publishes it. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
         capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6636,7 +6639,10 @@ paths:
         route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
         answer is 409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status
         (`stop_unfinished` after a stop that did not finish, whose status reads running or degraded), and nothing is
-        written. The audit row holds the user name and whether a password was sent, never the password. No
+        written. While a run of a task of the application executes (ADR-0042, at most its time limit) the refresh
+        cannot be queued: a change that must reach the published route file is refused with the same 409, retryable,
+        `details[0].field: status` and `details[0].reason: task_running`, and nothing is written; it goes through once
+        the run has ended. The audit row holds the user name and whether a password was sent, never the password. No
         Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -6680,7 +6686,7 @@ paths:
         "409":
           description: >-
             The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
-            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status, or `task_running` while a run of a task executes)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6696,7 +6702,10 @@ paths:
         progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
         stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
         status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
-        address is kept. No Idempotency-Key.
+        address is kept. While a run of a task of the application executes (ADR-0042, at most its time limit) the
+        refresh cannot be queued: a removal that has to withdraw a published route is refused with the same 409,
+        retryable, `details[0].reason: task_running`, and the address is kept until the run has ended. No
+        Idempotency-Key.
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -6733,7 +6742,7 @@ paths:
         "409":
           description: >-
             A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
-            `details[0].reason` is the status); the address is kept
+            `details[0].reason` is the status, or `task_running` while a run of a task executes); the address is kept
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6902,6 +6911,174 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/tasks:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackTasks
+      summary: List the tasks of an application, with when each runs by itself and how its last run went (app.read)
+      description: >-
+        The tasks are the ones the template version of the installed revision declares, in the order of the template;
+        the list is empty when that version declares none or nothing is installed. A task is a command the template
+        declares for one component: no route takes or returns the command or its arguments. Returns 422 NOT_SUPPORTED
+        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackTasksDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/tasks/{taskKey}/runs:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackTaskRuns
+      summary: The last 20 runs of a task of an application, newest first, with what each printed (app.read)
+      description: >-
+        What a run printed is its last lines (at most 200 lines and 16 KiB), with the secrets of the component masked.
+        No exit code is returned. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability
+        flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackTaskKeyParam"
+      responses:
+        "200":
+          description: The runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackTaskRunsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Nothing is installed yet (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [App Stacks]
+      operationId: runAppStackTask
+      summary: Run a task of an application now (app.control; audited as app.task.run)
+      description: >-
+        Queues one run of the task named in the path; the body is empty and no command can be sent. The run is an
+        operation of kind `stack.task`: it leaves the status of the application as it is, and it succeeds only when the
+        command ends with code 0. One run of an application waits or runs at a time. A run that waits for its turn does
+        not hold the application (a stop, an update or a delete is accepted meanwhile); it holds it from when it begins
+        until it ends. A run that finds the application busy or stopped when its turn comes ends as `not_started`
+        (problem `busy` or `component_not_running`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false, and when the executor of this server has no
+        task calls.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackTaskKeyParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation or read the runs of the task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackTaskRunAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The application is being changed or another run of it is waiting or running (`RESOURCE_LOCKED`, retryable), it is stopped, failed or was never installed (`RESOURCE_LOCKED`, `details[0].reason` is its status), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet, or this server cannot run tasks (its executor has no task calls): `NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`; nothing is queued"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/tasks/{taskKey}/schedule:
+    put:
+      tags: [App Stacks]
+      operationId: setAppStackTaskSchedule
+      summary: Choose when a task of an application runs by itself (app.control; audited as app.task.schedule)
+      description: >-
+        Never, every hour, every day at an hour, or every week on a day at an hour; whole hours in UTC, no cron
+        expression. A time is queued at most once, tried again for 30 minutes while the application is busy or stopped
+        and then skipped; a skipped time is not caught up. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackTaskKeyParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackTaskSchedule"
+      responses:
+        "200":
+          description: The tasks of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackTasksDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Nothing is installed yet (`RESOURCE_LOCKED`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -10011,6 +10188,13 @@ components:
       in: path
       name: componentKey
       required: true
+      schema:
+        type: string
+    AppStackTaskKeyParam:
+      in: path
+      name: taskKey
+      required: true
+      description: The key of a task the template version of the installed revision declares
       schema:
         type: string
     UserIdParam:
@@ -15178,6 +15362,189 @@ components:
           enum: [tcp, http, running_state]
           description: The component's health check, or `running_state` when it declares none
 
+    AppStackTaskRunId:
+      type: string
+      pattern: "^srun_[0-9a-f]{24}$"
+
+    AppStackTaskSchedule:
+      description: When a task runs by itself. Whole hours in UTC; `weekday` is 1 (Monday) to 7 (Sunday)
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [frequency]
+          properties:
+            frequency:
+              type: string
+              enum: [never]
+        - type: object
+          additionalProperties: false
+          required: [frequency]
+          properties:
+            frequency:
+              type: string
+              enum: [hourly]
+        - type: object
+          additionalProperties: false
+          required: [frequency, hourUtc]
+          properties:
+            frequency:
+              type: string
+              enum: [daily]
+            hourUtc:
+              type: integer
+              minimum: 0
+              maximum: 23
+        - type: object
+          additionalProperties: false
+          required: [frequency, weekday, hourUtc]
+          properties:
+            frequency:
+              type: string
+              enum: [weekly]
+            weekday:
+              type: integer
+              minimum: 1
+              maximum: 7
+            hourUtc:
+              type: integer
+              minimum: 0
+              maximum: 23
+
+    AppStackTaskRunStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, timed_out, not_started, unknown]
+      description: "`unknown`: nobody knows how the run ended; it is never started again by itself"
+
+    AppStackTaskRunSummaryDto:
+      type: object
+      required: [id, taskKey, trigger, status, problem, requestedAt, startedAt, endedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppStackTaskRunId"
+        taskKey:
+          $ref: "#/components/schemas/AppStackKey"
+        trigger:
+          type: string
+          enum: [manual, schedule]
+        status:
+          $ref: "#/components/schemas/AppStackTaskRunStatus"
+        problem:
+          type: string
+          nullable: true
+          enum: [component_not_running, cannot_run_tasks, task_gone, unavailable, refused, outcome_lost, busy, null]
+          description: Why a run did not start (`busy`, another action on the application was queued or running when its turn came), or `outcome_lost` for an `unknown` one
+        requestedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AppStackTaskRunDto:
+      allOf:
+        - $ref: "#/components/schemas/AppStackTaskRunSummaryDto"
+        - type: object
+          required: [output, outputTruncated]
+          properties:
+            output:
+              type: string
+              maxLength: 16384
+              description: The last lines the run printed, secrets masked; empty while it is queued or running
+            outputTruncated:
+              type: boolean
+
+    AppStackTaskRunsDto:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/AppStackTaskRunDto"
+
+    AppStackTaskDto:
+      type: object
+      required: [key, label, description, componentKey, schedule, nextRunAt, skipped, lastRun]
+      properties:
+        key:
+          $ref: "#/components/schemas/AppStackKey"
+        label:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 200
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        schedule:
+          $ref: "#/components/schemas/AppStackTaskSchedule"
+        nextRunAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: The next time the schedule asks for a run; `null` for "never"
+        skipped:
+          type: object
+          nullable: true
+          required: [at, reason, pending]
+          description: The latest scheduled time that was not run
+          properties:
+            at:
+              type: string
+              format: date-time
+            reason:
+              type: string
+              enum: [busy, not_running, missed]
+            pending:
+              type: boolean
+              description: True while the time is still tried (within 30 minutes of it); false once it was given up
+        lastRun:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AppStackTaskRunSummaryDto"
+
+    AppStackTasksDto:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/AppStackTaskDto"
+
+    AppStackTaskRunAcceptedEnvelope:
+      type: object
+      required: [data, links]
+      properties:
+        data:
+          type: object
+          required: [runId, operationId, status]
+          properties:
+            runId:
+              $ref: "#/components/schemas/AppStackTaskRunId"
+            operationId:
+              type: string
+              minLength: 1
+              maxLength: 128
+            status:
+              $ref: "#/components/schemas/AppStackTaskRunStatus"
+        links:
+          type: object
+          required: [runs, operation]
+          properties:
+            runs:
+              type: string
+            operation:
+              type: string
+
     SiteActionInput:
       type: object
       required: [action]
@@ -16123,7 +16490,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply, stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete, stack.backup, stack.restore, stack.prune] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply, stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete, stack.backup, stack.restore, stack.prune, stack.task] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -16776,6 +17143,7 @@ components:
             - stack.backup
             - stack.restore
             - stack.prune
+            - stack.task
         status:
           type: string
           enum:

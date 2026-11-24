@@ -73,6 +73,7 @@ import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-
 import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-applier.js";
 import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 import { AppStackRuntime } from "../app-stacks/app-stack-runtime.js";
+import { AppStackTaskRuntime } from "../app-stacks/app-stack-task-runtime.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -101,6 +102,9 @@ const STACK_BACKUP_LANE_KINDS = ["stack.backup", "stack.restore"] as const satis
 const STACK_PRUNE_LANE_KINDS = ["stack.prune"] as const satisfies readonly OperationKind[];
 /** Every kind AppStackRuntime runs and recovers, whatever its lane; the lock `stack:<id>` keeps one per application. */
 const APP_STACK_RUNTIME_KINDS: readonly OperationKind[] = [...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS];
+// "stack.task" (ADR-0042), written out: the contracts constant would be one more name in the import list above.
+const STACK_TASK_KIND = "stack.task" as const satisfies OperationKind;
+const STACK_TASK_LANE_KINDS: readonly OperationKind[] = [STACK_TASK_KIND];
 // host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
 const hostJobs = () => import("../host/host-jobs.js");
 export const BACKUP_OPERATION_KINDS = [
@@ -173,6 +177,7 @@ export class OutboxWorkerService {
         ...WORDPRESS_LANE_KINDS,
         ...HOST_LANE_KINDS,
         ...APP_STACK_RUNTIME_KINDS,
+        ...STACK_TASK_LANE_KINDS,
       ],
     },
     activePromise: null,
@@ -224,10 +229,20 @@ export class OutboxWorkerService {
     pendingTrigger: false,
   };
 
+  // A task of an application runs up to ten minutes: it holds up neither a deploy nor the site work, and the tasks
+  // of the server run one after another here.
+  readonly #stackTaskLane: OutboxLaneState = {
+    filter: { includeKinds: STACK_TASK_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+
   readonly #backupsApplier: SiteBackupsApplier;
   readonly #wordpressApplier: SiteWordpressApplier;
   readonly #wordpressImportApplier: SiteWordpressImportApplier;
   readonly #appStacks: AppStackRuntime;
+  readonly #appStackTasks: AppStackTaskRuntime;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -242,6 +257,7 @@ export class OutboxWorkerService {
     // Last and optional, like the others: unit tests build the worker positionally without it.
     @Optional() @Inject(SiteTlsApplier) private readonly siteTlsApplier?: SiteTlsApplier,
     @Optional() @Inject(AppStackRuntime) appStackRuntime?: AppStackRuntime,
+    @Optional() @Inject(AppStackTaskRuntime) appStackTaskRuntime?: AppStackTaskRuntime,
   ) {
     this.#backupsApplier =
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
@@ -259,6 +275,7 @@ export class OutboxWorkerService {
       config,
     );
     this.#appStacks = appStackRuntime ?? new AppStackRuntime(dbClient, dockerExecutor, config);
+    this.#appStackTasks = appStackTaskRuntime ?? new AppStackTaskRuntime(dbClient, dockerExecutor, config);
   }
 
   public startBackgroundLoop(): void {
@@ -290,6 +307,7 @@ export class OutboxWorkerService {
     this.#triggerLane(this.#stackLane);
     this.#triggerLane(this.#stackBackupLane);
     this.#triggerLane(this.#stackPruneLane);
+    this.#triggerLane(this.#stackTaskLane);
   }
 
   public async stop(): Promise<void> {
@@ -305,6 +323,7 @@ export class OutboxWorkerService {
       this.#stackLane,
       this.#stackBackupLane,
       this.#stackPruneLane,
+      this.#stackTaskLane,
     ]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
@@ -327,6 +346,7 @@ export class OutboxWorkerService {
       this.#stackLane.activePromise?.catch(() => undefined),
       this.#stackBackupLane.activePromise?.catch(() => undefined),
       this.#stackPruneLane.activePromise?.catch(() => undefined),
+      this.#stackTaskLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -383,6 +403,7 @@ export class OutboxWorkerService {
       this.#runLane(this.#stackLane, batchSize),
       this.#runLane(this.#stackBackupLane, batchSize),
       this.#runLane(this.#stackPruneLane, batchSize),
+      this.#runLane(this.#stackTaskLane, batchSize),
     ]);
     return {
       claimed: results.reduce((n, r) => n + r.claimed, 0),
@@ -502,6 +523,8 @@ export class OutboxWorkerService {
         await this.#wordpressApplier.apply(op);
       } else if (APP_STACK_RUNTIME_KINDS.includes(op.kind)) {
         await this.#appStacks.apply(op, payload);
+      } else if (op.kind === STACK_TASK_KIND) {
+        await this.#appStackTasks.apply(op, payload);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -1041,11 +1064,14 @@ export class OutboxWorkerService {
           op.kind === "site.wordpress.update" ||
           op.kind === WORDPRESS_IMPORT_KIND ||
           op.kind === HOST_JOB_KIND ||
-          APP_STACK_RUNTIME_KINDS.includes(op.kind)
+          APP_STACK_RUNTIME_KINDS.includes(op.kind) ||
+          op.kind === STACK_TASK_KIND
         ) {
           // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
-            APP_STACK_RUNTIME_KINDS.includes(op.kind)
+            op.kind === STACK_TASK_KIND
+              ? await this.#appStackTasks.recover(op) // a read: the command of a run is never started again
+              : APP_STACK_RUNTIME_KINDS.includes(op.kind)
               ? await this.#appStacks.recover(op)
               : op.kind === HOST_JOB_KIND
               ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)

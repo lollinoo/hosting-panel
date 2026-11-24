@@ -69,6 +69,12 @@ export const APP_TEMPLATE_LIMITS = {
   expose: 16, // stack total
   dependsOn: 8,
   ingress: 8,
+  tasks: 8,
+  taskLabel: 80,
+  taskDescription: 200,
+  taskTimeoutMin: 5,
+  taskTimeoutMax: 600, // a run keeps its application busy for at most this long
+  taskTimeoutDefault: 60,
   healthPathLength: 256,
   healthIntervalMin: 5,
   healthIntervalMax: 300,
