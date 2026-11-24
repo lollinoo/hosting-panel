@@ -131,6 +131,21 @@ describe("a template with tasks", () => {
     );
     expect(edge.tasks?.map((task) => task.timeoutSeconds)).toEqual([5, 600]);
   });
+
+  it("works the same in a template of the extended format (HCP-STACK/v2): same rules, same place in the spec", () => {
+    const v2 = structuredClone(BASE);
+    (v2["x-hp-stack"] as Record<string, unknown>).schemaVersion = 2;
+    const plain = specOf(v2);
+    const spec = specOf({ ...v2, "x-hp-tasks": [TIDY] });
+    expect(spec.schemaVersion).toBe(2);
+    const { tasks, ...rest } = spec;
+    expect(JSON.stringify(rest)).toBe(JSON.stringify(plain));
+    expect(tasks).toEqual([{ ...TIDY, description: "", timeoutSeconds: 60 }]);
+    expect(AppTemplateSpecSchema.safeParse(spec).success).toBe(true);
+    expect(summary(errorsOf({ ...v2, "x-hp-tasks": [{ ...TIDY, service: "db" }] }))).toEqual([
+      { path: "x-hp-tasks[0].service", code: "TASK_SERVICE_UNKNOWN" },
+    ]);
+  });
 });
 
 type Row = readonly [name: string, document: unknown, code: AppTemplateIssueCode, path: string];
