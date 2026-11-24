@@ -115,6 +115,27 @@ export const APP_STACK_IMAGE_LOOKUP_PATTERN =
   /^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
 export const APP_STACK_IMAGE_LOOKUP_MAX_LENGTH = 255;
 
-export function appStackImageLookupProblem(image: string): "invalid" | null {
-  return image.length >= 1 && image.length <= APP_STACK_IMAGE_LOOKUP_MAX_LENGTH && APP_STACK_IMAGE_LOOKUP_PATTERN.test(image) ? null : "invalid";
+/** Two or more DNS labels whose last one starts with a letter (so no IPv4 address in any spelling), optional port. */
+const APP_STACK_PUBLIC_REGISTRY_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::[0-9]{1,5})?$/;
+const APP_STACK_PRIVATE_REGISTRY_SUFFIX = /(?:^|\.)(?:localhost|local|internal|home\.arpa)$/;
+
+/**
+ * The registry an image name points the Engine at must be a public DNS name (ADR-0036): never this server, an IP
+ * address or a name of a private network. The first part is a registry the way Docker reads it (it holds "." or ":",
+ * is "localhost" or has capitals, and a "/" follows it); any other name is one of Docker Hub.
+ */
+export function appStackImageRegistryProblem(image: string): "registry_not_public" | null {
+  const slash = image.indexOf("/");
+  if (slash === -1) return null;
+  const first = image.slice(0, slash);
+  if (!/[.:]/.test(first) && first !== "localhost" && first === first.toLowerCase()) return null;
+  const host = first.replace(/:[0-9]{1,5}$/, "");
+  return host.length <= 253 && APP_STACK_PUBLIC_REGISTRY_PATTERN.test(first) && !APP_STACK_PRIVATE_REGISTRY_SUFFIX.test(host)
+    ? null
+    : "registry_not_public";
+}
+
+export function appStackImageLookupProblem(image: string): "invalid" | "registry_not_public" | null {
+  if (image.length < 1 || image.length > APP_STACK_IMAGE_LOOKUP_MAX_LENGTH || !APP_STACK_IMAGE_LOOKUP_PATTERN.test(image)) return "invalid";
+  return appStackImageRegistryProblem(image);
 }
