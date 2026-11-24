@@ -3429,6 +3429,7 @@ x-hp-ingress:
         cancelled: "Cancelled",
       },
       problemGeneric: "The operation failed.",
+      unconfirmed: "The outcome could not be confirmed: check the application's state before you try again.",
     },
     actions: {
       start: "Start",

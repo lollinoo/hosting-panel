@@ -111,8 +111,10 @@ export function AppStackHistory({ deployments, m, locale }: { deployments: AppSt
     <ul className="divide-y rounded-md border text-sm">
       {deployments.map((d) => {
         // Only a failed entry reads as failed; an outcome to be verified keeps its own words.
-        const problem = appStackProblemText(m, d.problem);
         const failed = d.status === "failed";
+        // Failed with OPERATION_AMBIGUOUS: the panel closed it because its outcome could not be read (issue #183), so
+        // "reload the page shortly" would never come true.
+        const problem = failed && d.problem === "OPERATION_AMBIGUOUS" ? t.unconfirmed : appStackProblemText(m, d.problem);
         return (
           <li key={d.id} className="space-y-1 p-3">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, AppStackTaskReadIpcResultSchema, type AppStackTaskRunIpcResult } from "@hosting-panel/contracts";
 import {
+  and,
   appStacks,
   appStackTaskRuns,
   appStackTaskSchedules,
@@ -15,6 +16,7 @@ import {
   resourceQuotas,
   setAppStackTaskScheduleTransactional,
   transitionOperation,
+  unlockOperationBreakGlassTransactional,
 } from "@hosting-panel/database";
 import { Phase1DisabledDockerExecutor, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
@@ -23,6 +25,12 @@ import { APP_STACK_TASK_LEASE_EXTRA_MS, AppStackTaskRuntime, appStackTaskRefusal
 import { AppStackTaskSchedulerService } from "../src/app-stacks/app-stack-task-scheduler.service.js";
 import { AppStackTasksService } from "../src/app-stacks/app-stack-tasks.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness } from "./fixtures/app-stack-harness.js";
 
@@ -409,5 +417,118 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
     const free = await taken();
     await runtime(executor().port).apply(free.op, free.payload);
     expect((await opRow(free.op.id)).status).toBe("succeeded");
+  });
+
+  describe("a read of the run that keeps failing (issue #183)", () => {
+    const MINUTE = 60_000;
+    const clock = { t: Date.UTC(2026, 10, 24, 9) };
+    const bound = () => new RecoveryReadBound(() => clock.t);
+    const unconfirmed = (operationId: string) =>
+      h.dbClient.db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.targetId, operationId), eq(auditEvents.action, RECOVERY_UNCONFIRMED_AUDIT_ACTION)));
+
+    /** A run whose answer was lost, its operation unknown as the worker leaves it. */
+    async function inDoubt() {
+      const t = await taken();
+      await expect(runtime(executor({ run: () => Promise.reject(lost()) }).port).apply(t.op, t.payload)).rejects.toBeDefined();
+      await transitionOperation(h.dbClient.db, t.op.id, "unknown");
+      return { ...t, op: await opRow(t.op.id) };
+    }
+
+    it("closes the run as not confirmed once counted failures have lasted the bound; it never starts it again", async () => {
+      const t = await inDoubt();
+      const fault: { err: unknown } = { err: refusal("INTERNAL_ERROR") };
+      const fake = executor({ read: () => Promise.reject(fault.err) });
+      const reads = bound();
+
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      clock.t += RECOVERY_READ_GIVE_UP_MS - 1;
+      fault.err = refusal("NOT_FOUND");
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      expect((await opRow(t.op.id)).status).toBe("unknown");
+      expect(await runRow(t.runId)).toMatchObject({ status: "running" });
+      clock.t += 1;
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("unconfirmed");
+
+      expect(await opRow(t.op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      // The run reads as it does when the executor no longer knows it: nobody knows how it ended.
+      expect(await runRow(t.runId)).toMatchObject({ status: "unknown", problem: "outcome_lost", exitCode: null, output: "" });
+      const steps = await h.dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, t.op.id));
+      expect(steps.map((s) => [s.status, s.message])).toEqual([["failed", RECOVERY_UNCONFIRMED_TEXT]]);
+      const audits = await unconfirmed(t.op.id);
+      expect(audits).toHaveLength(1);
+      expect(audits[0]!.details).toEqual({
+        operationId: t.op.id,
+        kind: "stack.task",
+        resourceType: "stack",
+        resourceId: stackId,
+        minutesWaited: 30,
+        failure: "error_code",
+      });
+      expect(fake.read).toHaveBeenCalledTimes(3);
+      expect(fake.run).not.toHaveBeenCalled();
+
+      // A second pass changes nothing and asks nothing.
+      const closed = await opRow(t.op.id);
+      const again = executor();
+      expect(await runtime(again.port).recover(closed, reads)).toBe("settled");
+      expect(await opRow(t.op.id)).toEqual(closed);
+      expect(await unconfirmed(t.op.id)).toHaveLength(1);
+      expect(again.read).not.toHaveBeenCalled();
+      expect(again.run).not.toHaveBeenCalled();
+    });
+
+    it("never closes it while the executor cannot be reached, and a readable 'still running' starts the count again", async () => {
+      const t = await inDoubt();
+      const fault: { err: unknown } = { err: refusal("DOCKER_ENGINE_UNAVAILABLE") };
+      const fake = executor({ read: () => (fault.err === null ? Promise.resolve({ state: "running" }) : Promise.reject(fault.err)) });
+      const reads = bound();
+      const honest = [refusal("DOCKER_ENGINE_UNAVAILABLE"), lost(), refusal("RESOURCE_LOCKED")];
+      for (let pass = 0; pass < 48; pass += 1) {
+        fault.err = honest[pass % honest.length];
+        expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+        clock.t += 30 * MINUTE;
+      }
+      expect((await opRow(t.op.id)).status).toBe("unknown");
+      expect(reads.size).toBe(0);
+
+      fault.err = refusal("INTERNAL_ERROR");
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      clock.t += 20 * MINUTE;
+      fault.err = null;
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      clock.t += 20 * MINUTE;
+      fault.err = refusal("INTERNAL_ERROR");
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      clock.t += 29 * MINUTE;
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      expect((await opRow(t.op.id)).status).toBe("unknown");
+      clock.t += MINUTE;
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("unconfirmed");
+      expect(await opRow(t.op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+      expect(fake.run).not.toHaveBeenCalled();
+    });
+
+    it("leaves an operation unlocked by hand between the last failed read and the closing as the administrator left it", async () => {
+      const t = await inDoubt();
+      let unlockNow = false;
+      const fake = executor({
+        read: async () => {
+          if (unlockNow) await unlockOperationBreakGlassTransactional(h.dbClient.db, { operationId: t.op.id, reason: "checked by hand" });
+          throw refusal("INTERNAL_ERROR");
+        },
+      });
+      const reads = bound();
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+      clock.t += RECOVERY_READ_GIVE_UP_MS;
+      unlockNow = true;
+      expect(await runtime(fake.port).recover(t.op, reads)).toBe("pending");
+
+      expect(await opRow(t.op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+      expect(await unconfirmed(t.op.id)).toHaveLength(0);
+      expect(await runRow(t.runId)).toMatchObject({ status: "running" });
+    });
   });
 });

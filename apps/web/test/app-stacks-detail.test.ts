@@ -571,6 +571,18 @@ describe("sections", () => {
     const failed = html(AppStackHistory({ deployments: [{ ...unknown[1]!, status: "failed" }], m, locale }), m);
     expect(failed).toMatch(new RegExp(`class="text-destructive">${m.apps.history.problemGeneric}<`));
   });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("history: an operation the panel closed because its outcome could not be read says to check before trying again (issue #183, %s)", (locale, m) => {
+    const closed: AppStackDeploymentDto = { ...DEPLOYMENTS[1]!, id: "sdep_5", status: "failed", problem: "OPERATION_AMBIGUOUS" };
+    const h = html(AppStackHistory({ deployments: [closed], m, locale }), m);
+    expect(h).toContain(m.apps.history.unconfirmed);
+    // Not the answer to a request ("reload the page shortly"): reloading changes nothing once the operation is closed.
+    expect(h).not.toContain(m.apps.codes.OPERATION_AMBIGUOUS);
+    expect(h).not.toContain(m.apps.history.problemGeneric);
+  });
 });
 
 describe("private values", () => {
@@ -1583,5 +1595,23 @@ describe("scheduled tasks", () => {
     expect(h).toContain(en.apps.progress.taskFailed);
     expect(h).not.toContain(en.apps.progress.failed);
     expect(h).not.toContain(en.apps.progress.title.deploy);
+  });
+
+  it.each([
+    ["stack.start", "failed"],
+    ["stack.backup", "backupFailed"],
+    ["stack.task", "taskFailed"],
+  ] as const)("an operation closed because its outcome could not be read says so, not that it failed (issue #183, %s)", (kind, usual) => {
+    for (const m of [en, itMsgs]) {
+      const operation = { id: "op_9", kind, status: "failed", errorCode: "OPERATION_AMBIGUOUS", steps: [] };
+      const h = html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, m, { 0: operation, 1: "done" }).out, m);
+      expect(h).toContain(m.apps.history.unconfirmed);
+      expect(h).not.toContain(m.apps.progress[usual]);
+      // Any other failure keeps its own words.
+      const other = { ...operation, errorCode: "INTERNAL_ERROR" };
+      expect(html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, m, { 0: other, 1: "done" }).out, m)).toContain(
+        m.apps.progress[usual],
+      );
+    }
   });
 });

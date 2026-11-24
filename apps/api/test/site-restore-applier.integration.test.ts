@@ -28,6 +28,7 @@ import {
   siteBackups,
   sites,
   sql,
+  unlockOperationBreakGlassTransactional,
   upsertBackupSettings,
   upsertEncryptedSecretTransactional,
   users,
@@ -57,6 +58,12 @@ import {
   SiteRestoreApplier,
 } from "../src/backups/site-restore-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { skipPasswordChange } from "./fixtures/password-change.js";
@@ -1375,6 +1382,136 @@ describe("site restore and download applier (M3b)", () => {
       .where(eq(siteBackups.id, recOkBakId));
     expect(recOkBak?.archiveStatus).toBe("ready");
     expect(recOkBak?.archiveReadyUntil?.toISOString()).toBe(expiresIso);
+  });
+
+  describe("a read of the download job that keeps failing (issue #183)", () => {
+    const MINUTE = 60_000;
+    const clock = { t: Date.now() };
+    const coded = (code: string) => Object.assign(new Error(`executor said ${code}`), { code });
+    const callsOf = (opId: string) => executorScript.calls.filter((c) => "jobId" in c && c.jobId === opId).map((c) => c.action);
+    const opRow = async (id: string) => (await dbClient.db.select().from(operations).where(eq(operations.id, id)))[0]!;
+    const archiveOf = async (backupId: string) =>
+      (
+        await dbClient.db
+          .select({ status: siteBackups.archiveStatus, problem: siteBackups.archiveProblem, readyUntil: siteBackups.archiveReadyUntil })
+          .from(siteBackups)
+          .where(eq(siteBackups.id, backupId))
+      )[0]!;
+    const prepareStep = async (opId: string) =>
+      (
+        await dbClient.db
+          .select({ status: operationSteps.status, message: operationSteps.message })
+          .from(operationSteps)
+          .where(and(eq(operationSteps.operationId, opId), eq(operationSteps.key, "prepare")))
+      )[0]!;
+    const unconfirmed = (id: string) =>
+      dbClient.db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.targetId, id), eq(auditEvents.action, RECOVERY_UNCONFIRMED_AUDIT_ACTION)));
+    const worker = () => {
+      app.outboxWorker.recoveryReads = new RecoveryReadBound(() => clock.t);
+      return app.outboxWorker;
+    };
+    /** A download whose archive job ran while the operation's lease ran out: in doubt, as the worker leaves it. */
+    async function inDoubt(): Promise<{ opId: string; backupId: string }> {
+      const { backupId } = await seedSucceededBackup();
+      const { operationId } = await enqueueDownload(backupId);
+      await dbClient.db.update(operations).set({ status: "unknown", leaseExpiresAt: null }).where(eq(operations.id, operationId));
+      return { opId: operationId, backupId };
+    }
+
+    it("a download whose job cannot be read for the whole bound is closed as not confirmed: archive interrupted, only reads sent", async () => {
+      const { opId, backupId } = await inDoubt();
+      const w = worker();
+      executorScript.setStatusSequence(opId, [coded("INTERNAL_ERROR")]);
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS - 1;
+      await w.recoverUnknownOperations();
+      expect((await opRow(opId)).status).toBe("unknown");
+      expect((await archiveOf(backupId)).status).toBe("preparing");
+
+      clock.t += 1;
+      await w.recoverUnknownOperations();
+
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      // What a download whose job the executor no longer knows gets: nobody is offered a file that may not exist.
+      expect(await archiveOf(backupId)).toEqual({ status: "failed", problem: "interrupted", readyUntil: null });
+      expect(await prepareStep(opId)).toEqual({ status: "failed", message: RECOVERY_UNCONFIRMED_TEXT });
+      const rows = await unconfirmed(opId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.details).toEqual({
+        operationId: opId,
+        kind: "site.backups.download",
+        resourceType: "site",
+        resourceId: siteA1Id,
+        minutesWaited: 30,
+        failure: "error_code",
+      });
+      expect(callsOf(opId)).toEqual(["status", "status", "status"]);
+
+      // A second pass finds nothing in doubt: no read, no row.
+      const closed = await opRow(opId);
+      await w.recoverUnknownOperations();
+      expect(callsOf(opId)).toHaveLength(3);
+      expect(await opRow(opId)).toEqual(closed);
+      expect(await unconfirmed(opId)).toHaveLength(1);
+      expect(w.recoveryReads.size).toBe(0);
+    });
+
+    it("an executor that cannot be reached never closes it; an answer it can read starts the count again", async () => {
+      const { opId } = await inDoubt();
+      const w = worker();
+      const honest = [coded("DOCKER_ENGINE_UNAVAILABLE"), Object.assign(coded("OPERATION_AMBIGUOUS"), { ambiguousOutcome: true }), coded("RESOURCE_LOCKED")];
+      for (let pass = 0; pass < 48; pass += 1) {
+        executorScript.setStatusSequence(opId, [honest[pass % honest.length]!]);
+        await w.recoverUnknownOperations();
+        clock.t += 30 * MINUTE;
+      }
+      expect((await opRow(opId)).status).toBe("unknown");
+      expect(w.recoveryReads.size).toBe(0);
+
+      // Counted, then an answer it can read (the job runs), then counted again: the bound is counted from the last one.
+      executorScript.setStatusSequence(opId, [
+        coded("INTERNAL_ERROR"),
+        { jobId: opId, state: "running", failure: null, snapshot: null, archive: null },
+        coded("INTERNAL_ERROR"),
+      ]);
+      await w.recoverUnknownOperations();
+      clock.t += 20 * MINUTE;
+      await w.recoverUnknownOperations();
+      clock.t += 20 * MINUTE;
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS - MINUTE;
+      await w.recoverUnknownOperations();
+      expect((await opRow(opId)).status).toBe("unknown");
+
+      clock.t += MINUTE;
+      await w.recoverUnknownOperations();
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+      expect((await unconfirmed(opId))[0]!.details).toMatchObject({ minutesWaited: 30 });
+      expect(callsOf(opId).filter((a) => a !== "status")).toEqual([]);
+    });
+
+    it("an operation unlocked by hand while the last read fails is left as the unlock wrote it", async () => {
+      const { opId, backupId } = await inDoubt();
+      const w = worker();
+      let unlockNow = false;
+      executorScript.setStatusSequence(opId, [
+        async () => {
+          if (unlockNow) await unlockOperationBreakGlassTransactional(dbClient.db, { operationId: opId, reason: "checked by hand" });
+          throw coded("INTERNAL_ERROR");
+        },
+      ]);
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS;
+      unlockNow = true;
+      await w.recoverUnknownOperations();
+
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+      expect(await unconfirmed(opId)).toEqual([]);
+      expect((await archiveOf(backupId)).status).toBe("preparing");
+    });
   });
 
   it("retention discards archives of deleted/forgotten rows once and ignores discardArchive errors", async () => {

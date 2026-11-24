@@ -32,6 +32,13 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import {
+  RECOVERY_UNCONFIRMED_TEXT,
+  closeUnconfirmedOperation,
+  type RecoveryGiveUp,
+  type RecoveryOutcome,
+  type RecoveryReadBound,
+} from "../runtime/recovery-read-bound.js";
 import type { ControlPlaneRuntimeConfig } from "../tokens.js";
 import { PanelDumpError, buildPanelDumpCommand, runPanelDump, type PanelDumpCommand } from "./panel-dump.js";
 import {
@@ -165,17 +172,22 @@ export class PanelBackupApplier {
     }
   }
 
-  /** Asks the executor for the status of each unfinished copy's job; never starts a copy again. */
-  public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
+  /**
+   * Asks the executor for the status of each unfinished copy's job; never starts a copy again. With `reads`, a status
+   * read that keeps failing for a reason waiting cannot cure closes the run after the bound (issue #183).
+   */
+  public async recover(op: BackupOperationRef, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     // Only the copies recorded when the run started: a policy change since then must not add a never-run copy.
     const copies = await listPanelBackupCopies(this.dbClient.db, op.id);
     for (const copy of copies.filter((c) => c.status === "running")) {
       let statusRes: BackupJobStatus;
       try {
         statusRes = await this.dockerExecutor.backups({ action: "status", jobId: copy.jobId ?? op.id });
-      } catch {
-        return "pending";
+      } catch (err) {
+        const giveUp = reads?.failed(op.id, err) ?? null;
+        return giveUp === null ? "pending" : this.#unconfirmed(op.id, giveUp);
       }
+      reads?.answered(op.id);
       if (statusRes.state === "running") {
         if (!(await this.parent.isPastPollDeadline(op.id))) {
           return "pending";
@@ -197,6 +209,43 @@ export class PanelBackupApplier {
       await rm(file, { force: true });
     }
     return "settled";
+  }
+
+  /**
+   * Closes a run whose copy job could not be read for the whole bound, in the closing's transaction: the unfinished
+   * copies and the night's line become failed with interrupted, the steps say the outcome is not confirmed. No
+   * `panel.backups.failed` audit: the closing writes its own row. The dump file goes, as it does when a copy runs past
+   * the poll deadline (the start sweep would remove it too). The released `panel:db` lock lets the next night's copy be
+   * queued; the executor's single panel lane refuses it (RESOURCE_LOCKED) while the old job still runs.
+   */
+  async #unconfirmed(opId: string, giveUp: RecoveryGiveUp): Promise<"pending" | "unconfirmed"> {
+    const closed = await closeUnconfirmedOperation(this.dbClient.db, opId, giveUp, async (tx) => {
+      for (const copy of await listPanelBackupCopies(tx, opId)) {
+        if (copy.status === "running") {
+          await settlePanelBackupCopy(tx, copy.id, { status: "failed", problem: "interrupted" });
+        }
+      }
+      await recordPanelBackupOutcome(tx, { at: new Date(), status: "failed", problem: "interrupted" });
+      const [dumpStep] = await tx
+        .select({ status: operationSteps.status })
+        .from(operationSteps)
+        .where(and(eq(operationSteps.operationId, opId), eq(operationSteps.key, "dump")))
+        .limit(1);
+      if (dumpStep && !isTerminalStepStatus(dumpStep.status)) {
+        await this.parent.safeUpdateStep(opId, "dump", "failed", RECOVERY_UNCONFIRMED_TEXT, tx);
+        await this.parent.safeUpdateStep(opId, "upload", "skipped", "Skipped because the copy did not finish", tx);
+      } else {
+        await this.parent.safeUpdateStep(opId, "upload", "failed", RECOVERY_UNCONFIRMED_TEXT, tx);
+      }
+    });
+    if (!closed) {
+      return "pending";
+    }
+    const file = this.#file(opId);
+    if (file) {
+      await rm(file, { force: true });
+    }
+    return "unconfirmed";
   }
 
   /** Removes dump files left by operations that are no longer active. */

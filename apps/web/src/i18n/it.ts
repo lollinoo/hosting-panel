@@ -3458,6 +3458,7 @@ x-hp-ingress:
         cancelled: "Annullata",
       },
       problemGeneric: "Operazione non riuscita.",
+      unconfirmed: "Non è stato possibile confermare l'esito: controlla lo stato dell'applicazione prima di riprovare.",
     },
     actions: {
       start: "Avvia",

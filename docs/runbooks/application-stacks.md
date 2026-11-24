@@ -101,6 +101,24 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo journalctl -u hp-docker-executor -u hp-api --since "1 hour ago"
    ```
    When the executor is back, the next pass settles it. `sudo systemctl restart hp-api` runs recovery at once.
+
+   If instead the executor answers but its answer cannot be read, or the read fails in another way waiting does not
+   cure, for 30 minutes in a row, recovery closes the operation itself (issue #183). It ends `failed` with
+   `OPERATION_AMBIGUOUS`, its line in the history reads "The outcome could not be confirmed", and the audit log holds
+   one `operation.recovered.unconfirmed` row with the minutes waited and the kind of failure. An action on the
+   containers leaves the stack `unknown`; a delete leaves it `delete_failed`, whose only action is **Elimina
+   l'applicazione** again (it removes whatever is left, and passes over what is already gone); a backup, restore or
+   task leaves its copies, restore or run interrupted and starts nothing. Nothing was sent to the executor again:
+   check the components on the application page (and the containers on the host) before anyone acts again. An
+   executor that cannot be reached, or that answers `OPERATION_AMBIGUOUS` or `RESOURCE_LOCKED`, never closes an
+   operation this way, and an API restart starts the 30 minutes again. The executor also answers
+   `DOCKER_ENGINE_UNAVAILABLE` when Docker gives any answer other than success, or data the executor cannot read:
+   then the operation stays `unknown` with no end (its history line reads «Da verificare», and after 15 minutes the
+   admin **Stato** page shows the `operation_unknown` alert), and only the hand unlock below ends it. To close it
+   earlier, `sudo hp-break-glass unlock --operation-id <id> --reason "<reason>"` marks it failed by hand and leaves the
+   stack as it is. A backup of a site or of the panel, and a deploy,
+   restart or stop of a site's container, are closed by the same rule; the container's wanted status and version stay
+   as the request wrote them.
 4. **When to retry.** Only after the operation has settled (its line in the history no longer reads «Da verificare»):
    then the customer acts again from the application page with the status it shows. A stack can also read `unknown`
    with no open operation (an interrupted stop, repaired at API start): then **Avvia**, **Arresta**, **Riavvia**,

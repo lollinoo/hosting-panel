@@ -27,6 +27,13 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import {
+  RECOVERY_UNCONFIRMED_TEXT,
+  closeUnconfirmedOperation,
+  type RecoveryGiveUp,
+  type RecoveryOutcome,
+  type RecoveryReadBound,
+} from "../runtime/recovery-read-bound.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "../runtime/service-spec.js";
 import { SITE_STEP_LEASE_MS } from "../runtime/site-provisioner.js";
 import { findApiSiteType, type ApiSiteType } from "../site-types/index.js";
@@ -312,13 +319,16 @@ export class SiteRestoreApplier {
     }
   }
 
-  /** Reconciles an interrupted restore or download operation without restarting backup transfer. */
-  public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
+  /**
+   * Reconciles an interrupted restore or download operation without restarting backup transfer. `reads` bounds the
+   * download's status read (issue #183); the restore's settle is not bounded here.
+   */
+  public async recover(op: BackupOperationRef, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     if (op.kind === "site.backups.restore") {
       return this.#recoverRestore(op);
     }
     if (op.kind === "site.backups.download") {
-      return this.#recoverDownload(op);
+      return this.#recoverDownload(op, reads);
     }
     await this.parent.failOperation(
       op.id,
@@ -374,13 +384,15 @@ export class SiteRestoreApplier {
     return "settled";
   }
 
-  async #recoverDownload(op: BackupOperationRef): Promise<"settled" | "pending"> {
+  async #recoverDownload(op: BackupOperationRef, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     let statusRes: BackupJobStatus;
     try {
       statusRes = await this.dockerExecutor.backups({ action: "status", jobId: op.id });
-    } catch {
-      return "pending";
+    } catch (err) {
+      const giveUp = reads?.failed(op.id, err) ?? null;
+      return giveUp === null ? "pending" : this.#downloadUnconfirmed(op.id, giveUp);
     }
+    reads?.answered(op.id);
 
     if (statusRes.state === "running") {
       if (!(await this.parent.isPastPollDeadline(op.id))) {
@@ -391,6 +403,21 @@ export class SiteRestoreApplier {
 
     await this.#finishDownload(op, statusRes, { throwOnFailure: false });
     return "settled";
+  }
+
+  /**
+   * Closes a download whose archive job could not be read for the whole bound (issue #183): the archive fails as
+   * interrupted, as a job the executor no longer knows does, so nobody is offered a file that may not exist; the
+   * operation fails as not confirmed. The released `site:<id>` lock lets another backup, restore or download of the
+   * site be asked: the executor refuses each (RESOURCE_LOCKED) while the old job runs. An operation unlocked by hand is
+   * left as it is.
+   */
+  async #downloadUnconfirmed(opId: string, giveUp: RecoveryGiveUp): Promise<"pending" | "unconfirmed"> {
+    const closed = await closeUnconfirmedOperation(this.dbClient.db, opId, giveUp, async (tx) => {
+      await settleSiteArchive(tx, opId, { status: "failed", readyUntil: null, problem: "interrupted" });
+      await this.parent.safeUpdateStep(opId, "prepare", "failed", RECOVERY_UNCONFIRMED_TEXT, tx);
+    });
+    return closed ? "unconfirmed" : "pending";
   }
 
   async #finishRestore(

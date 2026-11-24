@@ -72,7 +72,17 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
   // The run of a task (ADR-0042) has one step and its own words.
   const isTask = operation?.kind === "stack.task";
   // They have no entry in the history: the reason of a failure is on the row of the backup.
-  const failed = isTask ? t.taskFailed : kind === "backup" ? t.backupFailed : kind === "restore" ? t.restoreFailed : t.failed;
+  // Failed with OPERATION_AMBIGUOUS: closed because its outcome could not be read (issue #183), whatever the kind.
+  const unconfirmed = status === "failed" && operation?.errorCode === "OPERATION_AMBIGUOUS";
+  const failed = unconfirmed
+    ? m.apps.history.unconfirmed
+    : isTask
+      ? t.taskFailed
+      : kind === "backup"
+        ? t.backupFailed
+        : kind === "restore"
+          ? t.restoreFailed
+          : t.failed;
   const long = (kind === "backup" || kind === "restore") && outcome === "polling";
 
   return (

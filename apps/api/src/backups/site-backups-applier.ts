@@ -43,6 +43,13 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import {
+  RECOVERY_UNCONFIRMED_TEXT,
+  closeUnconfirmedOperation,
+  type RecoveryGiveUp,
+  type RecoveryOutcome,
+  type RecoveryReadBound,
+} from "../runtime/recovery-read-bound.js";
 import { resolveSiteFilesServiceId } from "../sites/site-files.service.js";
 import { SiteSftpService } from "../sites/site-sftp.service.js";
 import {
@@ -202,13 +209,16 @@ export class SiteBackupsApplier {
     throw new ControlPlaneError("NOT_SUPPORTED", `Unsupported backup operation kind '${op.kind}'`);
   }
 
-  /** Reconciles an expired backup, prune, restore, or download operation without blindly replaying mutations. */
-  public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
+  /**
+   * Reconciles an expired backup, prune, restore, or download operation without blindly replaying mutations. `reads`
+   * bounds a status read that keeps failing (issue #183): without it such a read waits for ever.
+   */
+  public async recover(op: BackupOperationRef, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
-      return this.#restore.recover(op);
+      return this.#restore.recover(op, reads);
     }
     if (op.kind === "panel.backups.create") {
-      return this.panel.recover(op);
+      return this.panel.recover(op, reads);
     }
     const db = this.dbClient.db;
     const steps = await db
@@ -234,9 +244,9 @@ export class SiteBackupsApplier {
       return "settled";
     }
 
-    const settled = await this.settleBackupJob(op.id);
-    if (settled === "pending") {
-      return "pending";
+    const settled = await this.#settleBackupJob(op.id, reads ?? null);
+    if (settled === "pending" || settled === "unconfirmed") {
+      return settled;
     }
     if (settled === "succeeded") {
       await this.succeedOperation(op.id);
@@ -252,6 +262,14 @@ export class SiteBackupsApplier {
    * executor does not know (never started, or lost) fails as interrupted.
    */
   public async settleBackupJob(opId: string): Promise<"pending" | "succeeded" | ControlPlaneError> {
+    const settled = await this.#settleBackupJob(opId, null);
+    return settled === "unconfirmed" ? "pending" : settled;
+  }
+
+  async #settleBackupJob(
+    opId: string,
+    reads: RecoveryReadBound | null,
+  ): Promise<"pending" | "succeeded" | "unconfirmed" | ControlPlaneError> {
     const db = this.dbClient.db;
     const [backup] = await db
       .select({ id: siteBackups.id })
@@ -282,9 +300,11 @@ export class SiteBackupsApplier {
       let statusRes: BackupJobStatus;
       try {
         statusRes = await this.dockerExecutor.backups({ action: "status", jobId: copy.jobId ?? opId });
-      } catch {
-        return "pending";
+      } catch (err) {
+        const giveUp = reads?.failed(opId, err) ?? null;
+        return giveUp === null ? "pending" : this.#unconfirmed(opId, backup.id, giveUp);
       }
+      reads?.answered(opId);
       if (statusRes.state === "running") {
         if (!(await this.isPastPollDeadline(opId, copyStart ?? undefined))) {
           return "pending";
@@ -318,6 +338,25 @@ export class SiteBackupsApplier {
       problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR",
       "Backup did not finish.",
     );
+  }
+
+  /**
+   * Closes a backup whose copy job could not be read for the whole bound (issue #183). Each copy still running fails as
+   * interrupted, as a job the executor no longer knows does, and the row settles from its copies: a copy saved before
+   * stays restorable. The operation fails as not confirmed, never succeeded, since a job may still run. One audit row,
+   * none per copy. The released `site:<id>` lock lets another backup, restore or download of the site be asked: the
+   * executor refuses each (RESOURCE_LOCKED) while the old job runs. An operation unlocked by hand is left as it is.
+   */
+  async #unconfirmed(opId: string, backupId: string, giveUp: RecoveryGiveUp): Promise<"pending" | "unconfirmed"> {
+    const closed = await closeUnconfirmedOperation(this.dbClient.db, opId, giveUp, async (tx) => {
+      const copies = (await listSiteBackupCopies(tx, [backupId])).get(backupId) ?? [];
+      for (const copy of copies.filter((c) => c.status === "running")) {
+        await settleSiteBackupCopy(tx, copy.id, { status: "failed", problem: "interrupted" });
+      }
+      await settleSiteBackupAggregate(tx, backupId);
+      await this.#failSteps(opId, RECOVERY_UNCONFIRMED_TEXT, tx);
+    });
+    return closed ? "unconfirmed" : "pending";
   }
 
   /**
@@ -825,8 +864,8 @@ export class SiteBackupsApplier {
     stepKey: string,
     status: "running" | "succeeded" | "failed" | "skipped",
     message: string,
+    db: HostingPanelDatabase = this.dbClient.db,
   ): Promise<void> {
-    const db = this.dbClient.db;
     const [existing] = await db
       .select({ status: operationSteps.status })
       .from(operationSteps)
@@ -855,13 +894,14 @@ export class SiteBackupsApplier {
     await this.failOperation(operationId, errorCode, errorMessage);
   }
 
-  async #failSteps(operationId: string, stepMessage: string): Promise<void> {
-    await this.safeUpdateStep(operationId, "backup", "failed", stepMessage);
+  async #failSteps(operationId: string, stepMessage: string, db: HostingPanelDatabase = this.dbClient.db): Promise<void> {
+    await this.safeUpdateStep(operationId, "backup", "failed", stepMessage, db);
     await this.safeUpdateStep(
       operationId,
       "retention",
       "skipped",
       "Skipped because backup did not finish",
+      db,
     );
   }
 

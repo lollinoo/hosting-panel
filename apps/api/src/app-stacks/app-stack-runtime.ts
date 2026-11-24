@@ -38,6 +38,7 @@ import {
 import { isStackExecutor, type DockerExecutorPort, type StackExecutorPort } from "@hosting-panel/executor-contracts";
 import { computeAppStackComponentHash, verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import type { RecoveryOutcome, RecoveryReadBound } from "../runtime/recovery-read-bound.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import { AppStackBackupRuntime, isAppStackBackupKind } from "./app-stack-backup-runtime.js";
@@ -204,10 +205,10 @@ export class AppStackRuntime {
     }
   }
 
-  /** Worker recovery for an `unknown` stack operation; read-only. */
-  public recover(op: OperationRow): Promise<"pending" | "settled"> {
-    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op);
-    return recoverAppStackOperation(this.#deps, op);
+  /** Worker recovery for an `unknown` stack operation; read-only. `reads` bounds a read that keeps failing (issue #183). */
+  public recover(op: OperationRow, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
+    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op, reads);
+    return recoverAppStackOperation(this.#deps, op, reads);
   }
 
   #now(): Date {
