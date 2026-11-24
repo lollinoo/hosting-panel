@@ -1,8 +1,11 @@
 import {
   APP_IMAGE_ALLOWLIST,
   ApprovedStackPlanSchema,
+  appStackComponentSecretRefs,
   appStackEngineNameProblem,
+  appStackPlanEnvironmentSecretRefs,
   appStackPlanImageProblems,
+  appStackPlanSecretRefs,
   type AppImageAllowlistEntry,
   type AppStackSecretFileContent,
   type ApprovedStackPlan,
@@ -42,14 +45,17 @@ export function assertExecutableAppStackPlan(input: unknown, options: AppStackPl
   return plan;
 }
 
-/** For start/restart: the files of ONE component (parameterKey -> content). */
+const refId = (ref: { readonly parameterKey: string; readonly version: number }) => `${ref.parameterKey}:${String(ref.version)}`;
+
+/** For start/restart: the secrets of ONE component (parameterKey -> content), the ones delivered as files and, in a
+ *  version 2 plan, the ones in its environment. */
 export function assertAppStackSecretContents(
   plan: ApprovedStackPlan,
   componentKey: string,
   entries: readonly AppStackSecretFileContent[],
 ): Readonly<Record<string, string>> {
-  const pinned = new Set(plan.components.flatMap((c) => c.secretFiles.map((s) => `${s.parameterKey}:${s.version}`)));
-  if (entries.some((entry) => !pinned.has(`${entry.parameterKey}:${entry.version}`))) {
+  const pinned = new Set(appStackPlanSecretRefs(plan).map(refId));
+  if (entries.some((entry) => !pinned.has(refId(entry)))) {
     throw new AppStackExecutorError("STACK_PLAN_INVALID", "A secret entry is not part of the plan");
   }
   const component = plan.components.find((c) => c.key === componentKey);
@@ -58,16 +64,42 @@ export function assertAppStackSecretContents(
   }
   const contents: Record<string, string> = {};
   const versions = new Map<string, number>();
-  for (const file of component.secretFiles) {
-    const [entry, ...more] = entries.filter((e) => e.parameterKey === file.parameterKey && e.version === file.version);
-    if (more.length > 0 || (versions.get(file.parameterKey) ?? file.version) !== file.version) {
+  for (const ref of appStackComponentSecretRefs(component)) {
+    const [entry, ...more] = entries.filter((e) => e.parameterKey === ref.parameterKey && e.version === ref.version);
+    if (more.length > 0 || (versions.get(ref.parameterKey) ?? ref.version) !== ref.version) {
       throw new AppStackExecutorError("STACK_PLAN_INVALID", `A secret of component ${componentKey} has more than one entry`);
     }
-    versions.set(file.parameterKey, file.version);
+    versions.set(ref.parameterKey, ref.version);
     if (entry === undefined) {
       throw new AppStackExecutorError("STACK_SECRET_MISSING", `A secret of component ${componentKey} is missing`);
     }
-    contents[file.parameterKey] = entry.content;
+    contents[ref.parameterKey] = entry.content;
+  }
+  return contents;
+}
+
+/** For create: the environment secrets of the WHOLE plan (parameterKey -> content). A version 1 plan, and a version 2
+ *  plan without environment secrets, takes no entry at all. Run before anything is removed or created. */
+export function assertAppStackCreateSecretContents(
+  plan: ApprovedStackPlan,
+  entries: readonly AppStackSecretFileContent[] | undefined,
+): Readonly<Record<string, string>> {
+  const refs = appStackPlanEnvironmentSecretRefs(plan);
+  const wanted = new Set(refs.map(refId));
+  const given = entries ?? [];
+  if (given.some((entry) => !wanted.has(refId(entry)))) {
+    throw new AppStackExecutorError("STACK_PLAN_INVALID", "A secret entry is not part of the plan");
+  }
+  const contents: Record<string, string> = {};
+  for (const ref of refs) {
+    const [entry, ...more] = given.filter((e) => e.parameterKey === ref.parameterKey);
+    if (more.length > 0 || Object.hasOwn(contents, ref.parameterKey)) {
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", "A secret of the application has more than one entry");
+    }
+    if (entry === undefined) {
+      throw new AppStackExecutorError("STACK_SECRET_MISSING", "A secret of the application is missing");
+    }
+    contents[ref.parameterKey] = entry.content;
   }
   return contents;
 }

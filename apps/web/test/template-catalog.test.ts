@@ -264,6 +264,7 @@ describe("/admin/templates", () => {
       ["/admin/templates/apps/new", tabs.apps],
       // ADR-0043: a one-component application template written by a form.
       ["/admin/templates/apps/new/image", tabs.image],
+      ["/admin/templates/apps/import", tabs.importCompose],
     ]);
     const out = html(m, tree);
     expect(out).toContain(m.admin.templates.title);

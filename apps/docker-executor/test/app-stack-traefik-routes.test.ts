@@ -189,7 +189,7 @@ describe("buildAppStackDynamicTraefikYaml", () => {
 
   it.each<[string, string, () => unknown]>([
     ["manual source", "HOST_POLICY_DENIED", () => [route([host("shop.example.org", { tls: true, source: "manual" })])]],
-    ["redirect", "HOST_POLICY_DENIED", () => [route([host("www.example.org", { redirectTo: "https://shop.example.org" }), host("shop.example.org")])]],
+    ["redirect to an address outside the application", "HOST_POLICY_DENIED", () => [route([host("www.example.org", { redirectTo: "https://elsewhere.example.org" }), host("shop.example.org")])]],
     ["panel hostname", "HOST_POLICY_DENIED", () => [route([host(PANEL.hostname)])]],
     ["panel IP", "HOST_POLICY_DENIED", () => [route([host(PANEL.ipv4)])]],
     ["9 hosts", "VALIDATION_ERROR", () => [

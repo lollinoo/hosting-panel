@@ -54,6 +54,7 @@ import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/do
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
 import * as adminTemplatesRoute from "@/app/api/admin/app-templates/route";
 import * as adminValidateRoute from "@/app/api/admin/app-templates/validate/route";
+import * as adminImportRoute from "@/app/api/admin/app-templates/import-compose/route";
 import * as adminTemplateRoute from "@/app/api/admin/app-templates/[templateId]/route";
 import * as adminVersionsRoute from "@/app/api/admin/app-templates/[templateId]/versions/route";
 import * as adminArchiveRoute from "@/app/api/admin/app-templates/[templateId]/archive/route";
@@ -403,10 +404,12 @@ describe("BFF routes pass the API's 403 and 404 through unchanged", () => {
     { name: "secret", handler: secretsRoute.POST as unknown as Handler, method: "POST", params: { orgId: ORG_B, stackId: STACK }, body: { parameterKey: "admin_password", value: "S3cr3t-planted" }, key: false, path: `${S}/${STACK}/secrets` },
     { name: "domain add", handler: domainsRoute.POST as unknown as Handler, method: "POST", params: { orgId: ORG_B, stackId: STACK }, body: { hostname: "notes.example.com", componentKey: "web", port: 8080 }, key: false, path: `${S}/${STACK}/domains` },
     { name: "domain remove", handler: domainRoute.DELETE as unknown as Handler, method: "DELETE", params: { orgId: ORG_B, stackId: STACK, domainId: "sdom_1" }, key: false, path: `${S}/${STACK}/domains/sdom_1` },
+    { name: "domain options", handler: domainRoute.PATCH as unknown as Handler, method: "PATCH", params: { orgId: ORG_B, stackId: STACK, domainId: "sdom_1" }, body: { redirectToDomainId: null, compression: true, protection: null, pathRoutes: [] }, key: false, path: `${S}/${STACK}/domains/sdom_1` },
     { name: "logs", handler: logsRoute.GET as unknown as Handler, method: "GET", params: { orgId: ORG_B, stackId: STACK, componentKey: "web" }, key: false, path: `${S}/${STACK}/components/web/logs?tail=200` },
     // admin routes: the browser of a customer reaching them is refused by the API, and the BFF says so unchanged
     { name: "admin create", handler: adminTemplatesRoute.POST as unknown as Handler, method: "POST", params: {}, body: { slug: "notes", source: "x" }, key: true, path: "v1/admin/app-templates" },
     { name: "admin validate", handler: adminValidateRoute.POST as unknown as Handler, method: "POST", params: {}, body: { source: "x" }, key: false, path: "v1/admin/app-templates/validate" },
+    { name: "admin import", handler: adminImportRoute.POST as unknown as Handler, method: "POST", params: {}, body: { compose: "services: {}" }, key: false, path: "v1/admin/app-templates/import-compose" },
     { name: "admin update", handler: adminTemplateRoute.PATCH as unknown as Handler, method: "PATCH", params: { templateId: "atpl_x" }, body: { enabled: true }, key: false, path: "v1/admin/app-templates/atpl_x" },
     { name: "admin version", handler: adminVersionsRoute.POST as unknown as Handler, method: "POST", params: { templateId: "atpl_x" }, body: { source: "x", makeDefault: false }, key: true, path: "v1/admin/app-templates/atpl_x/versions" },
     { name: "admin archive", handler: adminArchiveRoute.POST as unknown as Handler, method: "POST", params: { templateId: "atpl_x" }, body: {}, key: false, path: "v1/admin/app-templates/atpl_x/archive" },

@@ -161,7 +161,7 @@ describe("engine / simulator parity: the same refusal gives the same reason, cod
     ["an image outside the plan", async () => undefined, (p) => p.pullAppStackImage({ plan, image: `registry.test/acme/web@sha256:${"e".repeat(64)}` }), "STACK_PLAN_INVALID", "The image is not part of the plan"],
     ["a route outside the ingress", deployed, (p) => p.publishAppStackRoutes({ plan, routes: [{ ...ROUTES[0]!, componentKey: "worker" }] }), "STACK_PLAN_INVALID", "The route is not an ingress of the plan"],
     ["a manual certificate route", deployed, (p) => p.publishAppStackRoutes({ plan, routes: [{ ...ROUTES[0]!, hosts: [{ ...HOST, source: "manual" as const }] }] }), "STACK_UNSUPPORTED_FEATURE", undefined],
-    ["a redirect route", deployed, (p) => p.publishAppStackRoutes({ plan, routes: [{ ...ROUTES[0]!, hosts: [{ ...HOST, redirectTo: "https://x.example.org" }] }] }), "STACK_UNSUPPORTED_FEATURE", undefined],
+    ["a path rule outside the ingress", deployed, (p) => p.publishAppStackRoutes({ plan, routes: [{ ...ROUTES[0]!, hosts: [{ ...HOST, paths: [{ pathPrefix: "/api", componentKey: "worker", internalPort: 9000, stripPrefix: false }] }] }] }), "STACK_PLAN_INVALID", "A path of the route is not an ingress of the plan"],
     ["a route to a component that is not running", prepared, (p) => p.publishAppStackRoutes({ plan, routes: ROUTES }), "STACK_COMPONENT_NOT_READY", undefined],
     ["a stack id of another organisation (prepare)", deployed, (p) => p.prepareAppStack({ plan: rehash({ ...plan, organizationId: "org_other" }) }), "STACK_NAMESPACE_CONFLICT", undefined],
     ["a stack id of another organisation (remove)", deployed, (p) => p.removeAppStack({ stackId: ID, organizationId: "org_other", removeVolumes: true }), "STACK_NAMESPACE_CONFLICT", undefined],

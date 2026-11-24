@@ -327,7 +327,9 @@ const BELOW_FLOOR: readonly Row[] = [
   ],
   ["port 0", () => edit((p) => void (worker(p).expose = [0])), invalid("components.1.expose.0")],
   ["secret version 0", () => edit((p) => void (worker(p).secretFiles = [{ envName: "SHARED_KEY_FILE", parameterKey: "shared_key", version: 0 }])), invalid("components.1.secretFiles.0.version")],
-  ["schema version 2", () => edit((p) => void ((p as Loose).schemaVersion = 2)), invalid("schemaVersion")],
+  ["schema version 3", () => edit((p) => void ((p as Loose).schemaVersion = 3)), invalid("schemaVersion")],
+  // A version 1 body that calls itself version 2 lacks what version 2 requires of every component.
+  ["a version 1 body under schema version 2", () => edit((p) => void ((p as Loose).schemaVersion = 2)), invalid("components.0.profile")],
   ["no component", () => edit((p) => void ((p.components = []), (p.ingress = []), (p.volumes = []))), invalid("components")],
 ];
 

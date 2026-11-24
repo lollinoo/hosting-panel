@@ -90,3 +90,11 @@ export function domainTargetsMissing(
 ): AppStackDomainRow[] {
   return domains.filter((d) => !ingress.some((i) => i.componentKey === d.componentKey && i.port === d.internalPort));
 }
+
+/** Domain rows with a path rule (ADR-0037) whose (componentKey, port) is not an ingress pair of the plan. */
+export function pathTargetsMissing(
+  domains: readonly AppStackDomainRow[],
+  ingress: readonly { componentKey: string; port: number }[],
+): AppStackDomainRow[] {
+  return domains.filter((d) => d.pathRoutes.some((p) => !ingress.some((i) => i.componentKey === p.componentKey && i.port === p.port)));
+}

@@ -5090,7 +5090,7 @@ paths:
       operationId: adminCreateAppTemplate
       summary: Create an application template with its first version, as a draft (server administrator only; audited as admin.app_template.create)
       description: >-
-        The source is an `HCP-STACK/v1` document; its `x-hp-stack` header gives the name, the description and the
+        The source is an `HCP-STACK/v1` or `HCP-STACK/v2` document; its `x-hp-stack` header gives the name, the description and the
         category, which PATCH may change later. A source with problems is refused with `VALIDATION_ERROR`
         ("The template is not valid.") and up to 20 `details` (`field` is the path in the document or `source`,
         `reason` the problem's reason, `message` its line and column). The audit row never carries the source.
@@ -5162,6 +5162,55 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Application templates are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/app-templates/import-compose:
+    post:
+      tags: [App Templates]
+      operationId: adminImportComposeAppTemplate
+      summary: Read a Docker Compose file into a draft application template without saving it (server administrator only)
+      description: >-
+        Always answers 200 for a well-formed request. `report` says what the importer did with each part of the file:
+        kept with a remark (`info`), `changed`, `dropped` or `refused`. With no refusal, `source` is a draft
+        `HCP-STACK/v2` document and `validation` is the verdict `POST /v1/admin/app-templates/validate` gives for it;
+        with one, both are `null`. The administrator reviews the draft and saves it with
+        `POST /v1/admin/app-templates`, which validates again. Every image is pinned by digest: for an image the file
+        names by tag, the server asks its registry for the digest (a read-only lookup, up to 8 images, which can
+        take some tens of seconds); an image the registry does not know is refused in the report by name. Passwords and
+        keys written in the file become secrets the platform generates at installation, and are never returned.
+        Nothing is stored and nothing is audited. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while
+        the capability flag `applicationTemplatesAvailable` is false, or when the file names an image without a digest
+        on a server that cannot run applications.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportComposeInput"
+      responses:
+        "200":
+          description: The draft, when there is one, and the report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ComposeImportDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Application templates are not available (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The images could not be looked up right now (`DOCKER_ENGINE_UNAVAILABLE`, retryable,
+            "The server could not look up the images of the file right now. Try again in a few minutes.")
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/app-templates/{templateId}:
@@ -5896,7 +5945,8 @@ paths:
         `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
-        drops is refused with `domain_target_removed`. Volumes are never removed by an upgrade. Returns 422
+        drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
+        `path_target_removed` (`details[0].field: domains`). Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
         false.
       parameters:
@@ -5945,7 +5995,8 @@ paths:
         refused (`details[0].reason: plan_changed`). Other refusals on `revisionId` are `unknown_revision`,
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
-        refused with `domain_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
+        `path_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6118,7 +6169,11 @@ paths:
         Write-only: the value is stored encrypted as a new version and is never returned, logged or audited; the
         answer says only that a value is set, its version and when. Nothing is queued: the next deploy uses it. A key
         that is not a secret of the application is refused (`VALIDATION_ERROR`, `details[0].field: parameterKey`,
-        `details[0].reason: STACK_PARAMETER_INVALID`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        `details[0].reason: STACK_PARAMETER_INVALID`); a secret the template declares `customer: false` is answered
+        exactly like an unknown key, so the answer does not reveal that it exists. A secret the application reads from
+        a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
+        (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`) and nothing is stored. A
+        secret delivered as a file keeps the body's limit. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
         while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6258,13 +6313,87 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}:
+    patch:
+      tags: [App Stacks]
+      operationId: updateAppStackDomain
+      summary: Set the routing options of a web address of an application (app.update; audited as app.stack.domain.update)
+      description: >-
+        Replaces the four options of the address together (ADR-0037): the redirect to another address of the same
+        application, the password protection, compression and the paths. An option sent empty is cleared. The password
+        is write-only: send `protection.username` alone to keep the one already set (`VALIDATION_ERROR`,
+        `details[0].reason: password_required` when none is set). A redirect goes to another address of this
+        application that does not redirect itself and that no address redirects to (`redirect_target`,
+        `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
+        point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
+        pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
+        published or is refused: on a running application the route refresh is queued in the same request; while a
+        route file may be in place that the panel cannot rewrite now (an action in progress other than the panel's own
+        route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
+        answer is 409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status
+        (`stop_unfinished` after a stop that did not finish, whose status reads running or degraded), and nothing is
+        written. The audit row holds the user name and whether a password was sent, never the password. No
+        Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAppStackDomainInput"
+      responses:
+        "200":
+          description: The web addresses of the application, and when the saved options reach the published address
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, applies]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+                  applies:
+                    type: string
+                    enum: [shortly, at_start]
+                    description: >-
+                      `shortly`: the panel rewrites the application's route file in a few moments, without a restart.
+                      `at_start`: nothing of the application is published now (not installed yet, or stopped); the
+                      options are used when it is next started.
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
     delete:
       tags: [App Stacks]
       operationId: removeAppStackDomain
       summary: Remove a web address from an application (app.update; audited as app.stack.domain.remove)
       description: >-
-        Its route is withdrawn. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        Its route is withdrawn: on a running application the route refresh is queued in the same request (ADR-0037).
+        Removing frees the hostname, so it is accepted only when that refresh withdraws it now, or when nothing of the
+        application is published and no action is open (never installed, or stopped). Otherwise (any action in
+        progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
+        stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
+        status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
+        address is kept. No Idempotency-Key.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6295,6 +6424,11 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
+            `details[0].reason` is the status); the address is kept
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -9467,15 +9601,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     OrganizationCapabilitiesDto:
       type: object
@@ -9536,15 +9674,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     DevPersonaDto:
       type: object
@@ -12667,8 +12809,8 @@ components:
           maxLength: 300
           description: Fixed English text; never echoes a value
 
-    AppTemplateParameter:
-      description: A typed parameter of a template, by `type`. A `secret` parameter has no default and is set by the customer, write-only.
+    AppTemplateValueParameter:
+      description: A typed parameter with a default, by `type`
       oneOf:
         - type: object
           required: [key, label, type, options, default, customer]
@@ -12717,6 +12859,14 @@ components:
             type: { type: string, enum: [size] }
             default: { type: string, pattern: "^[1-9][0-9]{0,4}[KMG]$" }
             customer: { type: boolean }
+
+    AppTemplateParameter:
+      description: >-
+        A parameter the customer may set, by `type`. A `secret` parameter has no default and is set by the customer,
+        write-only. A secret the platform generates (`HCP-STACK/v2`) is never listed here, whether or not the customer
+        may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
         - type: object
           required: [key, label, type, required, customer]
           properties:
@@ -12725,6 +12875,39 @@ components:
             type: { type: string, enum: [secret] }
             required: { type: boolean }
             customer: { type: boolean, enum: [true] }
+
+    AppSecretGenerate:
+      type: object
+      additionalProperties: false
+      required: [kind, length]
+      description: >-
+        How the platform makes a secret nobody types (`HCP-STACK/v2`). `length` counts characters, except for `base64`
+        where it counts the random bytes before encoding; the bounds are 16 to 128 for `password` and `hex`, 16 to 96
+        for `base64` and 8 to 32 for `user`. The value is made at installation and never returned.
+      properties:
+        kind: { type: string, enum: [password, hex, base64, user] }
+        length: { type: integer, minimum: 8, maximum: 128 }
+
+    AdminAppTemplateParameter:
+      description: >-
+        A parameter as the template declares it, by `type` (server administrator only). A `secret` parameter of an
+        `HCP-STACK/v1` template has no `generate` and is set by the customer. In `HCP-STACK/v2` it always has
+        `generate`: `null` when the customer sets it (`customer` is then `true`), otherwise how the platform makes it at
+        installation; a generated secret is always `required`, and `customer` says whether the customer may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
+        - type: object
+          required: [key, label, type, required, customer]
+          properties:
+            key: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+            label: { type: string, minLength: 1, maxLength: 80 }
+            type: { type: string, enum: [secret] }
+            required: { type: boolean }
+            customer: { type: boolean }
+            generate:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/AppSecretGenerate"
 
     AppStackHealthcheck:
       description: A closed tcp or http check on the component's own address; `timeoutSeconds` never exceeds `intervalSeconds`
@@ -12797,6 +12980,43 @@ components:
             properties:
               envName: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
               parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+        profile:
+          type: string
+          enum: [strict, standard]
+          description: >-
+            The closed container body the component runs with; present only for an `HCP-STACK/v2` template (a v1
+            component always runs as `strict`). What a name allows is fixed by the platform: no template names a
+            capability, a user or a mount option.
+        secretEnvironment:
+          type: array
+          maxItems: 64
+          description: >-
+            The variables whose value holds a secret, present only for an `HCP-STACK/v2` template; sorted by unique
+            name. Each value is told as its pieces, in order: the template's own text, or the key of the secret
+            parameter that fills that place. Never a secret value.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, pieces]
+            properties:
+              name: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
+              pieces:
+                type: array
+                minItems: 1
+                maxItems: 9
+                description: At most 4 of the pieces name a secret parameter, and two pieces of text never follow each other
+                items:
+                  oneOf:
+                    - type: object
+                      additionalProperties: false
+                      required: [literal]
+                      properties:
+                        literal: { type: string, minLength: 1, maxLength: 4096 }
+                    - type: object
+                      additionalProperties: false
+                      required: [parameterKey]
+                      properties:
+                        parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
         resources:
           type: object
           required: [cpuMilli, memoryBytes]
@@ -12859,7 +13079,26 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
+
+    ImportComposeInput:
+      type: object
+      additionalProperties: false
+      required: [compose]
+      properties:
+        compose:
+          type: string
+          minLength: 1
+          description: The Docker Compose file, at most 65536 UTF-8 bytes. Neither it nor the draft is stored or logged.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: The name of the draft; without it, the `# name:` comment at the head of the file, or a default
+        category:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          description: The category of the draft; without it, the `# category:` comment at the head of the file, or `apps`
 
     CreateAppTemplateInput:
       type: object
@@ -12872,7 +13111,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
 
     AddAppTemplateVersionInput:
       type: object
@@ -12882,7 +13121,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
         makeDefault:
           type: boolean
           default: false
@@ -12931,12 +13170,55 @@ components:
           type: array
           description: Every parameter the source declares; empty when not valid
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           description: "`null` when the source is not valid"
           allOf:
             - $ref: "#/components/schemas/AppStackPreview"
+
+    ComposeImportNote:
+      type: object
+      required: [level, code, path, message]
+      description: What the importer did with one part of the Compose file
+      properties:
+        level:
+          type: string
+          enum: [info, changed, dropped, refused]
+          description: "`info` kept with a remark, `changed` kept in another form, `dropped` left out, `refused` no draft is made"
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+          description: A fixed code of the importer, such as `IMAGE_PINNED`, `PORTS_DROPPED` or `IMAGE_UNRESOLVED`
+        path:
+          type: string
+          maxLength: 512
+          description: Where in the file; empty for the whole file
+        message:
+          type: string
+          minLength: 1
+          maxLength: 600
+          description: Fixed English text; names keys, variables and images of the file, never a secret value
+
+    ComposeImportDto:
+      type: object
+      required: [source, report, validation]
+      properties:
+        source:
+          type: string
+          nullable: true
+          description: The draft `HCP-STACK/v2` document; `null` when the report holds a refusal
+        report:
+          type: array
+          maxItems: 200
+          description: When the importer has more than 200 things to say, refusals are kept first and the last note says how many are not shown
+          items:
+            $ref: "#/components/schemas/ComposeImportNote"
+        validation:
+          nullable: true
+          description: The validator's verdict on the draft; `null` without a draft
+          allOf:
+            - $ref: "#/components/schemas/AppTemplateValidationDto"
 
     AdminAppTemplateSummaryDto:
       type: object
@@ -13055,7 +13337,7 @@ components:
           format: date-time
         source:
           type: string
-          description: The `HCP-STACK/v1` document, as saved
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, as saved
         valid:
           type: boolean
           description: Whether the stored source passes today's checks
@@ -13066,7 +13348,7 @@ components:
         parameters:
           type: array
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           allOf:
@@ -13274,6 +13556,9 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        compression:
+          type: boolean
+          description: "true creates the address with compression on (ADR-0037); left out, it is off"
 
     CreateAppStackInput:
       type: object
@@ -13380,6 +13665,61 @@ components:
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"
 
+    AppStackDomainPathRoute:
+      type: object
+      additionalProperties: false
+      required: [pathPrefix, componentKey, port, stripPrefix]
+      properties:
+        pathPrefix:
+          type: string
+          maxLength: 64
+          pattern: "^(?:/[A-Za-z0-9][A-Za-z0-9._~-]{0,31}){1,4}$"
+          description: One to four segments, no trailing slash. The rule takes this path and everything below it
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        stripPrefix:
+          type: boolean
+          description: Whether the path is taken off the request before it reaches the application
+
+    UpdateAppStackDomainInput:
+      type: object
+      additionalProperties: false
+      required: [redirectToDomainId, compression, protection, pathRoutes]
+      description: The four routing options of a web address (ADR-0037), always sent together
+      properties:
+        redirectToDomainId:
+          nullable: true
+          description: Another web address of the same application; visitors are sent there, path and query kept
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [username]
+          properties:
+            username:
+              type: string
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+            password:
+              type: string
+              writeOnly: true
+              minLength: 12
+              maxLength: 128
+              description: Printable ASCII characters. Leave it out to keep the password already set
+        pathRoutes:
+          type: array
+          maxItems: 4
+          description: Each path once
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
+
     AppStackAcceptedDto:
       type: object
       required: [stackId, operationId, deploymentId, status]
@@ -13451,7 +13791,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -13547,6 +13887,19 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/AppStackPlanIngress"
+            pathTargets:
+              type: array
+              description: >-
+                ADR-0037: the entry points a path of an address may point at now, those of both the revision that runs
+                and the desired one (the routing options refuse any other with `unknown_ingress`)
+              items:
+                $ref: "#/components/schemas/AppStackPlanIngress"
+            routesPending:
+              type: boolean
+              description: >-
+                ADR-0037: the saved web addresses and their routing options differ from those the last successful route
+                publication was made from, whatever the health of the targets then or now. While true the page shows no
+                option of an address as active.
             cpuMilli:
               type: integer
               minimum: 0
@@ -13626,7 +13979,7 @@ components:
 
     AppStackDomainDto:
       type: object
-      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt]
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -13654,6 +14007,25 @@ components:
           format: date-time
           nullable: true
           description: When the DNS was last checked
+        redirectToDomainId:
+          nullable: true
+          description: The web address of the same application this one sends its visitors to
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          required: [username]
+          description: Set when the address asks for a user name and a password. The password is never returned
+          properties:
+            username:
+              type: string
+        pathRoutes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
 
     AppStackPlanDiffDto:
       type: object

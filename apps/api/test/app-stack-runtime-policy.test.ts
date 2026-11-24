@@ -1,5 +1,6 @@
 import {
   APP_STACK_STEP_KEYS,
+  AppStackRouteWireSchema,
   ERROR_CODES,
   type AppStackComponentHealth,
   type AppStackComponentObservation,
@@ -129,6 +130,11 @@ function domain(hostname: string, componentKey: string, internalPort: number, pa
     certAttempts: 0,
     certExpiresAt: null,
     certTrusted: true,
+    redirectToDomainId: null,
+    compression: false,
+    accessUsername: null,
+    accessPasswordHash: null,
+    pathRoutes: [],
     createdAt: NOW,
     updatedAt: NOW,
     ...patch,
@@ -338,6 +344,159 @@ describe("routes", () => {
     expect(healthOnly([], routed([admin]))).toBe(false);
     expect(healthOnly([www, admin], routed([domain("www.example.com", "admin", 9000)]))).toBe(false);
     expect(healthOnly([domain("www.example.com", "web", 8080, { certStatus: "requested" })], routed([www]))).toBe(false);
+  });
+});
+
+describe("routes with options (ADR-0037)", () => {
+  const p = plan([component("admin"), component("web")], [
+    { componentKey: "admin", port: 9000 },
+    { componentKey: "web", port: 8080 },
+  ]);
+  const all = new Set(["admin", "web"]);
+  const future = new Date(NOW.getTime() + 86_400_000);
+  const VERIFIER = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+  const OTHER_VERIFIER = "$apr1$abcdefgh$GQF3hbcxO2ySp4igPQ/3a.";
+  const ADMIN_PATH = { pathPrefix: "/admin", componentKey: "admin", port: 9000, stripPrefix: true };
+  const routes = (domains: AppStackDomainRow[], include: ReadonlySet<string> = all) =>
+    appStackRoutePlan({ plan: p, domains, include, now: NOW, acmeEnabled: true });
+  const hash = (domains: AppStackDomainRow[], include: ReadonlySet<string> = all) => {
+    const { entries } = routes(domains, include);
+    return entries.length > 0 ? appStackRoutesHash(entries) : null;
+  };
+  const www = (patch: Partial<AppStackDomainRow> = {}) => domain("www.example.com", "web", 8080, patch);
+  const old = (patch: Partial<AppStackDomainRow> = {}) =>
+    domain("old.example.com", "admin", 9000, { redirectToDomainId: "asd_www.example.com", ...patch });
+
+  it("plans and hashes addresses without options exactly as before the options existed", () => {
+    const { entries } = routes([
+      www({ certStatus: "active", certExpiresAt: future }),
+      domain("admin.example.com", "admin", 9000),
+      domain("app.example.com", "web", 8080, { certStatus: "requested", certChallenge: "dns-01" }),
+    ]);
+    // The request the executor signs and compares: its text, key order included.
+    expect(JSON.stringify(entries)).toBe(
+      '[{"componentKey":"admin","internalPort":9000,"hosts":[{"hostname":"admin.example.com","tls":false,"httpsRedirect":false,"redirectTo":null}]},' +
+        '{"componentKey":"web","internalPort":8080,"hosts":[{"hostname":"www.example.com","tls":true,"httpsRedirect":true,"redirectTo":null},' +
+        '{"hostname":"app.example.com","tls":true,"httpsRedirect":false,"redirectTo":null,"challenge":"dns-01"}]}]',
+    );
+    // The hash release 0.9 stored for these addresses: an update must not rewrite a route that did not change.
+    expect(appStackRoutesHash(entries)).toBe("e2e872821e85f74f148f8c15ce36e5225600d16bc5f8773309170d5f7132a312");
+  });
+
+  it("writes an option only when it is set, after the host, in the order of the route request", () => {
+    const { entries } = routes([
+      www({
+        certStatus: "requested",
+        certChallenge: "dns-01",
+        compression: true,
+        accessUsername: "team",
+        accessPasswordHash: VERIFIER,
+        pathRoutes: [{ pathPrefix: "/static", componentKey: "web", port: 8080, stripPrefix: false }, ADMIN_PATH],
+      }),
+      domain("admin.example.com", "admin", 9000, { compression: true }),
+    ]);
+    expect(entries).toEqual([
+      { componentKey: "admin", internalPort: 9000, hosts: [{ hostname: "admin.example.com", tls: false, httpsRedirect: false, redirectTo: null, compress: true }] },
+      {
+        componentKey: "web",
+        internalPort: 8080,
+        hosts: [
+          {
+            hostname: "www.example.com",
+            tls: true,
+            httpsRedirect: false,
+            redirectTo: null,
+            challenge: "dns-01",
+            compress: true,
+            protection: { username: "team", passwordHash: VERIFIER },
+            paths: [
+              { pathPrefix: "/admin", componentKey: "admin", internalPort: 9000, stripPrefix: true },
+              { pathPrefix: "/static", componentKey: "web", internalPort: 8080, stripPrefix: false },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(Object.keys(entries[1]!.hosts[0]!)).toEqual(["hostname", "tls", "httpsRedirect", "redirectTo", "challenge", "compress", "protection", "paths"]);
+    for (const entry of entries) expect(AppStackRouteWireSchema.parse(entry)).toEqual(entry);
+  });
+
+  it("puts an address that redirects in the entry of its destination, with the scheme the destination serves", () => {
+    const secure = routes([www({ certStatus: "active", certExpiresAt: future }), old({ compression: true })]);
+    expect(secure.orphaned).toBe(0);
+    expect(secure.entries).toEqual([
+      {
+        componentKey: "web",
+        internalPort: 8080,
+        hosts: [
+          { hostname: "www.example.com", tls: true, httpsRedirect: true, redirectTo: null },
+          // Its own certificate state; nothing to compress, protect or split by path.
+          { hostname: "old.example.com", tls: false, httpsRedirect: false, redirectTo: "https://www.example.com" },
+        ],
+      },
+    ]);
+    for (const entry of secure.entries) expect(AppStackRouteWireSchema.parse(entry)).toEqual(entry);
+    const plain = routes([www(), old({ certStatus: "active", certExpiresAt: future })]);
+    expect(plain.entries[0]?.hosts[1]).toEqual({ hostname: "old.example.com", tls: true, httpsRedirect: true, redirectTo: "http://www.example.com" });
+  });
+
+  it("publishes a redirect with its destination, whatever the part the redirecting address was put on", () => {
+    const rows = [www(), old()];
+    expect(routes(rows, new Set(["web"])).entries.flatMap((e) => e.hosts.map((h) => h.hostname))).toEqual(["www.example.com", "old.example.com"]);
+    expect(routes(rows, new Set(["admin"])).entries).toEqual([]);
+    // A destination outside the plan, a missing one and one that redirects itself take the redirect out.
+    expect(routes([domain("www.example.com", "web", 9999), old()])).toEqual({ entries: [], orphaned: 1 });
+    expect(routes([old()])).toEqual({ entries: [], orphaned: 0 });
+    const chain = routes([www({ redirectToDomainId: "asd_admin.example.com" }), old(), domain("admin.example.com", "admin", 9000)]);
+    expect(chain.entries.flatMap((e) => e.hosts.map((h) => h.hostname))).toEqual(["www.example.com", "admin.example.com"]);
+    // An address whose own part left the plan is not published, redirect or not.
+    expect(routes([www(), domain("old.example.com", "admin", 9999, { redirectToDomainId: "asd_www.example.com" })])).toMatchObject({ orphaned: 1 });
+    expect(routes([www(), domain("old.example.com", "admin", 9999, { redirectToDomainId: "asd_www.example.com" })]).entries[0]?.hosts).toHaveLength(1);
+  });
+
+  it("publishes a path only while the part it points at is ready and still in the plan", () => {
+    const rows = [www({ pathRoutes: [ADMIN_PATH, { pathPrefix: "/gone", componentKey: "web", port: 9999, stripPrefix: false }] })];
+    expect(routes(rows).entries[0]?.hosts[0]?.paths).toEqual([{ pathPrefix: "/admin", componentKey: "admin", internalPort: 9000, stripPrefix: true }]);
+    expect(routes(rows, new Set(["web"])).entries[0]?.hosts[0]).toEqual({ hostname: "www.example.com", tls: false, httpsRedirect: false, redirectTo: null });
+    expect(routes(rows, new Set(["admin"])).entries).toEqual([]);
+  });
+
+  it("appStackRoutesHash: every option counts, the order of rows and paths does not", () => {
+    const base = { compression: true, accessUsername: "team", accessPasswordHash: VERIFIER, pathRoutes: [ADMIN_PATH] };
+    const reference = hash([www(base), old()]);
+    const variants: AppStackDomainRow[][] = [
+      [www(), old()],
+      [www({ ...base, compression: false }), old()],
+      [www({ ...base, accessUsername: "staff" }), old()],
+      [www({ ...base, accessPasswordHash: OTHER_VERIFIER }), old()],
+      [www({ ...base, accessUsername: null, accessPasswordHash: null }), old()],
+      [www({ ...base, pathRoutes: [] }), old()],
+      [www({ ...base, pathRoutes: [{ ...ADMIN_PATH, stripPrefix: false }] }), old()],
+      [www({ ...base, pathRoutes: [{ ...ADMIN_PATH, pathPrefix: "/staff" }] }), old()],
+      [www(base), old({ redirectToDomainId: null })],
+      [www(base)],
+    ];
+    const hashes = [reference, ...variants.map((rows) => hash(rows))];
+    expect(new Set(hashes).size).toBe(hashes.length);
+    for (const value of hashes) expect(value).toMatch(/^[0-9a-f]{64}$/);
+
+    const two = [ADMIN_PATH, { pathPrefix: "/static", componentKey: "web", port: 8080, stripPrefix: false }];
+    expect(hash([old(), www({ ...base, pathRoutes: [...two].reverse() })])).toBe(hash([www({ ...base, pathRoutes: two }), old()]));
+    // The verifier is hashed, never carried.
+    expect(reference).not.toContain("apr1");
+  });
+
+  it("appStackRoutesHealthOnly: a path or a redirect that left with its part is health, a changed option is not", () => {
+    const rows = [www({ compression: true, pathRoutes: [ADMIN_PATH] }), old(), domain("admin.example.com", "admin", 9000)];
+    const healthOnly = (domains: AppStackDomainRow[], appliedRoutesHash: string | null) =>
+      appStackRoutesHealthOnly({ plan: p, domains, now: NOW, acmeEnabled: true, appliedRoutesHash });
+    expect(healthOnly(rows, hash(rows))).toBe(true);
+    expect(healthOnly(rows, hash(rows, new Set(["web"])))).toBe(true);
+    expect(healthOnly(rows, hash(rows, new Set(["admin"])))).toBe(true);
+    expect(healthOnly(rows, null)).toBe(true);
+    expect(healthOnly(rows, hash([www({ pathRoutes: [ADMIN_PATH] }), rows[1]!, rows[2]!]))).toBe(false);
+    expect(healthOnly(rows, hash([www({ compression: true }), rows[1]!, rows[2]!]))).toBe(false);
+    expect(healthOnly(rows, hash([rows[0]!, old({ redirectToDomainId: null }), rows[2]!]))).toBe(false);
   });
 });
 

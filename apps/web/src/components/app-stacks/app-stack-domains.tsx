@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MAX_APP_STACK_DOMAINS, type AppStackDetailDto, type AppStackDomainDto } from "@hosting-panel/contracts";
+import { MAX_APP_STACK_DOMAINS, type AppStackDetailDto, type AppStackDomainDto, type UpdateAppStackDomainInput } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,23 +12,31 @@ import { Label } from "@/components/ui/label";
 import { format } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
+import { AppStackDomainOptions } from "./app-stack-domain-options";
 import { appStackRefusalText } from "./app-stack-view";
 
 const tone = (s: string) => (s === "active" ? "success" : s === "failed" ? "destructive" : "secondary");
 
-/** Web addresses: adding and removing are synchronous, the answer is the whole list. */
+/**
+ * Web addresses: adding, removing and changing the options are synchronous, the answer is the whole list. `pending`
+ * (ADR-0037): what is saved is not yet what the published routes hold, so no option is shown as active on its own.
+ */
 export function AppStackDomains({
   orgId,
   stackId,
   csrfToken,
   initial,
   ingress,
+  pathTargets,
+  pending,
 }: {
   orgId: string;
   stackId: string;
   csrfToken: string;
   initial: AppStackDomainDto[] | null;
   ingress: AppStackDetailDto["ingress"];
+  pathTargets: AppStackDetailDto["pathTargets"];
+  pending: boolean;
 }) {
   const m = useMessages();
   const t = m.apps.domains;
@@ -41,30 +49,35 @@ export function AppStackDomains({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // router.refresh() keeps client state: take the fresh server rows.
   useEffect(() => {
     if (initial) setRows(initial);
   }, [initial]);
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}/domains`;
   const confirming = rows.find((d) => d.id === removing);
+  const edited = rows.find((d) => d.id === editing);
   const date = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const targetText = (componentKey: string, port: number) => format(m.apps.wizard.target, { component: componentKey, port });
 
   if (initial === null) return <p className="text-sm text-muted-foreground">{m.apps.detail.sectionError}</p>;
 
-  async function send(name: string, method: string, url: string, body: object): Promise<boolean> {
+  /** The answer of the API, or null when it refused (the refusal is shown). */
+  async function send(name: string, method: string, url: string, body: object): Promise<{ data?: unknown; applies?: unknown } | null> {
     setBusy(true);
     setError(null);
+    setNotice(null);
     const sent = await keyedSend(keys.current, csrfToken, name, method, url, body);
     setBusy(false);
     if (!sent.ok) {
       setError(appStackRefusalText(m, sent.code, sent.reason));
-      return false;
+      return null;
     }
-    const list = (sent.data as { data?: unknown } | null)?.data;
-    if (Array.isArray(list)) setRows(list as AppStackDomainDto[]);
+    const answer = (sent.data ?? {}) as { data?: unknown; applies?: unknown };
+    if (Array.isArray(answer.data)) setRows(answer.data as AppStackDomainDto[]);
     router.refresh();
-    return true;
+    return answer;
   }
 
   async function add(e: React.FormEvent) {
@@ -72,7 +85,25 @@ export function AppStackDomains({
     const to = ingress[target];
     const h = hostname.trim().toLowerCase();
     if (busy || !to || !h) return;
-    if (await send("add", "POST", base, { hostname: h, componentKey: to.componentKey, port: to.port })) setHostname("");
+    // A new address starts with compression on (ADR-0037 R4); «Opzioni» turns it off.
+    if (await send("add", "POST", base, { hostname: h, componentKey: to.componentKey, port: to.port, compression: true })) setHostname("");
+  }
+
+  function open(id: string) {
+    setError(null);
+    setNotice(null);
+    setEditing(id);
+  }
+
+  // A refusal stays in the dialog, with what was typed (the password field is emptied on every send).
+  async function saveOptions(id: string, body: UpdateAppStackDomainInput) {
+    if (busy) return;
+    const answer = await send(`options:${id}`, "PATCH", `${base}/${id}`, body);
+    if (answer) {
+      setEditing(null);
+      // Nothing of the application is published: the options take effect when it starts.
+      setNotice(answer.applies === "at_start" ? t.options.savedAtStart : t.options.saved);
+    }
   }
 
   async function remove(id: string) {
@@ -92,9 +123,19 @@ export function AppStackDomains({
               <div className="space-y-1">
                 <p className="font-medium">{d.hostname}</p>
                 {ingress.length > 1 && <p className="text-muted-foreground">{targetText(d.componentKey, d.port)}</p>}
+                {d.redirectToDomainId !== null && (
+                  <p className="text-muted-foreground">
+                    {format(t.options.summary.redirect, { hostname: rows.find((r) => r.id === d.redirectToDomainId)?.hostname ?? "" })}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={tone(d.status)}>{t.status[d.status]}</Badge>
                   <Badge variant={tone(d.certificateStatus)}>{t.certificate[d.certificateStatus]}</Badge>
+                  {d.protection !== null && <Badge variant="secondary">{t.options.summary.protected}</Badge>}
+                  {d.pathRoutes.length > 0 && <Badge variant="secondary">{format(t.options.summary.paths, { n: d.pathRoutes.length })}</Badge>}
+                  {pending && (d.redirectToDomainId !== null || d.protection !== null || d.pathRoutes.length > 0) && (
+                    <Badge variant="outline">{t.options.summary.pending}</Badge>
+                  )}
                   {d.certificateStatus === "active" && d.certificateExpiresAt && (
                     <time dateTime={d.certificateExpiresAt} className="text-muted-foreground">
                       {format(t.expires, { date: date.format(new Date(d.certificateExpiresAt)) })}
@@ -102,9 +143,21 @@ export function AppStackDomains({
                   )}
                 </div>
               </div>
-              <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setRemoving(d.id)}>
-                {t.remove}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  aria-label={format(t.options.title, { hostname: d.hostname })}
+                  onClick={() => open(d.id)}
+                >
+                  {t.options.open}
+                </Button>
+                <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setRemoving(d.id)}>
+                  {t.remove}
+                </Button>
+              </div>
             </li>
           ))}
         </ul>
@@ -148,10 +201,27 @@ export function AppStackDomains({
       <p id="app-domain-hint" className="text-sm text-muted-foreground">
         {t.hint}
       </p>
-      {error && (
+      {notice && (
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+      )}
+      {error && !edited && (
         <Alert variant="destructive" role="alert">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
+      )}
+      {edited && (
+        <AppStackDomainOptions
+          key={edited.id}
+          domain={edited}
+          rows={rows}
+          ingress={pathTargets}
+          busy={busy}
+          error={error}
+          onSave={(body) => saveOptions(edited.id, body)}
+          onClose={() => setEditing(null)}
+        />
       )}
       <Dialog open={confirming !== undefined} onOpenChange={(o) => !o && !busy && setRemoving(null)}>
         <DialogContent>

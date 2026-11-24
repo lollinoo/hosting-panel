@@ -67,7 +67,8 @@ export function AppStackSecrets({
       setEditing(null);
       setNotice(t.replaced);
       router.refresh();
-    } else setError(appStackRefusalText(m, sent.code, sent.reason));
+    } else if (sent.reason === "value_too_long") setFieldError(appStackRefusalText(m, sent.code, sent.reason));
+    else setError(appStackRefusalText(m, sent.code, sent.reason));
   }
 
   return (

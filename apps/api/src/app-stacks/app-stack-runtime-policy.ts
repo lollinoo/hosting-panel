@@ -3,14 +3,17 @@ import {
   aggregateAppStackStatus,
   canTransitionAppStack,
   effectiveComponentHealth,
+  isTerminalOperationStatus,
   type AppStackComponentHealth,
   type AppStackComponentObservation,
+  type AppStackHostRoute,
   type AppStackOperationKind,
   type AppStackStatus,
   type AppStackStatusIpcResult,
   type AppStackStepKey,
   type ApprovedStackPlan,
   type ErrorCode,
+  type OperationStatus,
   type SiteHostRoute,
 } from "@hosting-panel/contracts";
 import type { AppStackComponentRow, AppStackDomainRow, AppStackRow, DomainRow } from "@hosting-panel/database";
@@ -205,7 +208,7 @@ export function appStackRestartSet(next: Pick<ApprovedStackPlan, "components">, 
 export interface AppStackRouteEntry {
   readonly componentKey: string;
   readonly internalPort: number;
-  readonly hosts: SiteHostRoute[];
+  readonly hosts: AppStackHostRoute[];
 }
 
 const toDomainPolicyRow = (row: AppStackDomainRow): DomainRow => ({
@@ -220,6 +223,10 @@ const toDomainPolicyRow = (row: AppStackDomainRow): DomainRow => ({
 /**
  * R13. Rows on a (componentKey, internalPort) outside plan.ingress are left out and counted in `orphaned`; `include`
  * filters the ingress targets. Entries sorted by (componentKey, internalPort), empty ones dropped.
+ *
+ * ADR-0037. An address that redirects sits in the entry of its destination and is published with it, so the redirect
+ * needs only the destination to be ready; a path rule is published while its own target is ready. An option that is
+ * not set adds no key: the entries of addresses without options are what they were before the options existed.
  */
 export function appStackRoutePlan(input: {
   readonly plan: Pick<ApprovedStackPlan, "ingress">;
@@ -228,34 +235,71 @@ export function appStackRoutePlan(input: {
   readonly now: Date;
   readonly acmeEnabled: boolean;
 }): { readonly entries: AppStackRouteEntry[]; readonly orphaned: number } {
-  const groups = new Map<string, { componentKey: string; internalPort: number; rows: DomainRow[] }>();
-  let orphaned = 0;
-  for (const row of input.domains) {
-    if (!input.plan.ingress.some((r) => r.componentKey === row.componentKey && r.port === row.internalPort)) {
-      orphaned += 1;
-      continue;
-    }
-    if (!input.include.has(row.componentKey)) continue;
-    const id = `${row.componentKey}:${String(row.internalPort)}`;
-    const group = groups.get(id) ?? { componentKey: row.componentKey, internalPort: row.internalPort, rows: [] };
-    group.rows.push(toDomainPolicyRow(row));
+  const isIngress = (componentKey: string, port: number): boolean =>
+    input.plan.ingress.some((r) => r.componentKey === componentKey && r.port === port);
+  const receives = (componentKey: string, port: number): boolean => input.include.has(componentKey) && isIngress(componentKey, port);
+  const routed = input.domains.filter((row) => isIngress(row.componentKey, row.internalPort));
+  const byId = new Map(routed.map((row) => [row.id, row]));
+  const hostOf = (row: AppStackDomainRow): SiteHostRoute =>
+    buildSiteHostRoutes([toDomainPolicyRow(row)], input.now, { acmeEnabled: input.acmeEnabled })[0]!;
+
+  const groups = new Map<string, AppStackRouteEntry>();
+  for (const row of routed) {
+    const serving = row.redirectToDomainId === null ? row : byId.get(row.redirectToDomainId);
+    // A destination that is not routed, not ready, or that redirects itself takes the addresses pointing at it out.
+    if (serving === undefined || (serving !== row && serving.redirectToDomainId !== null)) continue;
+    if (!receives(serving.componentKey, serving.internalPort)) continue;
+    const id = `${serving.componentKey}:${String(serving.internalPort)}`;
+    const group = groups.get(id) ?? { componentKey: serving.componentKey, internalPort: serving.internalPort, hosts: [] };
+    group.hosts.push(
+      serving === row
+        ? { ...hostOf(row), ...contentOptions(row, receives) }
+        : { ...hostOf(row), redirectTo: `${hostOf(serving).httpsRedirect ? "https" : "http"}://${serving.hostname}` },
+    );
     groups.set(id, group);
   }
-  const entries = [...groups.values()]
-    .map((g) => ({
-      componentKey: g.componentKey,
-      internalPort: g.internalPort,
-      hosts: buildSiteHostRoutes(g.rows, input.now, { acmeEnabled: input.acmeEnabled }),
-    }))
-    .filter((e) => e.hosts.length > 0)
-    .sort((a, b) =>
-      a.componentKey === b.componentKey ? a.internalPort - b.internalPort : a.componentKey < b.componentKey ? -1 : 1,
-    );
-  return { entries, orphaned };
+  const entries = [...groups.values()].sort((a, b) =>
+    a.componentKey === b.componentKey ? a.internalPort - b.internalPort : a.componentKey < b.componentKey ? -1 : 1,
+  );
+  return { entries, orphaned: input.domains.length - routed.length };
 }
 
+/** What an address that serves content asks for beyond its host, in the key order of the route request. */
+function contentOptions(
+  row: AppStackDomainRow,
+  receives: (componentKey: string, port: number) => boolean,
+): Pick<AppStackHostRoute, "compress" | "protection" | "paths"> {
+  const paths = row.pathRoutes
+    .filter((path) => receives(path.componentKey, path.port))
+    .map((path) => ({ pathPrefix: path.pathPrefix, componentKey: path.componentKey, internalPort: path.port, stripPrefix: path.stripPrefix }))
+    .sort((a, b) => (a.pathPrefix < b.pathPrefix ? -1 : 1));
+  return {
+    ...(row.compression ? { compress: true as const } : {}),
+    ...(row.accessUsername !== null && row.accessPasswordHash !== null
+      ? { protection: { username: row.accessUsername, passwordHash: row.accessPasswordHash } }
+      : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+  };
+}
+
+/**
+ * The hosts are hashed as a site's are (a redirect included); the options of an entry follow as one more element only
+ * when one of its hosts has any, so the hash of addresses without options is the one already stored.
+ */
 export function appStackRoutesHash(entries: readonly AppStackRouteEntry[]): string {
-  const canonical = entries.map((e) => [e.componentKey, e.internalPort, routePlanHash(e.hosts, null)]);
+  const canonical = entries.map((e) => {
+    const options = [...e.hosts]
+      .sort((a, b) => a.hostname.localeCompare(b.hostname))
+      .filter((h) => h.compress !== undefined || h.protection !== undefined || h.paths !== undefined)
+      .map((h) => [
+        h.hostname,
+        h.compress === true ? 1 : 0,
+        h.protection ? [h.protection.username, h.protection.passwordHash] : null,
+        h.paths ? h.paths.map((path) => [path.pathPrefix, path.componentKey, path.internalPort, path.stripPrefix]) : null,
+      ]);
+    const hosts = [e.componentKey, e.internalPort, routePlanHash(e.hosts, null)];
+    return options.length > 0 ? [...hosts, options] : hosts;
+  });
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -278,6 +322,44 @@ export function appStackRoutesHealthOnly(input: {
   return false;
 }
 
+/**
+ * ADR-0037: the fingerprint of the saved addresses and options a route publication is made from, bound to the routes
+ * hash it was published as (a writer of that hash that does not know the fingerprint leaves one that no longer
+ * matches). Neither the health of the targets nor a certificate is in it: only what the customer saves.
+ */
+export function appStackAddressesHash(domains: readonly AppStackDomainRow[], appliedRoutesHash: string | null): string {
+  const rows = [...domains]
+    .sort((a, b) => (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0))
+    .map((row) => [
+      row.hostname,
+      row.componentKey,
+      row.internalPort,
+      row.redirectToDomainId,
+      row.compression,
+      row.accessUsername,
+      row.accessPasswordHash,
+      [...row.pathRoutes]
+        .sort((a, b) => (a.pathPrefix < b.pathPrefix ? -1 : 1))
+        .map((path) => [path.pathPrefix, path.componentKey, path.port, path.stripPrefix]),
+    ]);
+  return createHash("sha256").update(JSON.stringify([appliedRoutesHash, rows])).digest("hex");
+}
+
+/**
+ * ADR-0037: the saved addresses and options differ from those the last successful route publication was made from,
+ * whatever the health of the targets then and now. Exact: it compares what was saved, not what a subset of healthy
+ * targets would publish. Nothing published (no routes hash, no fingerprint: never installed, stopped) holds nothing
+ * back; a fingerprint that is not known while routes are published counts as pending.
+ */
+export function appStackRoutesPending(input: {
+  readonly domains: readonly AppStackDomainRow[];
+  readonly appliedRoutesHash: string | null;
+  readonly appliedAddressesHash: string | null;
+}): boolean {
+  if (input.appliedRoutesHash === null && input.appliedAddressesHash === null) return false;
+  return input.appliedAddressesHash !== appStackAddressesHash(input.domains, input.appliedRoutesHash);
+}
+
 /** The observer's route refresh: a system stack.deploy under the routes key prefix (a customer request carries a user id). */
 export function appStackRoutesRefresh(op: {
   readonly kind: string;
@@ -285,6 +367,59 @@ export function appStackRoutesRefresh(op: {
   readonly idempotencyKey: string | null;
 }): boolean {
   return op.kind === "stack.deploy" && op.requestedByUserId === null && op.idempotencyKey?.startsWith(APP_STACK_ROUTES_KEY_PREFIX) === true;
+}
+
+/**
+ * Whether the observer keeps the routes of this stack in line with its addresses: its applied revision runs (also when
+ * a newer one is desired: the refresh publishes what runs), no action is in progress, and its last one was not a stop.
+ */
+export function appStackRoutesFollowAddresses(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId">,
+  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+): boolean {
+  if (stack.status !== "running" && stack.status !== "degraded") return false;
+  if (stack.appliedRevisionId === null) return false;
+  // The routes of a stack the customer last asked to stop stay withdrawn.
+  if (last?.kind === "stack.stop") return false;
+  return last === undefined || isTerminalOperationStatus(last.status);
+}
+
+/**
+ * ADR-0037: when a change of the routing options reaches the route file. "shortly": the observer rewrites it now, or
+ * its own route refresh is under way (it reads the addresses when it runs, and the pass after it sees a change it
+ * missed). "at_start": nothing of the stack is published (never installed, or stopped, which withdraws the routes) and
+ * the next start publishes the options. null: a route file may be in place that nothing rewrites until the customer
+ * acts, so the change is refused rather than shown as active.
+ */
+export function appStackOptionsApply(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId">,
+  last:
+    | {
+        readonly kind: string;
+        readonly status: OperationStatus;
+        readonly requestedByUserId: string | null;
+        readonly idempotencyKey: string | null;
+      }
+    | undefined,
+): "shortly" | "at_start" | null {
+  if (appStackRoutesFollowAddresses(stack, last)) return "shortly";
+  if (last !== undefined && !isTerminalOperationStatus(last.status) && appStackRoutesRefresh(last)) return "shortly";
+  if (stack.appliedRevisionId === null || stack.status === "stopped") return "at_start";
+  return null;
+}
+
+/**
+ * ADR-0037: removing an address frees its host name for anyone, so it is accepted only when the refresh queued with it
+ * withdraws the name now (the routes follow the addresses), or when nothing is published and no action is open. Not
+ * while the panel's own refresh runs (it may have read the address already) nor during a first install.
+ */
+export function appStackAddressRemovable(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId" | "appliedRoutesHash">,
+  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+): boolean {
+  if (appStackRoutesFollowAddresses(stack, last)) return true;
+  const idle = last === undefined || isTerminalOperationStatus(last.status);
+  return idle && stack.appliedRoutesHash === null && (stack.appliedRevisionId === null || stack.status === "stopped");
 }
 
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */

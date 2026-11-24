@@ -46,6 +46,7 @@ import {
   AppTemplateEditor,
   appIssueMarkers,
   appIssueText,
+  appParameterDefaultText,
   canSaveAppTemplate,
   type AppEditorTarget,
 } from "@/components/admin/app-template-editor";
@@ -118,6 +119,36 @@ describe("appIssueMarkers", () => {
       { line: 7, message: "IMAGE_DIGEST_REQUIRED: b" },
     ]);
     expect(appIssueMarkers([])).toEqual([]);
+  });
+});
+
+describe("appParameterDefaultText", () => {
+  type Parameter = AppTemplateValidationDto["parameters"][number];
+  const secret = (over: object = {}) => ({ key: "db_password", label: "Database password", type: "secret", required: true, customer: true, ...over }) as Parameter;
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("a value parameter shows its default as text (%s)", (_l, m) => {
+    const e = m.admin.appTemplates.editor;
+    expect(appParameterDefaultText(e, { key: "title", label: "Title", type: "string", default: "Notes", customer: true })).toBe("Notes");
+    expect(appParameterDefaultText(e, { key: "debug", label: "Debug", type: "boolean", default: false, customer: false })).toBe("false");
+    expect(appParameterDefaultText(e, { key: "workers", label: "Workers", type: "integer", default: 4, customer: true } as Parameter)).toBe("4");
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("a secret never shows a value: it says who sets it, and how the platform makes a generated one (%s)", (_l, m) => {
+    const e = m.admin.appTemplates.editor;
+    // HCP-STACK/v1 has no `generate`; in v2 null means the customer sets it.
+    expect(appParameterDefaultText(e, secret())).toBe(e.secretNoDefault);
+    expect(appParameterDefaultText(e, secret({ generate: null }))).toBe(e.secretNoDefault);
+    const generated = appParameterDefaultText(e, secret({ customer: false, generate: { kind: "hex", length: 64 } }));
+    expect(generated).toBe(format(e.secretGenerated, { kind: "hex", length: 64 }));
+    expect(generated).toContain("hex");
+    expect(generated).toContain("64");
+    expect(generated).not.toMatch(/[{}]/);
   });
 });
 
@@ -319,6 +350,34 @@ describe("AppTemplateEditor", () => {
     expect(out).toContain(">Notes<");
     expect(out).toContain(t.editor.secretNoDefault);
     expect(out).toContain(t.editor.customerYes);
+  });
+
+  it("a generated secret says how the platform makes it and that the customer does not set it", () => {
+    const generated: AppTemplateValidationDto = {
+      ...VALID,
+      parameters: [{ key: "db_password", label: "Database password", type: "secret", required: true, customer: false, generate: { kind: "password", length: 32 } }],
+    };
+    const out = html(en, editor(VERSION, { 1: generated }).tree);
+    expect(out).toContain(format(t.editor.secretGenerated, { kind: "password", length: 32 }));
+    expect(out).toContain(t.editor.customerNo);
+    expect(out).not.toContain(t.editor.secretNoDefault);
+  });
+
+  it("initialResult is the verdict the page opens with: no Validate click, no request", () => {
+    const seeded = callHooks(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target: CREATE, initialResult: VALID });
+    expect(seeded.sets).toEqual([]);
+    const out = html(en, seeded.tree);
+    expect(out).toMatch(/role="status"[^>]*>[\s\S]*The template is valid\./);
+    expect(out).toContain(">title<");
+    expect(fetchMock).not.toHaveBeenCalled();
+    // An invalid verdict opens on its issues; without the prop, or with null, the editor opens with no verdict.
+    const refused = html(en, callHooks(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target: CREATE, initialResult: INVALID }).tree);
+    expect(refused).toContain(appIssueText(t.editor, INVALID.issues[0]!));
+    for (const props of [{}, { initialResult: null }]) {
+      const blank = html(en, callHooks(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target: CREATE, ...props }).tree);
+      expect(blank).not.toContain("The template is valid.");
+      expect(blank).not.toContain('role="alert"');
+    }
   });
 
   it("an edit drops the result and the error", () => {

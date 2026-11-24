@@ -29,6 +29,11 @@ const NOTES_RENAMED = NOTES_DEMO_SOURCE.replace("  app:\n", "  web:\n").replace(
   "service: app\n    port: 8080",
   "service: web\n    port: 8080",
 );
+/** The cache answers on the web too: two entry points, app:8080 and cache:6379 (ADR-0037 path rules). */
+const NOTES_TWO_DOORS = `${NOTES_DEMO_SOURCE.replace(
+  "      - 6379\n    deploy:",
+  "      - 6379\n    healthcheck:\n      kind: tcp\n      port: 6379\n      intervalSeconds: 15\n      timeoutSeconds: 3\n    deploy:",
+)}  - service: cache\n    port: 6379\n    protocol: http\n`;
 const OTHER_HASH = "0".repeat(64);
 const MISSING_VERSION = `atv_${"0".repeat(24)}`;
 const MISSING_REVISION = `srev_${"0".repeat(24)}`;
@@ -354,6 +359,58 @@ describe("application stack plan, upgrade and rollback refusals over HTTP (QA M5
       });
       const before = await snapshot(stackId);
       const removed = { field: "domains", reason: "domain_target_removed" };
+      expectRefusal(await rollback(stackId, rev1!.id, rev1!.planHash), 400, "VALIDATION_ERROR", removed);
+      expectRefusal(await plan(stackId, { revisionId: rev1!.id }), 400, "VALIDATION_ERROR", removed);
+      expect(await snapshot(stackId)).toEqual(before);
+      expect(await auditCount("app.stack.rollback", stackId)).toBe(0);
+    });
+  });
+
+  describe("an entry point a path of a web address sends requests to (ADR-0037)", () => {
+    const CACHE_PATH = { pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false };
+    const removed = { field: "domains", reason: "path_target_removed" };
+    const domainsPath = (stackId: string) => `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/domains`;
+
+    /** An address on app:8080 whose one path goes to cache:6379; returns its id. */
+    async function withCachePath(stackId: string): Promise<string> {
+      const added = await h.call(h.a.token, "POST", domainsPath(stackId), { hostname: `${randomUUID().slice(0, 8)}.path.example.test`, componentKey: "app", port: 8080 });
+      expect(added.status, added.raw).toBe(201);
+      const id = (added.body.data as Json[])[0]!.id as string;
+      const set = await h.call(h.a.token, "PATCH", `${domainsPath(stackId)}/${id}`, { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [CACHE_PATH] });
+      expect(set.status, set.raw).toBe(200);
+      return id;
+    }
+
+    it("an upgrade that drops it is path_target_removed on plan and upgrade, and is accepted once the path is gone", async () => {
+      const { templateId, versionId } = await h.publish(NOTES_TWO_DOORS);
+      const stackId = await running(versionId);
+      const oneDoor = await addVersion(templateId, NOTES_V2);
+      const hash = (await plan(stackId, { templateVersionId: oneDoor })).body.data.planHash as string;
+      expect(typeof hash).toBe("string");
+      const id = await withCachePath(stackId);
+      const before = await snapshot(stackId);
+      expectRefusal(await upgrade(stackId, oneDoor, hash), 400, "VALIDATION_ERROR", removed);
+      expectRefusal(await plan(stackId, { templateVersionId: oneDoor }), 400, "VALIDATION_ERROR", removed);
+      expect(await snapshot(stackId)).toEqual(before);
+      expect(await auditCount("app.stack.upgrade", stackId)).toBe(0);
+
+      const cleared = await h.call(h.a.token, "PATCH", `${domainsPath(stackId)}/${id}`, { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] });
+      expect(cleared.status, cleared.raw).toBe(200);
+      const fresh = await plan(stackId, { templateVersionId: oneDoor });
+      expect(fresh.status, fresh.raw).toBe(200);
+      expect((await upgrade(stackId, oneDoor, fresh.body.data.planHash as string)).status).toBe(202);
+    });
+
+    it("a rollback to a revision without it is path_target_removed on plan and rollback", async () => {
+      const own = await h.publish();
+      const stackId = await running(own.versionId);
+      const twoDoors = await addVersion(own.templateId, NOTES_TWO_DOORS);
+      const diff = await plan(stackId, { templateVersionId: twoDoors });
+      expect((await upgrade(stackId, twoDoors, diff.body.data.planHash as string)).status).toBe(202);
+      await settle(stackId);
+      const [rev1] = await revisions(stackId);
+      await withCachePath(stackId);
+      const before = await snapshot(stackId);
       expectRefusal(await rollback(stackId, rev1!.id, rev1!.planHash), 400, "VALIDATION_ERROR", removed);
       expectRefusal(await plan(stackId, { revisionId: rev1!.id }), 400, "VALIDATION_ERROR", removed);
       expect(await snapshot(stackId)).toEqual(before);
