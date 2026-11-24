@@ -3147,6 +3147,7 @@ x-hp-ingress:
       created: "The application was created but is not installed yet: you can finish it here or later from its page, among your applications.",
       createUnknown:
         "The panel got no clear answer and does not know yet whether the application was created. Trying again from this page is safe: the same details are sent again and the application is never created twice. Before installing it again from another page, look at your applications: it may already be there.",
+      createSignedOut: "Your session has ended. Sign in again, then open «Your applications», because the application may already be there.",
       appsLink: "Your applications",
       openApp: "Open the application",
       domainInvalid: "Write the address name only, for example shop.example.com, without http:// or a path.",

@@ -788,9 +788,12 @@ describe("AppWizard when the create's outcome is unknown", () => {
   });
 
   it.each<[string, Answer, string]>([
+    // A new sign-in in another tab leaves this page with a token of no use: the same answer, it cannot be told apart.
     ["a role taken away (403)", refusal(403, "PERMISSION_DENIED"), en.errors.PERMISSION_DENIED],
+    // Signed out, every Retry here is refused: the sentence says to sign in again and look at the list.
+    ["the session ended (401)", refusal(401, "UNAUTHENTICATED"), t.createSignedOut],
+    ["a 401 whose body is not JSON", notJson(401), t.createSignedOut],
     // No sentence of their own here, only the generic one: the unknown one stays, it says more.
-    ["the session ended (401)", refusal(401, "UNAUTHENTICATED"), t.createUnknown],
     ["a suspended account (403)", refusal(403, "ORGANIZATION_SUSPENDED"), t.createUnknown],
     // «Application not found» would say the create did not happen, which nobody knows.
     ["a membership removed (404)", refusal(404, "NOT_FOUND"), t.createUnknown],
@@ -862,6 +865,17 @@ describe("AppWizard when the create's outcome is unknown", () => {
     expect(first.sets.filter(([k]) => k === 10)).toEqual([[10, null]]);
     expect(first.sets).toContainEqual([6, en.apps.codes.IDEMPOTENCY_CONFLICT]);
     expect(keys.current.create).toBeUndefined();
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("signed out while the outcome is unknown, the sentence says to sign in again and open the list, whose link stays (%s)", (_l, m) => {
+    const w = m.apps.wizard;
+    expect(w.createSignedOut).toContain(`«${w.appsLink}»`);
+    const { tree } = wizard({ ...ready, 0: "install", 6: w.createSignedOut, 10: { name: "team-notes" } }, {}, ENTRY, m);
+    expect(actions(tree)).toEqual([w.appsLink, w.retry]);
+    expect(html(tree, m)).toMatch(new RegExp(`role="alert"[^>]*><p>${w.createSignedOut}</p>`));
   });
 
   it("without private values the replay of a create sent to install opens the application page", async () => {

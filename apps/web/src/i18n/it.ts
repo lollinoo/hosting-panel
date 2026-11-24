@@ -3175,6 +3175,7 @@ x-hp-ingress:
       created: "L'applicazione è stata creata ma non è ancora installata: puoi completarla qui o più tardi dalla sua pagina, tra le tue applicazioni.",
       createUnknown:
         "Il pannello non ha avuto una risposta chiara e non sa ancora se l'applicazione è stata creata. Riprovare da questa pagina è sicuro: vengono inviati di nuovo gli stessi dati e l'applicazione non viene mai creata due volte. Prima di installarla di nuovo da un'altra pagina, guarda tra le tue applicazioni: potrebbe esserci già.",
+      createSignedOut: "La sessione è scaduta. Accedi di nuovo, poi apri «Le tue applicazioni», perché l'applicazione potrebbe esserci già.",
       appsLink: "Le tue applicazioni",
       openApp: "Apri l'applicazione",
       domainInvalid: "Scrivi solo il nome dell'indirizzo, per esempio shop.example.com, senza http:// né percorsi.",
