@@ -87,14 +87,15 @@ export function wizardErrorView(
 
 type Envelope = { data?: { stackId?: unknown }; error?: { code?: string; details?: { field?: string; reason?: string }[] } } | null;
 
-/** keyedSend, but a refusal keeps every detail so the form can point at each field. `known` is false when the key is kept: whether the request took effect is unknown. */
+/** keyedSend, but a refusal keeps every detail so the form can point at each field. `known` is false when the key is kept: whether the request took effect is unknown. `settles` names the refusals that end the request for good. */
 async function post(
   keys: Record<string, string>,
   csrfToken: string,
   name: string,
   url: string,
   body: unknown,
-): Promise<{ ok: boolean; known: boolean; data: Envelope }> {
+  settles: (status: number) => boolean = renewKeyAfter,
+): Promise<{ ok: boolean; known: boolean; status: number; data: Envelope }> {
   const key = (keys[name] ??= crypto.randomUUID());
   try {
     const res = await fetch(url, {
@@ -104,13 +105,16 @@ async function post(
     });
     const data = (await res.json().catch(() => null)) as Envelope;
     // A success whose body is lost names nothing the page can go on with: the key stays so a retry replays it.
-    const known = (res.ok && data !== null) || renewKeyAfter(res.status);
+    const known = (res.ok && data !== null) || settles(res.status);
     if (known) delete keys[name];
-    return { ok: res.ok, known, data };
+    return { ok: res.ok, known, status: res.status, data };
   } catch {
-    return { ok: false, known: false, data: null };
+    return { ok: false, known: false, status: 0, data: null };
   }
 }
+
+/** A retried create is settled only by a refusal of its content; a session, access or rate answer says nothing of the attempt before it. */
+const refusesCreate = (status: number) => status === 400 || status === 409 || status === 422;
 
 const selectClass = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm";
 const noteClass = (error: string | undefined) => (error ? "text-xs text-destructive" : "text-xs text-muted-foreground");
@@ -213,11 +217,15 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
         domains: domainEntries,
         deploy: typedSecrets.length === 0,
       };
-      const r = await post(keys.current, csrfToken, "create", base, body);
+      const r = await post(keys.current, csrfToken, "create", base, body, unsure ? refusesCreate : renewKeyAfter);
       const created = r.ok ? r.data?.data?.stackId : undefined;
       if (typeof created !== "string" && !r.known) {
         setUnsure(body);
-        setError(t.createUnknown);
+        const code = r.data?.error?.code;
+        // A 4xx here is about the session, the access or the pace, not the create: its own sentence when the panel has one.
+        // «Not found» would read as «no application», which nobody knows.
+        const own = code && code !== "NOT_FOUND" && renewKeyAfter(r.status) ? appStackRefusalText(m, code, r.data?.error?.details?.[0]?.reason) : null;
+        setError(own && own !== m.errors.generic ? own : t.createUnknown);
         setBusy(false);
         return;
       }

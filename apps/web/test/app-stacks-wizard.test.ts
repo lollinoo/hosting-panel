@@ -785,6 +785,71 @@ describe("AppWizard when the create's outcome is unknown", () => {
     expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
   });
 
+  it.each<[string, Answer, string]>([
+    ["a role taken away (403)", refusal(403, "PERMISSION_DENIED"), en.errors.PERMISSION_DENIED],
+    // No sentence of their own here, only the generic one: the unknown one stays, it says more.
+    ["the session ended (401)", refusal(401, "UNAUTHENTICATED"), t.createUnknown],
+    ["a suspended account (403)", refusal(403, "ORGANIZATION_SUSPENDED"), t.createUnknown],
+    // «Application not found» would say the create did not happen, which nobody knows.
+    ["a membership removed (404)", refusal(404, "NOT_FOUND"), t.createUnknown],
+    ["too many requests (429)", refusal(429, "RATE_LIMITED"), en.apps.codes.RATE_LIMITED],
+    ["a 403 whose body is not JSON", notJson(403), t.createUnknown],
+  ])("a Retry answered by %s says nothing of the create: the state, the key and the body stay, the answer's sentence shows, the next Retry sends the same", async (_what, said, text) => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({
+      [BASE]: ["network", said, accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const unsure = { ...ready, 0: "install", 6: t.createUnknown, 10: kept };
+
+    const again = wizard(unsure, { 0: values, 1: keys });
+    await click(again.tree, t.retry);
+    expect(again.sets.filter(([k]) => k === 10)).toEqual([[10, kept]]);
+    expect(again.sets).toContainEqual([6, text]);
+    expect(again.sets.filter(([k]) => k === 0 || k === 5 || k === 8)).toEqual([[5, {}]]);
+    expect(keys.current.create).toBe(keyOf(0));
+
+    // What that state offers: Retry alone, no field, whatever step the state names.
+    for (const step of ["install", "review", "configure"]) {
+      const shown = wizard({ ...unsure, 0: step, 6: text }, { 0: values, 1: keys });
+      expect(actions(shown.tree), step).toEqual([t.retry]);
+      expect(editable(shown.tree), step).toEqual([]);
+      expect(html(shown.tree), step).toMatch(new RegExp(`role="alert"[^>]*><p>${text}</p>`));
+    }
+
+    const last = wizard({ ...unsure, 6: text }, { 0: values, 1: keys });
+    await click(last.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, BASE, `${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect([keyOf(1), keyOf(2)]).toEqual([keyOf(0), keyOf(0)]);
+    expect([raw()[1], raw()[2]]).toEqual([raw()[0], raw()[0]]);
+    expect(last.sets).toContainEqual([8, "stk_a1"]);
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it.each<[string, Answer, string]>([
+    ["a refused setting (400)", refusal(400, "VALIDATION_ERROR", [{ field: "parameters.port", reason: "STACK_PARAMETER_INVALID" }]), "configure"],
+    ["a version no longer offered (400)", refusal(400, "VALIDATION_ERROR", [{ field: "templateVersionId", reason: "STACK_TEMPLATE_UNPUBLISHED" }]), ""],
+    ["an address in use (409)", refusal(409, "DOMAIN_CONFLICT"), "domains"],
+    ["applications not offered on this server (422)", refusal(422, "NOT_SUPPORTED"), ""],
+  ])("a Retry refused for %s settles the create: the state ends and the key is dropped", async (_what, said, step) => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [BASE]: ["network", said] });
+    const first = wizard(ready, { 0: secretsRef({ admin_password: PLANTED }), 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const again = wizard({ ...ready, 0: "install", 6: t.createUnknown, 10: kept }, { 1: keys });
+    await click(again.tree, t.retry);
+    expect(again.sets).toContainEqual([10, null]);
+    expect(again.sets.filter(([k]) => k === 0)).toEqual(step ? [[0, step]] : []);
+    expect(keys.current.create).toBeUndefined();
+  });
+
   it("without private values the replay of a create sent to install opens the application page", async () => {
     const keys = { current: {} as Record<string, string> };
     answer({ [BASE]: ["network", accepted(202)] });
