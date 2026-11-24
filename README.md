@@ -150,7 +150,7 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.15.0
+V=0.16.0
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -359,7 +359,7 @@ Cosa sapere prima:
 
 ```bash
 sudo hp-update                    # ultima release
-sudo hp-update --version 0.15.0    # oppure --archive <file>
+sudo hp-update --version 0.16.0    # oppure --archive <file>
 ```
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--allow-feature-loss`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall (**il proxy non viene ricreato**: i certificati caricati a mano e le destinazioni di backup non richiedono nessuna interruzione). Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito, `8` downgrade rifiutato perché la release di destinazione perderebbe una funzione già in uso.
@@ -375,6 +375,8 @@ sudo hp-update --version 0.15.0    # oppure --archive <file>
 **Collegamenti ai database nell'aggiornamento.** La migrazione `0028` è solo additiva. Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un collegamento fra un database e un'applicazione, in qualunque stato, e la release di destinazione non conosce `app-stack-links`. Per rientrare senza forzare: scollegare i database dalle applicazioni nel pannello. Con `--allow-feature-loss` la release precedente non conosce i collegamenti: un database resta attaccato solo finché il suo container non viene sostituito, e nulla lo riattacca.
 
 **Notifiche nell'aggiornamento.** La migrazione `0029` è solo additiva (tre tabelle nuove). Un downgrade deciso dall'operatore esce con **codice 8** anche quando esiste un canale di notifica, acceso o spento, del server o di un cliente, e la release di destinazione non conosce `notifications`: una versione precedente non spedisce nulla, e nessuno saprebbe che gli avvisi sono diventati muti. Per rientrare senza forzare: rimuovere ogni canale con **Rimuovi** (quelli di un cliente li rimuove un proprietario del suo account). Con `--allow-feature-loss` le tabelle restano intatte e non parte nulla finché non torna una release con le notifiche.
+
+**Attività programmate delle applicazioni (`ADR-0042`).** Un modello può dichiarare fino a otto attività (`x-hp-tasks`): un comando per uno dei suoi componenti, scritto dall'amministratore. Il cliente le vede per nome nella pagina dell'applicazione (sezione «Attività programmate»), le esegue subito o sceglie quando partono da sole (mai, ogni ora, ogni giorno o ogni settimana a un'ora intera, in UTC) e legge l'esito e le ultime righe stampate dalle ultime 20 esecuzioni. Nessuna richiesta porta un comando: solo la chiave di un'attività. L'esecutore lancia il comando nel container del componente, come l'utente del componente, lo ferma al limite di tempo (da 5 a 600 secondi) e chiude ciò che ha avviato. La migrazione `0031` è additiva; un downgrade deciso dall'operatore esce con **codice 8** quando esiste una versione di modello con attività e la release di destinazione non conosce `app-tasks`. Procedure in `docs/runbooks/application-stacks.md` §4a.
 
 **Da una versione più vecchia** l'aggiornamento scompatta la nuova versione accanto a quella in uso, poi installa i pacchetti del sistema che la nuova versione vuole e il server non ha (per esempio `nftables` e `unattended-upgrades`), con `apt-get`, e solo dopo installa le unità e i comandi della nuova versione e passa a quella. Se i pacchetti non si installano si ferma, e il pannello resta sulla versione in uso, senza riavvii: controllare le sorgenti di `apt` e la rete, aspettare che finisca un altro `apt` in corso (l'aggiornamento non lo aspetta) e rilanciare. Se le regole di base del firewall sono cambiate, l'aggiornamento scrive il file nuovo ma non lo carica, e stampa «The base firewall rules changed in this version and are not loaded yet»: l'amministratore preme una volta **Applica le regole di base** nella pagina **Amministrazione › Firewall**, che mostra le regole di base come non aggiornate (vedi **Firewall** sotto); fino a quel momento le porte aperte e gli indirizzi bloccati restano in vigore.
 

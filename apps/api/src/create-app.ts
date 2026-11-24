@@ -59,6 +59,7 @@ import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
 import { AppModule } from "./app.module.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
+import { APP_STACK_TASK_SCHEDULE_INTERVAL_MS, AppStackTaskSchedulerService } from "./app-stacks/app-stack-task-scheduler.service.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import { deferMalformedBody } from "./common/deferred-body-error.js";
@@ -258,6 +259,8 @@ export interface CreateControlPlaneAppOptions {
   /** The pass of the notifications; null turns the loop off. No environment variable sets it. */
   readonly notificationsIntervalMs?: number | null;
   readonly terminalSweepIntervalMs?: number | null;
+  /** The pass that queues the tasks of applications that are due (ADR-0042); null turns the loop off. */
+  readonly appTaskScheduleIntervalMs?: number | null;
   readonly panelDump?: ControlPlaneRuntimeConfig["panelDump"];
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
@@ -465,6 +468,14 @@ export async function createControlPlaneApp(
         ? NOTIFICATION_PASS_INTERVAL_MS
         : null;
 
+  // No environment variable: one pass a minute wherever the panel runs applications.
+  const appTaskScheduleIntervalMs =
+    options?.appTaskScheduleIntervalMs !== undefined
+      ? options.appTaskScheduleIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? APP_STACK_TASK_SCHEDULE_INTERVAL_MS
+        : null;
+
   const panelDumpDir = process.env["HP_PANEL_DUMP_DIR"]?.trim();
   const panelDump =
     options?.panelDump !== undefined
@@ -592,6 +603,7 @@ export async function createControlPlaneApp(
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
   const appStackObserver = nestApp.get(AppStackObserverService);
+  const appStackTaskScheduler = nestApp.get(AppStackTaskSchedulerService);
   const mailRelay = nestApp.get(MailRelayService);
   const dnsProvider = nestApp.get(DnsProviderService);
   const siteSftp = nestApp.get(SiteSftpService);
@@ -613,6 +625,7 @@ export async function createControlPlaneApp(
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
   appStackObserver.startBackgroundLoop();
+  appStackTaskScheduler.startBackgroundLoop(appTaskScheduleIntervalMs);
   mailRelay.startBackgroundLoop();
   dnsProvider.startBackgroundLoop(mailRelayRetryIntervalMs);
   if (runtimeBackend !== "disabled") void firewall.syncAtStart();
@@ -659,6 +672,7 @@ export async function createControlPlaneApp(
       await driftReconciler.stop();
       await domainReconciler.stop();
       await appStackObserver.stop();
+      await appStackTaskScheduler.stop();
       await mailRelay.stop();
       await dnsProvider.stop();
       await siteSftp.stop();

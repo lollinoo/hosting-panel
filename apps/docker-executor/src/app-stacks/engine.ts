@@ -107,6 +107,8 @@ export interface AppStackEngineDeps {
    * job of that application holds it.
    */
   readonly backupLanes?: { holdAppStackLane(stackId: string): (() => void) | null };
+  /** A task of the application runs in this executor (ADR-0042): its containers are not created, started or removed. */
+  readonly taskRunning?: (stackId: string) => boolean;
 }
 
 export const APP_STACK_PULL_ENGINE_TIMEOUT_MS = 240_000;
@@ -257,7 +259,11 @@ const done = (res: EngineResponse) => res.statusCode === 200 || res.statusCode =
 const says = (res: EngineResponse, text: string) => res.body.toString("utf8").toLowerCase().includes(text);
 
 /** The component key of an own container (Docker names carry a leading "/"), else null. */
-function ownComponentKey(labels: Labels | null | undefined, name: string | undefined, ids: Ids): string | null {
+export function ownComponentKey(
+  labels: Readonly<Record<string, string>> | null | undefined,
+  name: string | undefined,
+  ids: { readonly stackId: string; readonly organizationId: string },
+): string | null {
   const key = labels?.[APP_STACK_LABELS.component];
   return isOwnAppStackResource(labels ?? undefined, ids.stackId, ids.organizationId) &&
     labels?.[APP_STACK_LABELS.role] === APP_STACK_COMPONENT_ROLE &&
@@ -452,7 +458,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
-    return this.locked(req.stackId, async () => {
+    return this.lockedWithoutTask(req.stackId, async () => {
       const components: AppStackStopIpcResult["components"] = [];
       for (const c of reverseStartOrder(await this.listContainers(req))) {
         if (STOPPED_STATES.has(c.state)) {
@@ -648,6 +654,17 @@ export class AppStackEngine implements StackExecutorPort {
     return target;
   }
 
+  /** A call of this executor is changing the application (the task runner asks before it starts a task). */
+  public isChanging(stackId: string): boolean {
+    return this.busy.has(stackId);
+  }
+
+  /** The changes of the containers of an application: never while a task of it runs (the executor does not trust the API). */
+  private async lockedWithoutTask<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.deps.taskRunning?.(stackId) === true) refuse("STACK_BUSY", "A task of this application stack is running");
+    return this.locked(stackId, fn);
+  }
+
   private async locked<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
     if (this.busy.has(stackId)) refuse("STACK_BUSY", "Another change of this application stack is running");
     this.busy.add(stackId);
@@ -767,13 +784,13 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   /**
-   * locked(), outside every backup job of the application: none of its data is being copied or written back meanwhile
-   * (ADR-0038 K4). `check` runs first, so a refused plan reaches no Engine request. Then the application's backup lane
-   * is held for the whole change, and the change is refused while a job container of its backups is awake: one whose
-   * job ended without its kill or its removal, which the lane no longer shows.
+   * lockedWithoutTask(), outside every backup job of the application: none of its data is being copied or written back
+   * meanwhile (ADR-0038 K4), and no task of it runs (ADR-0042). `check` runs first, so a refused plan reaches no Engine
+   * request. Then the application's backup lane is held for the whole change, and the change is refused while a job
+   * container of its backups is awake: one whose job ended without its kill or its removal, which the lane no longer shows.
    */
   private lockedOutsideBackups<C, T>(stackId: string, check: () => C, fn: (checked: C) => Promise<T>): Promise<T> {
-    return this.locked(stackId, async () => {
+    return this.lockedWithoutTask(stackId, async () => {
       const checked = check();
       const release = this.deps.backupLanes === undefined ? () => undefined : this.deps.backupLanes.holdAppStackLane(stackId);
       if (release === null) refuse("STACK_BUSY", "A backup or a restore of this application is running");

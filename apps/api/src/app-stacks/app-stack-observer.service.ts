@@ -5,6 +5,7 @@ import {
   APP_AUDIT_TARGET_TYPES,
   APP_STACK_BUSY_STATUSES,
   APP_STACK_RESOURCE_TYPE,
+  APP_STACK_TASK_KIND,
   ApprovedStackPlanSchema,
   redactSensitiveString,
   type AppStackStatus,
@@ -30,6 +31,7 @@ import {
   isNotNull,
   isNull,
   listAppStackDomains,
+  not,
   operations,
   or,
   recordAppStackComponentHealthTransactional,
@@ -461,10 +463,17 @@ export class AppStackObserverService {
     const { appliedRevisionId } = stack;
     if (stack.status !== "running" && stack.status !== "degraded") return false;
     const db = this.dbClient.db;
+    // A run of a task is not an action on the routes (ADR-0042): neither a queued one nor one that failed holds them.
     const [last] = await db
       .select({ kind: operations.kind, status: operations.status, completedAt: operations.completedAt })
       .from(operations)
-      .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stack.stackId)))
+      .where(
+        and(
+          eq(operations.resourceType, APP_STACK_RESOURCE_TYPE),
+          eq(operations.resourceId, stack.stackId),
+          not(eq(operations.kind, APP_STACK_TASK_KIND)),
+        ),
+      )
       .orderBy(desc(operations.submittedAt))
       .limit(1);
     if (!appStackRoutesFollowAddresses(stack, last)) return false;

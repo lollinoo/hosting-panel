@@ -226,6 +226,22 @@ export class SimulatedAppStacks implements StackExecutorPort {
     }) as AppStackSimSnapshot;
   }
 
+  /** For the simulated tasks: is the component there and running, and which values its output must never show. */
+  public async findAppStackComponent(req: {
+    readonly stackId: string;
+    readonly organizationId: string;
+    readonly componentKey: string;
+  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] } | null> {
+    const stack = this.own(req.stackId, req.organizationId);
+    const container = stack?.containers.get(req.componentKey);
+    if (stack === undefined || container === undefined) return null;
+    const secretValues =
+      this.options.secretsRootDir !== null
+        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
+        : (stack.secrets.get(req.componentKey) ?? []);
+    return { running: container.state === "running", secretValues };
+  }
+
   public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
     return this.run("pull", { method: "pullAppStackImage", stackId: req.plan.stackId }, true, async (fault) => {
       const plan = this.checkPlan(req.plan);

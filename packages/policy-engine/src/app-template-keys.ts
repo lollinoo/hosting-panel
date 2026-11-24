@@ -19,9 +19,9 @@ const level = (allowed: string[], refusals: Partial<Record<AppTemplateRefusalCod
 };
 
 export const APP_TEMPLATE_KEY_LEVELS: Readonly<Record<
-  "root" | "header" | "parameter" | "service" | "environmentEntry" | "healthcheck" | "deploy" | "resources" | "limits" | "ingress",
+  "root" | "header" | "parameter" | "service" | "environmentEntry" | "healthcheck" | "deploy" | "resources" | "limits" | "ingress" | "task",
   AppTemplateKeyLevel>> = Object.freeze({
-  root: level(["x-hp-stack", "x-hp-parameters", "services", "volumes", "x-hp-ingress"], {
+  root: level(["x-hp-stack", "x-hp-parameters", "services", "volumes", "x-hp-ingress", "x-hp-tasks"], {
     KEY_FORBIDDEN_NETWORK: ["networks"],
     KEY_FORBIDDEN_HOST_ACCESS: ["secrets", "configs", "include", "extends"],
     KEY_UNSUPPORTED: ["x-hp-ports", "name", "version", "models"],
@@ -60,6 +60,11 @@ export const APP_TEMPLATE_KEY_LEVELS: Readonly<Record<
   limits: level(["cpus", "memory"], { KEY_UNSUPPORTED: ["pids", "devices"] }),
   ingress: level(["service", "port", "protocol"], {
     KEY_FORBIDDEN_NETWORK: ["hostname", "host", "domain", "domains", "tls", "path", "published", "host_port"],
+  }),
+  // A task runs as its component runs: it names no user, directory, variable or time of its own (ADR-0042).
+  task: level(["key", "label", "description", "service", "command", "timeoutSeconds"], {
+    KEY_FORBIDDEN_SECURITY: ["user", "privileged", "cap_add", "group_add"],
+    KEY_UNSUPPORTED: ["schedule", "cron", "environment", "working_dir", "entrypoint", "shell", "tty", "stdin_open"],
   }),
 });
 
