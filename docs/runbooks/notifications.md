@@ -163,7 +163,8 @@ next messages go unsigned.
     recorded only on a first install. To correct a wrong recorded IPv4, or after the server's public IPv4 changes, run
     the installer again with `--ipv4 <address>`. Without the flag the installer keeps the IPv4 its last run used
     (`HP_PANEL_IPV4` in `/etc/hosting-panel/executor.env`), else takes the source address of the default route; its
-    `Panel IPv4:` line says which.
+    `Panel IPv4:` line says which. When the panel has another IPv4 recorded than the one the run uses, the installer
+    prints a `WARNING:` line with both and changes nothing: run it again with `--ipv4 <address>` to record the right one.
   - **IPv6**: never detected. `--ipv6 <address>` records it (written without brackets, zone or prefix length),
     `--ipv6 none` removes it, and a run without the flag leaves the recorded one as it is. A loopback, link-local,
     unspecified or IPv4-mapped IPv6 is refused.
