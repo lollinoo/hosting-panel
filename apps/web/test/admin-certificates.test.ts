@@ -24,7 +24,7 @@ import { I18nProvider } from "@/i18n/provider";
 const req = (method: string, headers: Record<string, string> = {}, body: unknown = {}) =>
   new Request("http://localhost:3000/x", {
     method,
-    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", ...headers },
+    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", "Content-Type": "application/json", ...headers },
     body: method === "GET" ? undefined : JSON.stringify(body),
   });
 

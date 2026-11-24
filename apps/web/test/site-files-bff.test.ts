@@ -68,6 +68,7 @@ function makeReq(
   };
   let body: string | undefined;
   if (opts.rawBody !== undefined) {
+    headers["Content-Type"] = "application/json";
     body = opts.rawBody;
   } else if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
