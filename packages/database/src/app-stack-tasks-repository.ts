@@ -22,7 +22,7 @@ import {
   type AppStackTaskSkipReason,
   type ErrorCode,
 } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { AppStackRepositoryError } from "./app-stacks-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { ACTIVE_OPERATION_LOCK_STATUSES, enqueueOperationTransactional } from "./operations-repository.js";
@@ -466,6 +466,20 @@ export function listAppStackTaskSchedulesOfLiveStacks(db: DatabaseExecutor): Pro
     .innerJoin(appStacks, eq(appStacks.id, appStackTaskSchedules.stackId))
     .where(isNull(appStacks.deletedAt))
     .orderBy(asc(appStackTaskSchedules.stackId), asc(appStackTaskSchedules.taskKey));
+}
+
+/**
+ * A schedule whose served time or change time is later than `now` was written by a clock that ran ahead (the clock is
+ * the API's, and it has been set right): such a time would hide every time owed until real time passes it. The schedule
+ * starts clean at `now`, like a changed one: the times before it are not owed. Returns how many schedules were reset.
+ */
+export async function repairAppStackTaskSchedulesAheadOfClock(db: DatabaseExecutor, now: Date): Promise<number> {
+  const repaired = await db
+    .update(appStackTaskSchedules)
+    .set({ servedSlotAt: null, changedAt: now })
+    .where(or(gt(appStackTaskSchedules.servedSlotAt, now), gt(appStackTaskSchedules.changedAt, now)))
+    .returning({ taskKey: appStackTaskSchedules.taskKey });
+  return repaired.length;
 }
 
 /** A time that could not be queued now: the reason is kept and the time stays owed (it is tried again). */

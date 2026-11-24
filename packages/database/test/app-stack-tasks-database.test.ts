@@ -13,6 +13,7 @@ import {
 } from "@hosting-panel/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  and,
   appStackTaskRuns,
   appStackTaskScheduleOf,
   beginAppStackTaskRunTransactional,
@@ -39,6 +40,7 @@ import {
   outboxEvents,
   platformInstallations,
   reopenAppStackTaskSlot,
+  repairAppStackTaskSchedulesAheadOfClock,
   repairOrphanedAppStackTaskRunsTransactional,
   setAppStackTaskScheduleTransactional,
   sql,
@@ -882,6 +884,50 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T12:00:00Z"), row!.changedAt)).toMatchObject({ outcome: "queued" });
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T13:00:00Z"), at("2026-11-23T10:00:00.124Z"))).toEqual({ outcome: "stale" });
       await settle("stk_tk_micro");
+    });
+  });
+
+  describe("a schedule written while the clock ran ahead", () => {
+    const STACK = "stk_tk_ahead";
+    // Later than the times the other cases of this file store: the repair looks at every schedule of the database.
+    const NOW = at("2030-01-10T10:20:00.000Z");
+    const AHEAD = at("2030-01-12T09:00:00.000Z");
+    const rowOf = async (taskKey: string) => (await scheduleOf(STACK, taskKey))!;
+    /** A schedule set at `changedAt` whose latest served time is `served`. */
+    async function written(taskKey: string, changedAt: Date, served: Date | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: changedAt,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    beforeAll(async () => {
+      await stack(STACK);
+      await written("both", AHEAD, AHEAD);
+      await written("changed", AHEAD, at("2030-01-09T10:00:00.000Z"));
+      await written("served", at("2030-01-09T10:20:00.000Z"), AHEAD);
+      await written("past", at("2030-01-07T10:20:00.000Z"), at("2030-01-10T10:00:00.000Z"));
+      await written("now", NOW, NOW);
+    });
+
+    it("resets only the schedules whose stored time is later than the clock", async () => {
+      const [past, now] = [await rowOf("past"), await rowOf("now")];
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), NOW)).toBe(3);
+      for (const key of ["both", "changed", "served"]) {
+        expect(await rowOf(key), key).toMatchObject({ servedSlotAt: null, changedAt: NOW, skippedSlotAt: null, skipReason: null });
+      }
+      // A time in the past, or exactly now, is trusted.
+      expect(await rowOf("past")).toEqual(past);
+      expect(await rowOf("now")).toEqual(now);
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), NOW)).toBe(0);
     });
   });
 

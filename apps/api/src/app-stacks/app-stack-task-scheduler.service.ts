@@ -8,6 +8,7 @@ import {
   listAppStackTaskSchedulesOfLiveStacks,
   newAppEntityId,
   noteAppStackTaskSlotRefused,
+  repairAppStackTaskSchedulesAheadOfClock,
   repairOrphanedAppStackTaskRunsTransactional,
   type AppStackTaskScheduleRow,
   type DatabaseClient,
@@ -84,6 +85,8 @@ export class AppStackTaskSchedulerService {
     if (this.config.runtimeBackend === "disabled") return { queued: 0, refused: 0, skipped: 0 };
     // Runs whose operation ended without them (the panel stopped between the two writes) are closed first.
     await repairOrphanedAppStackTaskRunsTransactional(db, now);
+    // A stored time later than the clock comes from a clock that ran ahead: it would silence the schedule until real time passes it.
+    await repairAppStackTaskSchedulesAheadOfClock(db, now);
 
     let queued = 0;
     let refused = 0;
