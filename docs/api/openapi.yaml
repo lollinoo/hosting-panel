@@ -6256,8 +6256,10 @@ paths:
       summary: Read the last log lines of one component of an application (app.read)
       description: >-
         At most 500 lines (200 by default), read from the server on demand; secret values are masked. A read that
-        cannot be masked answers 503: a secret file of the component is missing (after a host reboot, until
-        **Riavvia** writes it again), or a value stored before the 6-character minimum is shorter (`ADR-0041` §4).
+        cannot be masked answers 503: a secret file the component's container was given is missing (after a host
+        reboot, until **Riavvia** writes it again), or a value stored before the 6-character minimum is shorter
+        (`ADR-0041` §4). The stored plan of the application is not read, so an application whose plan no longer
+        parses still has its logs.
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false, or when the server's Docker executor cannot read application logs.
       parameters:

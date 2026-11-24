@@ -353,12 +353,14 @@ names only the key of a task, and the command is read from the template version 
    environment keeps working. Components without secrets are not affected.
 2. The component logs are never shown unmasked. The executor takes the values of the environment secrets from the
    container itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the
-   values of the secret files it finds. The API sends, with each read, how many secret files the component's plan
-   gives it; when the executor finds fewer, it refuses that component's logs, and the panel says they are not
-   available right now (`ADR-0041` §4). After a reboot that is every component that has a secret file, until
-   **Riavvia** writes the files again; a component whose secrets are all in its environment, or that has none, is
-   read as before. The same refusal comes from a value in which the template's text does not separate two secrets in
-   one way only (two secrets side by side, or that text also inside a secret) when its files are missing.
+   values of the secret files it finds. The container itself says which secret files it was given (its binds into
+   the component's secret folder); when one of them is missing, or is a directory (Docker recreates a missing bind
+   source as an empty directory when it restarts the container), the executor refuses that component's logs, and the
+   panel says they are not available right now (`ADR-0041` §4). After a reboot that is every component that has a
+   secret file, until **Riavvia** writes the files again; a component whose secrets are all in its environment, or
+   that has none, is read as before. The same refusal comes from a value in which the template's text does not
+   separate two secrets in one way only (two secrets side by side, or that text also inside a secret) when its files
+   are missing.
 3. The stacks that have secrets:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and exists (select 1 from app_stack_secrets x where x.stack_id = s.id)"
@@ -715,16 +717,14 @@ needed, and a support visit gives none of this.
 5. **`503` («not available right now») for one component, while other components read.** The panel refused lines
    it could not mask; the customer sees the same answer on their own page, and the executor writes no line about
    it. The answer does not say which of these it is, so try them in order:
-   1. A secret file of the component is missing: after a host reboot (procedure 8), or after an installation or an
-      update that stopped before the component started. The customer (or a hosting administrator of the
-      organisation) presses **Riavvia**, which writes the files again; for a stopped installation, fix its cause and
-      **Reinstalla**.
+   1. A secret file the component's container was given is missing, or Docker recreated it as a directory: after a
+      host reboot (procedure 8), or after an installation or an update that stopped before the component started.
+      The customer (or a hosting administrator of the organisation) presses **Riavvia**, which writes the files
+      again; for a stopped installation, fix its cause and **Reinstalla**.
    2. Still refused after **Riavvia**: a private value of the component is shorter than 6 characters. It was set
       before this rule (a new one is refused, and a generated one has at least 8); the application still starts with
       it. The customer replaces it in **Valori riservati** with one of at least 6 characters, then presses
       **Reinstalla**. The panel does not say which value is the short one.
-   3. Still refused: the API could not read the component's plan from the database and refused before asking the
-      executor. Nothing in the panel repairs a stored plan: report it with the application's id.
 
 ## 14. Administrator: a terminal in a component
 
