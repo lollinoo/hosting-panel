@@ -105,7 +105,7 @@ import {
 } from "./app-stack-compile.js";
 import { diffAppStackPlans } from "./app-stack-diff.js";
 import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
-import { customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
+import { addressRemovingInTheWay, customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
 
 export interface AppStackRequestContext {
@@ -720,15 +720,19 @@ export class AppStacksService {
     return { version, plan, revision: revisionFromPlan(plan, revision.parameters), entries: revision.parameters, newRevision: true };
   }
 
+  /** The same answer as the enqueue transaction gives for the same rows (app-stacks-repository.ts). */
   async #assertDomainTargets(stack: AppStackRow, plan: ApprovedStackPlan): Promise<void> {
-    const domains = await listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id });
-    if (domainTargetsMissing(domains, plan.ingress).length > 0) {
+    const every = await listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id, includeRemoving: true });
+    const live = every.filter((d) => d.removalRequestedAt === null);
+    if (domainTargetsMissing(live, plan.ingress).length > 0) {
       throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
     }
     // A path rule to a removed part would stop routing unseen, and every later save of its options would be refused.
-    if (pathTargetsMissing(domains, plan.ingress).length > 0) {
+    if (pathTargetsMissing(live, plan.ingress).length > 0) {
       throw refusal("domains", "path_target_removed", "A path of a web address still points at a part this version removes. Remove the path first.");
     }
+    // Issue #112: only addresses being removed are in the way, and their rows go once their route is withdrawn.
+    if (domainTargetsMissing(every, plan.ingress).length > 0 || pathTargetsMissing(every, plan.ingress).length > 0) throw addressRemovingInTheWay();
   }
 
   async #keyUsed(ctx: AppStackRequestContext): Promise<boolean> {

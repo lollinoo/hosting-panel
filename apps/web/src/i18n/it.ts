@@ -3561,6 +3561,7 @@ x-hp-ingress:
       database_in_use: "Ci sono applicazioni che usano ancora questo database: scollegale prima.",
       PARAM_VALUE_NOT_CUSTOMER: "Questa impostazione la decide l'applicazione: non si può cambiare.",
       draftUnpublished: "Questa versione non si può più installare. Elimina questa bozza e installa di nuovo l'applicazione: una bozza non ha dati, quindi non perdi nulla.",
+      versionAddressRemoving: "Un indirizzo web che punta a un componente che questa versione toglie è ancora in rimozione: riprova tra qualche minuto.",
     },
     codes: {
       RESOURCE_LOCKED: "L'applicazione sta completando un'altra modifica: attendi e riprova.",

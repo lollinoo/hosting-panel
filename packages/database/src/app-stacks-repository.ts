@@ -61,6 +61,7 @@ export type AppStackRepositoryErrorCode =
   | "NO_REVISION"
   | "COMPONENT_IN_USE"
   | "PATH_IN_USE"
+  | "ADDRESS_REMOVING"
   | "DATABASE_IN_USE";
 
 export class AppStackRepositoryError extends Error {
@@ -577,16 +578,28 @@ export async function enqueueAppStackOperationTransactional(
       assertRevision(next, { ...scope, hostAllocationId: stack.hostAllocationId, templateVersionId: next.templateVersionId });
       const ingress = planList(next.plan, "ingress");
       const domains = await tx
-        .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort, pathRoutes: appStackDomains.pathRoutes })
+        .select({
+          componentKey: appStackDomains.componentKey,
+          internalPort: appStackDomains.internalPort,
+          pathRoutes: appStackDomains.pathRoutes,
+          removalRequestedAt: appStackDomains.removalRequestedAt,
+        })
         .from(appStackDomains)
         .where(eq(appStackDomains.stackId, stack.id));
       const isIngress = (componentKey: string, port: number) => ingress.some((route) => route.componentKey === componentKey && route.port === port);
-      if (domains.some((d) => !isIngress(d.componentKey, d.internalPort))) {
+      const targetGone = (d: (typeof domains)[number]) => !isIngress(d.componentKey, d.internalPort);
+      const pathGone = (d: (typeof domains)[number]) => d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port));
+      const live = domains.filter((d) => d.removalRequestedAt === null);
+      if (live.some(targetGone)) {
         throw new AppStackRepositoryError("COMPONENT_IN_USE", "A web address still points at a part this version removes.");
       }
       // ADR-0037: a path committed after the API checked the plan would stop routing unseen.
-      if (domains.some((d) => d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
+      if (live.some(pathGone)) {
         throw new AppStackRepositoryError("PATH_IN_USE", "A path of a web address still points at a part this version removes.");
+      }
+      // Issue #112: an address being removed keeps its row until its route is withdrawn; the customer has nothing to remove.
+      if (domains.some((d) => targetGone(d) || pathGone(d))) {
+        throw new AppStackRepositoryError("ADDRESS_REMOVING", "A web address this version no longer serves is still being removed.");
       }
       // ADR-0039: a database that applications use stays one component listening on one port. With more, the executor
       // could attach nothing and a disconnection could never be confirmed.

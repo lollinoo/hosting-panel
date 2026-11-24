@@ -3532,6 +3532,7 @@ x-hp-ingress:
       database_in_use: "Applications still use this database: disconnect them first.",
       PARAM_VALUE_NOT_CUSTOMER: "The application decides this setting: it cannot be changed.",
       draftUnpublished: "This version can no longer be installed. Delete this draft and install the application again: a draft has no data, so nothing is lost.",
+      versionAddressRemoving: "A web address that points at a component this version removes is still being removed: try again in a few minutes.",
     },
     codes: {
       RESOURCE_LOCKED: "The application is finishing another change: wait and try again.",

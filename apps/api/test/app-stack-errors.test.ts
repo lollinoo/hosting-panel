@@ -144,6 +144,14 @@ describe("mapAppStackError", () => {
       ...one(409, "RESOURCE_LOCKED", "This web address is being removed.", { field: "domainId", reason: "address_removing" }),
       retryable: false,
     });
+    // Nor does a new version drop what only such an address still points at: the same refusal, on the field of the version.
+    expect(mapped(new AppStackRepositoryError("ADDRESS_REMOVING", "x"))).toMatchObject({
+      ...one(409, "RESOURCE_LOCKED", "A web address this version no longer serves is still being removed. Try again in a few minutes.", {
+        field: "domains",
+        reason: "address_removing",
+      }),
+      retryable: false,
+    });
   });
 
   it("maps a TLS coverage refusal like a site domain add", () => {

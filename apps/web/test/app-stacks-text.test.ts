@@ -21,6 +21,7 @@ import {
   APP_STACK_STATUS_TONE,
   COMPONENT_HEALTH_TONE,
   appStackBackupProblemText,
+  appStackChangeRefusalText,
   appStackProblemText,
   appStackRefusalText,
   formatCpu,
@@ -169,6 +170,16 @@ describe("application backup texts", () => {
     expect(text).toBe(m.apps.reasons.address_removing);
     expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
     for (const t of [text, m.apps.domains.removing, m.apps.domains.removingHint]) expect(t).not.toMatch(/proxy|caddy|traefik|docker|route/i);
+  });
+
+  it.each(locales)("%s: a change of version held by an address being removed says to try again in a few minutes; other refusals read as usual", (_n, m) => {
+    const text = appStackChangeRefusalText(m, "RESOURCE_LOCKED", "address_removing", "running");
+    expect(text).toBe(m.apps.reasons.versionAddressRemoving);
+    expect(text).not.toBe(m.apps.reasons.address_removing);
+    expect(text).not.toMatch(/proxy|caddy|traefik|docker|route/i);
+    expect(appStackChangeRefusalText(m, "VALIDATION_ERROR", "domain_target_removed")).toBe(m.apps.reasons.domain_target_removed);
+    expect(appStackChangeRefusalText(m, "VALIDATION_ERROR", "STACK_TEMPLATE_UNPUBLISHED", "draft")).toBe(m.apps.reasons.draftUnpublished);
+    expect(appStackChangeRefusalText(m, "RESOURCE_LOCKED", "stopped")).toBe(appStackRefusalText(m, "RESOURCE_LOCKED", "stopped"));
   });
 
   it.each(locales)("%s: the refusals of a backup or a restore have their own sentences", (_n, m) => {

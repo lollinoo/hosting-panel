@@ -50,6 +50,11 @@ export function appStackRefusalText(m: Messages, code: string, reason?: string, 
   return errorMessage(m, code);
 }
 
+/** An install, upgrade or rollback: an address being removed holds it for a few minutes, unlike a change of that address (issue #112). */
+export function appStackChangeRefusalText(m: Messages, code: string, reason?: string, status?: AppStackStatus): string {
+  return reason === "address_removing" ? m.apps.reasons.versionAddressRemoving : appStackRefusalText(m, code, reason, status);
+}
+
 /** Deployment `problem`: a STACK_* reason or an application code says why; any other value reads as a generic failure. */
 export function appStackProblemText(m: Messages, problem: string | null): string | null {
   if (problem === null) return null;

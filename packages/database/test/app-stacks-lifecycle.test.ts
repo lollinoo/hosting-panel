@@ -651,6 +651,41 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect((await enqueue(stack, "stack.upgrade", { plan: { ingress } })).revision?.revisionNumber).toBe(2);
   });
 
+  it("an address being removed in the way refuses ADDRESS_REMOVING; a live one in the way keeps its own refusal (issue #112)", async () => {
+    const ingress = [
+      { componentKey: "web", port: 8080 },
+      { componentKey: "cache", port: 6379 },
+    ];
+    const stack = await ready((await create(orgA, { ingress })).stack.id);
+    const mark = (id: string) => db().update(appStackDomains).set({ removalRequestedAt: new Date() }).where(eq(appStackDomains.id, id));
+    const [cache] = await domain(stack, "cache.removing.example", "cache", 6379);
+    const [pathed] = await domain(stack, "path.removing.example", "web", 8080);
+    await db()
+      .update(appStackDomains)
+      .set({ pathRoutes: [{ pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false }] })
+      .where(eq(appStackDomains.id, pathed!.id));
+    await mark(cache!.id);
+    await mark(pathed!.id);
+    const dropsCache: PlanOptions = { components: ["web"], ingress: [{ componentKey: "web", port: 8080 }] };
+    const refusal = async (kind: "stack.upgrade" | "stack.rollback") => enqueue(stack, kind, { plan: dropsCache }).catch((e: unknown) => e);
+    const unchanged = { components: ["cache", "web"], volumes: ["data"], revisions: 1, deployments: 1 };
+    for (const kind of ["stack.upgrade", "stack.rollback"] as const) {
+      expect(await refusal(kind), kind).toMatchObject({ name: "AppStackRepositoryError", code: "ADDRESS_REMOVING" });
+      expect(await keysOf(stack.id)).toEqual(unchanged);
+    }
+    // A live address on the same component: the customer has something to remove.
+    const [live] = await domain(stack, "live.removing.example", "cache", 6379);
+    expect(await refusal("stack.upgrade")).toMatchObject({ code: "COMPONENT_IN_USE" });
+    await db().delete(appStackDomains).where(eq(appStackDomains.id, live!.id));
+    const [livePath] = await domain(stack, "livepath.removing.example", "web", 8080);
+    await db()
+      .update(appStackDomains)
+      .set({ pathRoutes: [{ pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false }] })
+      .where(eq(appStackDomains.id, livePath!.id));
+    expect(await refusal("stack.upgrade")).toMatchObject({ code: "PATH_IN_USE" });
+    expect(await keysOf(stack.id)).toEqual(unchanged);
+  });
+
   it("delete with destroyData marks every volume for destruction", async () => {
     const stack = await ready((await create(orgA, { volumes: ["data", "logs"] })).stack.id);
     const result = await enqueue(stack, "stack.delete", { destroyData: true });

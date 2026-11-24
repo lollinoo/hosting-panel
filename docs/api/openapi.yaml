@@ -5920,6 +5920,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes
+          $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
@@ -5964,7 +5967,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6114,7 +6117,9 @@ paths:
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
-        `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
+        `path_target_removed` (`details[0].field: domains`). When every such address is one being removed, the refusal
+        is 409 `RESOURCE_LOCKED` with `address_removing` instead: its row goes once its route is withdrawn, so the same
+        upgrade is accepted a few minutes later. A database that an application still uses is refused with
         `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
         Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
@@ -6149,7 +6154,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6166,7 +6171,8 @@ paths:
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
         refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
-        `path_target_removed`. A database that an application still uses is refused with `database_in_use`
+        `path_target_removed`; when every such address is one being removed, with 409 `RESOURCE_LOCKED`,
+        `address_removing`, until its route is withdrawn. A database that an application still uses is refused with `database_in_use`
         (`details[0].field: links`) when that revision is not one component with one port. Volume data is never
         touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
@@ -6200,7 +6206,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
