@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { BackupsIpcRequest, BackupTarget } from "@hosting-panel/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { AppStackEngine } from "../src/app-stacks/index.js";
+import { AppStackEngine, type AppStackDockerRequest } from "../src/app-stacks/index.js";
 import {
   BACKUP_RESTORE_FETCH_TIMEOUT_MS,
   BackupRunner,
@@ -154,6 +154,8 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
     /** Job containers labelled as working for STACK, left by earlier jobs. */
     jobs: [] as unknown[],
     jobListStatus: 200,
+    /** What the kill and the forced delete of a job container answer. */
+    jobRemovalStatus: 204,
     volumes: new Map<string, unknown>([
       [volumeName("data"), volumeView("data")],
       [volumeName("db"), volumeView("db")],
@@ -227,9 +229,9 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
         const text = wantOut ? b.stdout : b.stderr;
         return { statusCode: 200, body: text ? frame(wantOut ? 1 : 2, text) : Buffer.alloc(0) };
       }
-      return empty(204);
+      return empty(docker.jobRemovalStatus);
     }
-    if (method === "DELETE" && p.startsWith("/containers/")) return empty(204);
+    if (method === "DELETE" && p.startsWith("/containers/")) return empty(docker.jobRemovalStatus);
     const vol = /^\/volumes\/([^/]+)$/.exec(p);
     if (vol && method === "GET") {
       const view = docker.volumes.get(decodeURIComponent(vol[1]!));
@@ -950,12 +952,19 @@ describe("the stack engine and a job of the same application (ADR-0038 K4)", () 
     message: "A backup or a restore of this application is running",
   };
 
-  /** The stack engine of the same executor on a Docker of its own, sharing the runner's lanes as the production adapter does. */
+  /**
+   * The stack engine of the same executor on a Docker of its own, sharing the runner's lanes as the production adapter
+   * does. Its list of the application's job containers reads the runner's Docker, where the jobs run.
+   */
   async function stackEngine(env: Env) {
     const fake = createAppStackFakeEngine();
     const plan = appStackTestPlan(REF);
+    const request: AppStackDockerRequest = async (method, endpointPath, body, options) =>
+      method === "GET" && endpointPath.includes(encodeURIComponent(`io.hostingpanel.app_backup_of=${STACK}`))
+        ? { statusCode: 200, body: Buffer.from(JSON.stringify(env.docker.jobs)) }
+        : fake.request(method, endpointPath, body, options);
     const engine = new AppStackEngine({
-      request: fake.request,
+      request,
       secretsRootDir: await mkdtemp(path.join(env.tmp, "app-secrets-")),
       pullMissingImages: false,
       allowlist: TEST_ALLOWLIST,
@@ -1037,6 +1046,38 @@ describe("the stack engine and a job of the same application (ADR-0038 K4)", () 
     removing.release();
     hung.release();
     await expect(settled(env.runner, apply)).resolves.toMatchObject({ state: "failed", failure: "timeout" });
+    await expectEngineFree(s);
+  });
+
+  it("refuses start, restart, create and remove while a job container whose kill and removal failed still runs, after the lane is free", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    const s = await stackEngine(env);
+    const apply = OP(2, "-apply");
+    const hung = env.gate(new RegExp(`^POST /containers/id_hp_bk_${apply}_rs_data/wait$`));
+    env.docker.jobRemovalStatus = 500;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanups.push(async () => vi.useRealTimers());
+
+    await env.runner.run(restoreReq(apply));
+    await hung.reached;
+    await vi.advanceTimersByTimeAsync(BACKUP_RESTORE_FETCH_TIMEOUT_MS);
+    hung.release();
+    await expect(settled(env.runner, apply)).resolves.toMatchObject({ state: "failed", failure: "timeout" });
+    expect(env.requests).toContainEqual(expect.objectContaining({ method: "POST", path: `/containers/id_hp_bk_${apply}_rs_data/kill` }));
+    expect(env.requests).toContainEqual(
+      expect.objectContaining({ method: "DELETE", path: `/containers/id_hp_bk_${apply}_rs_data?force=true&v=true` }),
+    );
+    const lane = env.runner.holdAppStackLane(STACK);
+    expect(lane).not.toBeNull();
+    lane?.();
+
+    // Both answered 500: Docker still runs the job container, which may go on writing the volumes.
+    env.docker.jobs = [leftoverJob("running")];
+    for (const call of s.guarded) await expect(call()).rejects.toMatchObject({ code: "RESOURCE_LOCKED", reason: "STACK_BUSY" });
+    expect(s.fake.log).toEqual([]);
+    // Once it reads as exited it writes nothing: the application starts again.
+    env.docker.jobs = [leftoverJob("exited")];
     await expectEngineFree(s);
   });
 

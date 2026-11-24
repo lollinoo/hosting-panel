@@ -30,6 +30,7 @@ import {
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import type { ServiceLogLine, StackExecutorPort } from "@hosting-panel/executor-contracts";
+import { appStackBackupJobAwake } from "../app-stack-backup-jobs.js";
 import { LOG_READ_MAX_BYTES } from "../docker-logs.js";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
 import {
@@ -310,8 +311,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
-    return this.lockedOutsideBackups(req.plan.stackId, async () => {
-      const plan = this.check(req.plan);
+    return this.lockedOutsideBackups(req.plan.stackId, () => this.check(req.plan), async (plan) => {
       // The Engine refuses a CPU limit above its processor count only at create, after a replaced container is gone.
       const { NCPU } = await this.list<{ NCPU?: unknown }>("/info", "read the server information");
       if (typeof NCPU !== "number") throw malformed();
@@ -447,7 +447,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult> {
-    return this.lockedOutsideBackups(req.stackId, async () => {
+    return this.lockedOutsideBackups(req.stackId, () => undefined, async () => {
       const listed = await this.listAll(req);
       await this.deps.routes.remove(req.stackId);
       const removedComponents: string[] = [];
@@ -549,13 +549,22 @@ export class AppStackEngine implements StackExecutorPort {
     }
   }
 
-  /** locked(), holding the application's backup lane too: none of its data is being copied or written back meanwhile. */
-  private lockedOutsideBackups<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
+  /**
+   * locked(), outside every backup job of the application: none of its data is being copied or written back meanwhile
+   * (ADR-0038 K4). `check` runs first, so a refused plan reaches no Engine request. Then the application's backup lane
+   * is held for the whole change, and the change is refused while a job container of its backups is awake: one whose
+   * job ended without its kill or its removal, which the lane no longer shows.
+   */
+  private lockedOutsideBackups<C, T>(stackId: string, check: () => C, fn: (checked: C) => Promise<T>): Promise<T> {
     return this.locked(stackId, async () => {
+      const checked = check();
       const release = this.deps.backupLanes === undefined ? () => undefined : this.deps.backupLanes.holdAppStackLane(stackId);
       if (release === null) refuse("STACK_BUSY", "A backup or a restore of this application is running");
       try {
-        return await fn();
+        if (await appStackBackupJobAwake(this.deps.request, stackId)) {
+          refuse("STACK_BUSY", "A backup job of this application is still running");
+        }
+        return await fn(checked);
       } finally {
         release();
       }
@@ -668,12 +677,14 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   private runComponent(req: AppStackComponentIpcRequest, action: "start" | "restart"): Promise<AppStackComponentActionIpcResult> {
-    return this.lockedOutsideBackups(req.plan.stackId, async () => {
+    const checked = () => {
       const plan = this.check(req.plan);
       const component =
         plan.components.find((c) => c.key === req.componentKey) ?? refuse("STACK_PLAN_INVALID", "The component is not part of the plan");
+      return { plan, component, contents: assertAppStackSecretContents(plan, component.key, req.secretFileContents) };
+    };
+    return this.lockedOutsideBackups(req.plan.stackId, checked, async ({ plan, component, contents }) => {
       const { key } = component;
-      const contents = assertAppStackSecretContents(plan, key, req.secretFileContents);
       for (const dependency of component.dependsOn) {
         const found = await this.get<ContainerInspect>(
           `/containers/${enc(appStackContainerName(plan.stackId, dependency))}/json`,

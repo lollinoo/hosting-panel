@@ -81,7 +81,8 @@ import {
   type RestoreNote,
 } from "./restore-jobs.js";
 import {
-  APP_STACK_BACKUP_OF_LABEL,
+  APP_STACK_REST_STATES,
+  appStackBackupJobAwake,
   buildAppStackBackupCopyContainerPayload,
   buildAppStackForgetContainerPayload,
   buildAppStackPartialSnapshotDropContainerPayload,
@@ -186,8 +187,6 @@ type AppStackForgetRequest = Extract<BackupsIpcRequest, { action: "stackForget" 
 
 /** The job lane of an application. A site id never holds a colon, so the lane of a site is never this one. */
 export const appStackBackupLane = (stackId: string): string => `stack:${stackId}`;
-/** Container states in which nothing of an application writes to its volumes. */
-const APP_STACK_REST_STATES: ReadonlySet<string> = new Set(["created", "exited", "dead"]);
 
 interface AppStackJobOutcome {
   readonly state: "succeeded" | "failed";
@@ -2482,14 +2481,9 @@ export class BackupRunner {
         throw new ExecutorCodedError("The application is running", "RESOURCE_LOCKED");
       }
     }
-    // A job container can outlive its job when its kill or its removal failed, and go on writing to the volumes. A
-    // stopped one writes nothing and does not block: the clean-up at the next executor start removes it.
-    const jobs = await this.listLabelledContainers(`${APP_STACK_BACKUP_OF_LABEL}=${stackId}`, "the backup jobs of the application");
-    for (const raw of jobs) {
-      const state = ((raw ?? {}) as { readonly State?: unknown }).State;
-      if (typeof state !== "string" || !APP_STACK_REST_STATES.has(state)) {
-        throw new ExecutorCodedError("An earlier backup job of the application is still running", "RESOURCE_LOCKED");
-      }
+    // A stopped job container writes nothing and does not block: the clean-up at the next executor start removes it.
+    if (await appStackBackupJobAwake((method, endpointPath) => this.callDocker(method, endpointPath), stackId)) {
+      throw new ExecutorCodedError("An earlier backup job of the application is still running", "RESOURCE_LOCKED");
     }
     for (const volumeKey of volumeKeys) {
       const name = appStackVolumeName(stackId, volumeKey);

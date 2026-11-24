@@ -32,6 +32,8 @@ export const APP_STACK_RESTORE_CAPABILITIES = ["CHOWN", "DAC_OVERRIDE", "FOWNER"
  * resource carrying that label and not created by it as a namespace conflict.
  */
 export const APP_STACK_BACKUP_OF_LABEL = "io.hostingpanel.app_backup_of" as const;
+/** Container states in which a container writes nothing: of an application, or of a backup job of it. */
+export const APP_STACK_REST_STATES: ReadonlySet<string> = new Set(["created", "exited", "dead"]);
 const SNAPSHOT_ID_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_FORGET_SNAPSHOTS = 100;
 
@@ -84,6 +86,36 @@ function ids(input: JobIds): { readonly jobId: string; readonly stackId: string 
 
 function withCapabilities(payload: BackupContainerCreatePayload, capabilities: readonly string[]): WithCapabilities["payload"] {
   return { ...payload, HostConfig: { ...payload.HostConfig, CapAdd: [...capabilities] } };
+}
+
+/**
+ * Whether a job container of an application's backups may still read or write its volumes (ADR-0038 K4): one carrying
+ * its label is in a state other than created, exited or dead. A job container outlives its job when its kill or its
+ * removal failed, or when the clean-up at executor start could not remove it. One Engine list, stopped containers
+ * included; a list that fails or cannot be read throws. The backup runner asks it before a copy or a restore, the
+ * stack engine before a start, restart, create or remove, whether or not the application's lane is held.
+ */
+export async function appStackBackupJobAwake(
+  request: (method: "GET", endpointPath: string) => Promise<{ readonly statusCode: number; readonly body: Buffer }>,
+  stackId: string,
+): Promise<boolean> {
+  const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_BACKUP_OF_LABEL}=${stackId}`] }));
+  const listed = await request("GET", `/containers/json?all=true&filters=${filters}`);
+  let jobs: unknown = null;
+  if (listed.statusCode === 200) {
+    try {
+      jobs = JSON.parse(listed.body.toString("utf8")) as unknown;
+    } catch {
+      jobs = null;
+    }
+  }
+  if (!Array.isArray(jobs)) {
+    throw new ExecutorCodedError("Docker could not list the backup jobs of the application", "DOCKER_ENGINE_UNAVAILABLE");
+  }
+  return jobs.some((raw) => {
+    const state = ((raw ?? {}) as { readonly State?: unknown }).State;
+    return typeof state !== "string" || !APP_STACK_REST_STATES.has(state);
+  });
 }
 
 /** Labels of a job container: a job like the sites' (removed at executor start), never a stack resource. */

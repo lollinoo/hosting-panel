@@ -3151,8 +3151,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
+    // One container that cannot be removed does not keep the others: the first failure is reported at the end.
+    let failure: unknown = null;
     for (const job of JSON.parse(res.body.toString("utf8")) as DockerContainerListSummary[]) {
-      await this.stopAndRemoveContainer(job.Id);
+      await this.stopAndRemoveContainer(job.Id).catch((err: unknown) => {
+        failure ??= err;
+      });
     }
     const entries = await readdir(this.secretsRootDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -3162,6 +3166,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     }
     await this.siteFilesHelpers.removeAll();
     await this.backupRunner.removeOrphans();
+    if (failure !== null) throw failure;
   }
 
   /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
