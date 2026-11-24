@@ -675,6 +675,38 @@ describe("@hosting-panel/database — application backups", () => {
       expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
     });
 
+    it("marks a backup made by hand while the data are half written: writing it back leaves them so", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const failed = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
+      await finish(failed);
+      await settleAppStackRestore(db(), { operationId: failed.operation.id, status: "failed", problem: "no_space", mayHaveWritten: true });
+      await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+
+      const manual = await goodBackup(await stackOf(stack.id));
+      expect(await backupOf(manual.backup.id)).toMatchObject({ kind: "manual", incompleteData: true });
+
+      // Writing it back succeeds and brings the half written data back: the mark moves to this restore.
+      const back = await request(stack, { kind: "stack.restore", sourceBackupId: manual.backup.id });
+      await finish(back);
+      await settleAppStackRestore(db(), { operationId: back.operation.id, status: "succeeded", problem: null, mayHaveWritten: true });
+      expect(await backupOf(back.backup.id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(back.backup.id);
+
+      // Once a start took the data as they are, a backup made by hand is not marked.
+      await db().insert(operations).values({
+        id: `op_${hex("manual ran").slice(0, 24)}`,
+        organizationId: orgA,
+        kind: "stack.start",
+        resourceType: "stack",
+        resourceId: stack.id,
+        status: "succeeded",
+        lockKey: `stack:${stack.id}`,
+        idempotencyKey: "sb-manual-ran",
+      });
+      expect((await goodBackup(await stackOf(stack.id))).backup.incompleteData).toBe(false);
+    });
+
     it("accepts a partial backup: one good copy is enough", async () => {
       await setPolicyTargets(db(), policyId, [S3, LOCAL]);
       const stack = await installed();

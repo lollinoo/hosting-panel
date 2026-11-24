@@ -1008,6 +1008,24 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect((await page(stackId)).goBackTo).toBe(safety[0]);
     });
 
+    it("a backup made by hand while the data are half written is marked, and writing it back keeps the safety backup of whole data", async () => {
+      const { stackId, source } = await withBackup();
+      const safety = await failedRestores(stackId, source.id, 4);
+
+      const { operation, backup: manual } = await request(stackId);
+      expect(await apply(operation)).toBeUndefined();
+      expect(await backupOf(manual.id)).toMatchObject({ kind: "manual", incompleteData: true });
+      expect((await page(stackId)).backups.find((b) => b.id === manual.id)?.incompleteData).toBe(true);
+
+      // Writing it back succeeds but brings the half written data back: the page points back, the clean-up keeps it.
+      const { operation: back, backup: last } = await request(stackId, "stack.restore", manual.id);
+      expect(await apply(back)).toBeUndefined();
+      expect(await backupOf(last.id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
+      expect(await apply(await prune(stackId))).toBeUndefined();
+      expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).toContain(safety[0]);
+    });
+
     it("a restore that succeeds in writing back a copy of half written data keeps the safety backup of whole data", async () => {
       const { stackId, source } = await withBackup();
       const safety = await failedRestores(stackId, source.id, 4);

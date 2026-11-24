@@ -209,8 +209,9 @@ export async function enqueueAppStackBackupTransactional(
       throw new AppStackBackupRepositoryError("NO_DESTINATION", "No backup destination is configured on this server.");
     }
 
-    // The safety backup copies incomplete data while a restore that failed has left them so (ADR-0038 K5).
-    const incompleteData = source !== null && (await getAppStackIncompleteDataMark(tx, stack.id)) !== null;
+    // A backup, by hand or a safety one, copies incomplete data while a restore that failed has left them so: writing
+    // it back leaves them so again (ADR-0038 K5).
+    const incompleteData = (await getAppStackIncompleteDataMark(tx, stack.id)) !== null;
 
     const backupId = newAppEntityId("sbak");
     const { operation } = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {

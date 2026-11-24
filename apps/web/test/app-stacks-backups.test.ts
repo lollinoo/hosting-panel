@@ -284,6 +284,14 @@ describe("backups of an application: the list", () => {
     expect(plain).not.toContain(t.restoreFailedNote.slice(0, t.restoreFailedNote.indexOf("{")));
   });
 
+  it.each(locales)("%s: a backup made by hand from incomplete data carries the same mark as a safety backup", (_n, m) => {
+    const t = m.apps.backups;
+    const manual = backup({ incompleteData: true });
+    const markup = run({ backups: list(manual, PARTIAL) }, m).markup;
+    expect(count(markup, t.incompleteNote)).toBe(1);
+    expect(markup.indexOf(t.incompleteNote)).toBeLessThan(markup.search(new RegExp(`<time datetime="${PARTIAL.startedAt}"`, "i")));
+  });
+
   it.each(locales)("%s: never an identifier, an address of the panel or where the copies are kept", (_n, m) => {
     const markup = run({ backups: list(RUNNING, GOOD, PARTIAL, FAILED) }, m, { 1: GOOD.id }).markup;
     expect(markup).not.toMatch(/sbak_|stk_a1|org_a1|\/api\/|\/backups|notes"|s3:|restic/i);

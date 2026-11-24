@@ -13838,8 +13838,8 @@ components:
         incompleteData:
           type: boolean
           description: >-
-            A `pre_restore` backup taken while the application's data were half written (see `goBackTo`); always
-            `false` for a `manual` backup
+            A backup, `manual` or `pre_restore`, taken while the application's data were half written (see
+            `goBackTo`): writing it back leaves them so
 
     AppStackBackupsDto:
       type: object

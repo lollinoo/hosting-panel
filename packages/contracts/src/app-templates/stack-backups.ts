@@ -112,7 +112,7 @@ export const AppStackBackupDtoSchema = z.object({
     .nullable(),
   /** At least one good copy, and data that still belongs to the application. */
   restorable: z.boolean(),
-  /** A safety backup taken while the data were half written (see goBackTo). */
+  /** A backup, made by hand or a safety one, taken while the data were half written (see goBackTo). */
   incompleteData: z.boolean(),
 });
 export type AppStackBackupDto = z.infer<typeof AppStackBackupDtoSchema>;
