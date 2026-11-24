@@ -5889,7 +5889,9 @@ paths:
         revision (both together are refused, and a rollback takes no `parameters`), otherwise a deploy with the given
         or the stored settings. Nothing is written and nothing is audited; no Idempotency-Key. The answer names the
         changed components, volumes, parameters (secrets by name only) and entry points, and carries the `planHash`
-        an upgrade or rollback must send back. The same refusals as the verb it previews (`planHash` aside).
+        an upgrade or rollback must send back. For an upgrade, `newSecrets` names (key and label, never a value) the
+        required private values the customer types that the new version brings and the application has none of: the
+        upgrade must carry them. The same refusals as the verb it previews (`planHash` aside).
         Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
@@ -6111,7 +6113,20 @@ paths:
         Send the `planHash` of the preview (`POST .../plan` with the same `templateVersionId` and `parameters`); a
         plan that changed since is refused (`VALIDATION_ERROR`, `details[0].field: planHash`,
         `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
-        are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
+        are carried over. `secrets` carries exactly the private values the preview names in `newSecrets`; each is
+        stored as version 1 of an ordinary private value in the transaction that queues the upgrade (a refused request
+        stores nothing; an upgrade taken back keeps it, and the next preview no longer asks for it). Refusals, with
+        `details[].field: secrets.<key>`: one that is missing (`STACK_SECRET_MISSING`, one detail per value), a key
+        that is not a private value of the new version or that the customer may not set (`STACK_PARAMETER_INVALID`),
+        an optional one, set among the private values after the upgrade, whether or not the application has a value
+        for it already (`secret_not_needed`), and a value over 4096 UTF-8 bytes that the new version puts in an
+        environment variable, or over 24576 for any other (`value_too_long`, with `details[0].limit` `environment` or
+        `store`, the bound it passed). A value the new version requires that
+        the application has already (stored since the preview, e.g. by an upgrade taken back) means the preview is
+        stale and is refused like a changed plan (`details[0].field: planHash`, `details[0].reason: plan_changed`);
+        only such a value is, since no preview asks for any other. The values are never returned, logged or audited (the audit names each
+        key and its version as `app.stack.secret.rotate`), and the request hash of the Idempotency-Key covers their keys only: the same key
+        with other values replays the first request. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
         `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
@@ -6344,8 +6359,10 @@ paths:
         `details[0].reason: STACK_PARAMETER_INVALID`); a secret the template declares `customer: false` is answered
         exactly like an unknown key, so the answer does not reveal that it exists. A secret the application reads from
         a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
-        (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`) and nothing is stored. A
-        secret delivered as a file keeps the body's limit. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`,
+        `details[0].limit: environment`) and nothing is stored. A secret delivered as a file holds at most 24576 bytes
+        of UTF-8, the bound of the store, refused the same way with `details[0].limit: store`.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
         while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -10353,6 +10370,14 @@ components:
             chain_expired, bad_signature, verify_timeout, chain_invalid, not_covered, domain_not_active,
             duplicate_certificate, manual_overlap, captures_host, acme_certificate_conflict, not_served,
             proxy_start_restored
+        limit:
+          type: string
+          enum: [environment, store]
+          description: >-
+            Only with `reason: value_too_long` on a private value of an application (its private values route and the
+            `secrets` of an upgrade): the bound the value passed. `environment`: a value the application reads from a
+            component's environment, at most 4096 UTF-8 bytes; `store`: any other value, at most 24576 UTF-8 bytes,
+            the bound of the store.
 
     AdminUserDto:
       type: object
@@ -14536,6 +14561,28 @@ components:
           type: string
           pattern: "^[a-f0-9]{64}$"
           description: The `planHash` of the preview the customer confirmed
+        secrets:
+          type: array
+          maxItems: 8
+          description: >-
+            The private values the preview names in `newSecrets`, each key once. Write-only, like
+            `SetAppStackSecretInput`
+          items:
+            type: object
+            additionalProperties: false
+            required: [parameterKey, value]
+            properties:
+              parameterKey:
+                $ref: "#/components/schemas/AppTemplateParameterKey"
+              value:
+                type: string
+                minLength: 1
+                maxLength: 16384
+                writeOnly: true
+                description: >-
+                  No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+                  process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
+                  environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
     RollbackAppStackInput:
       type: object
@@ -15182,7 +15229,7 @@ components:
 
     AppStackPlanDiffDto:
       type: object
-      required: [planHash, fromRevisionId, fromVersionNumber, toTemplateVersionId, toVersionNumber, newRevision, components, volumes, parameters, ingress, downtime, dataRisk]
+      required: [planHash, fromRevisionId, fromVersionNumber, toTemplateVersionId, toVersionNumber, newRevision, components, volumes, parameters, newSecrets, ingress, downtime, dataRisk]
       properties:
         planHash:
           type: string
@@ -15238,6 +15285,19 @@ components:
                 $ref: "#/components/schemas/AppTemplateParameterKey"
               change:
                 $ref: "#/components/schemas/AppStackDiffChange"
+        newSecrets:
+          type: array
+          description: >-
+            Upgrade only: the required private values the customer types that the new version brings and the
+            application has none of; the upgrade must carry them in `secrets`. Empty for a deploy and a rollback
+          items:
+            type: object
+            required: [key, label]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppTemplateParameterKey"
+              label:
+                type: string
         ingress:
           type: array
           items:

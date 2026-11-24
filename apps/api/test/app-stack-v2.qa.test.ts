@@ -425,8 +425,8 @@ describe("application stacks in the extended format (ADR-0036): generated values
     it("a secret read from the environment is bounded at 4096 bytes; one delivered as a file is not", async () => {
       const tooLong = await setSecret(stackId, "api_token", "x".repeat(4_097));
       expect(tooLong.status, tooLong.raw).toBe(400);
-      // Its own reason, so the page can say why and state the limit.
-      expect(tooLong.body.error.details).toEqual([expect.objectContaining({ field: "value", reason: "value_too_long" })]);
+      // Its own reason, so the page can say why, and the bound it passed, so the page can state the limit.
+      expect(tooLong.body.error.details).toEqual([expect.objectContaining({ field: "value", reason: "value_too_long", limit: "environment" })]);
       // Bytes, not characters.
       expect((await setSecret(stackId, "api_token", "è".repeat(2_049))).status).toBe(400);
       expect((await setSecret(stackId, "api_token", "x".repeat(4_096))).status).toBe(200);
