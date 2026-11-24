@@ -390,7 +390,7 @@ export class AppTemplatesService {
         : await db
             .select({ stackId: appStackDomains.stackId, hostname: appStackDomains.hostname, status: appStackDomains.status })
             .from(appStackDomains)
-            .where(inArray(appStackDomains.stackId, kept.map((r) => r.id)));
+            .where(and(inArray(appStackDomains.stackId, kept.map((r) => r.id)), isNull(appStackDomains.removalRequestedAt)));
     // Same rule as the customer list (app-stack-dto.ts appStackSummaryDto).
     const primary = (id: string) => {
       const own = domains.filter((d) => d.stackId === id).sort((a, b) => byText(a.hostname, b.hostname));

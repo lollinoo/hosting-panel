@@ -681,6 +681,24 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(triggerAsync).not.toHaveBeenCalled();
     });
 
+    it("an address being removed gets the refresh that frees its name, even when the routes it would publish are the stored ones; a failed one is retried after 10 minutes (issue #112)", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "stays.example.com" }, { hostname: "leaves.example.com" }] });
+      const rows = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+      const live = rows.filter((r) => r.hostname === "stays.example.com");
+      const { entries } = appStackRoutePlan({ plan: stack.plan, domains: live, include: new Set(["app"]), now: NOW, acmeEnabled: true });
+      // What the failed refresh was queued with: the addresses that stay.
+      const appliedRoutesHash = appStackRoutesHash(entries);
+      await db().update(appStacks).set({ appliedRoutesHash, appliedAddressesHash: appStackAddressesHash(live, appliedRoutesHash) }).where(eq(appStacks.id, stack.id));
+      await db().update(appStackDomains).set({ removalRequestedAt: at(-20) }).where(eq(appStackDomains.hostname, "leaves.example.com"));
+      await insertOperation(stack.id, "failed", at(-5));
+
+      await observer().reconcileOnce(NOW);
+      expect(await deploys(stack.id)).toEqual([]);
+
+      await observer().reconcileOnce(at(6));
+      expect(await deploys(stack.id)).toHaveLength(1);
+    });
+
     it("withdraws the last removed address without a certificate report; stacks with addresses wait for one", async () => {
       reportFails = true;
       const removed = await seedStack({ status: "running", routesHash: "f".repeat(64) });

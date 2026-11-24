@@ -595,6 +595,7 @@ erDiagram
         text hostname UK "minuscolo; unico anche fra domains e hosts (trigger)"
         text status "pending, active, failed"
         text cert_status "none, requested, active, failed (solo ACME)"
+        timestamptz removal_requested_at "in rimozione: tiene il nome finché un file di route senza di esso non è pubblicato, o NULL (0033)"
     }
 
     app_stack_deployments {
@@ -894,3 +895,6 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
   - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito (`NULL` per il primo deploy e per l'avvio che segue un backup o un ripristino, `ADR-0038`); un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.
   - Nessun backfill: le righe esistenti restano `NULL` (nulla da riportare indietro) e la release precedente ignora le colonne.
+- **Versione 0033 (`0033_app_stack_domain_removal.sql`, `ADR-0037`, issue #112, additiva)**:
+  - Colonna nulla `app_stack_domains.removal_requested_at`: un indirizzo tolto mentre un file di route dell'applicazione è pubblicato resta, e tiene il nome attraverso i trigger della `0025`, finché non è registrata la pubblicazione riuscita di un file senza di esso; allora la riga è cancellata.
+  - Nessun backfill: le righe esistenti restano `NULL` (nessuna è in rimozione). La release precedente, dopo un rollback automatico, legge un indirizzo segnato come vivo e lo pubblica di nuovo.

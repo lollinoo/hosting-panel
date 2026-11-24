@@ -221,7 +221,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026`, `0027`, `0028` and `0030` are additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025`–`0028`, `0030`, `0032` and `0033` are
+   additive.
 6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release from `0.10.0` on that lists `app-stacks` but not
    `app-format-v2` knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same
    command exits with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a
@@ -265,6 +266,13 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    server has confirmed. With `--allow-feature-loss` the older release does not know the links: a database stays
    attached only until its container is replaced, nothing attaches it again, and an application cannot be deleted
    while a running database is still attached to its private network (`STACK_NAMESPACE_CONFLICT`).
+10. **Addresses being removed (issue #112).** Before installing an older release, wait until no address is being
+    removed (the query in procedure 10, step 1 lists none): an older release reads such an address as a live one and
+    publishes it again. No gate checks it. The state normally lasts one route refresh (about a minute, ten after a
+    failed one); while the application is `failed` (a start, a restart or a change of version that did not pass
+    leaves the route file as it was), or after a stop that failed before it withdrew the routes, the routes are not
+    refreshed and the address stays marked until a start, a restart, a stop or the deletion of the application
+    succeeds.
 
 ## 4a. Tasks of an application (ADR-0042)
 
@@ -344,8 +352,9 @@ names only the key of a task, and the command is read from the template version 
 1. After `hp-restore-panel` (README, «Il server è perso»), the new server has no stack container, network, volume or
    route. The restore SQL (`infra/linux/hp-restore-panel.sql`) sets: open deployments `failed`
    (`OPERATION_INTERRUPTED`), components `missing`, volumes `missing`, domains back to `pending` without a certificate,
-   stacks `failed` (`delete_failed` if they were deleting). Drafts stay `draft`; revisions, parameters and secrets are
-   kept.
+   stacks `failed` (`delete_failed` if they were deleting). Addresses being removed (issue #112) are deleted, which
+   frees their names: no route file serves them on the new server. Drafts stay `draft`; revisions, parameters and
+   secrets are kept.
 2. Point each stack domain's DNS to the new server; the panel checks the domains again by itself.
 3. The customer presses **Reinstalla** on each stack: images are pulled again by digest (the server needs the
    registries), new **empty** volumes are created, the secret files are written from the stored values. The routes
@@ -578,6 +587,26 @@ administrator's console has no such action, and nobody writes proxy configuratio
    queued or running (it may have read the address already) or a first install runs, it is refused with the same
    `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
    reads «In attesa» until a published file holds it.
+
+   An accepted removal of an address whose stack has a route file published does not free the name at once (issue
+   #112): the row stays, marked with `removal_requested_at`, and keeps the hostname until a route file without it is
+   published (the refresh queued with the removal, a later one, a stop, or the deletion of the stack). The customer
+   sees it in the list as «In rimozione», with no button; it is not published, takes no change, is no redirect
+   destination and counts in no limit, and the same name added again, by any customer, is refused with
+   `DOMAIN_CONFLICT`. With nothing published it goes at once. When the refresh fails (the executor does not answer)
+   the address stays marked and the name stays held; the periodic check queues the refresh again after the ten
+   minutes of a failed action, as long as the application is `running` or `degraded` and its last action was not a
+   stop. While the application is `failed` (a start, a restart or a change of version that did not pass leaves the
+   route file as it was), or after a stop that failed before it withdrew the routes, no refresh is queued: the address
+   stays marked until a start, a restart, a stop or the deletion of the application succeeds, and until then an
+   upgrade or a rollback that drops what it points at is refused with `address_removing`. A removal that stays pending
+   for long means the refresh keeps failing or is not queued: look at the stack's status, at its last `stack.deploy`
+   operations with an `sys_routes_` idempotency key and at the executor, then let the next refresh run or restart the
+   application; nobody deletes the row by hand. To list the
+   addresses being removed (read-only):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, hostname, removal_requested_at from app_stack_domains where removal_requested_at is not null order by removal_requested_at"
+   ```
 
    While a run of a task executes (§4a, at most its time limit) it holds the application's lock, so no refresh can
    be queued: a new address is saved, nothing is queued, `routesPending` is true, and the observer's first pass after

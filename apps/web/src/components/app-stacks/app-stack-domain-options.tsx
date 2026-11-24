@@ -93,8 +93,8 @@ export function AppStackDomainOptions({
   const [paths, setPaths] = useState<PathDraft[]>(domain.pathRoutes.map((p) => ({ pathPrefix: p.pathPrefix, target: targetKey(p), stripPrefix: p.stripPrefix })));
   const [problems, setProblems] = useState<Record<string, keyof typeof t.problems>>({});
 
-  // A destination shows the application itself: an address that redirects, or this one, cannot be chosen.
-  const destinations = rows.filter((r) => r.id !== domain.id && r.redirectToDomainId === null);
+  // A destination shows the application itself: an address that redirects, this one, or one being removed cannot be chosen.
+  const destinations = rows.filter((r) => r.id !== domain.id && r.redirectToDomainId === null && !r.removing);
   const isDestination = rows.some((r) => r.redirectToDomainId === domain.id);
   const redirecting = redirectTo !== "";
   const hasPassword = domain.protection !== null;

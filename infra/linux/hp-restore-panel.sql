@@ -59,6 +59,8 @@ UPDATE app_stack_volumes SET status = 'missing', updated_at = now() WHERE status
 -- Links between a database and an application (ADR-0039): nothing is attached on the new host, so none is active.
 -- A link the customer disconnected stays as it is: the first pass of the panel confirms it gone.
 UPDATE app_stack_links SET state = 'pending', updated_at = now() WHERE state = 'active';
+-- An address being removed (issue #112) holds its name only while a route file may serve it: none is published here.
+DELETE FROM app_stack_domains WHERE removal_requested_at IS NOT NULL;
 UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expires_at = NULL, dns_next_check_at = now(),
        updated_at = now() WHERE status <> 'pending' OR cert_status <> 'none';
 UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, applied_addresses_hash = NULL, updated_at = now()

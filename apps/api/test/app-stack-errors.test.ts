@@ -139,6 +139,21 @@ describe("mapAppStackError", () => {
     );
   });
 
+  it("an address being removed is neither changed nor removed again (issue #112)", () => {
+    expect(mapped(new AppStackDomainError("REMOVING", "x"))).toMatchObject({
+      ...one(409, "RESOURCE_LOCKED", "This web address is being removed.", { field: "domainId", reason: "address_removing" }),
+      retryable: false,
+    });
+    // Nor does a new version drop what only such an address still points at: the same refusal, on the field of the version.
+    // A failed application, or one whose stop failed, never withdraws the route by itself: the message says what does.
+    const message =
+      "A web address this version no longer serves is still being removed. Try again in a few minutes. If it is still not possible, restart the application (or stop it, if it does not start), then try again.";
+    expect(mapped(new AppStackRepositoryError("ADDRESS_REMOVING", "x"))).toMatchObject({
+      ...one(409, "RESOURCE_LOCKED", message, { field: "domains", reason: "address_removing" }),
+      retryable: false,
+    });
+  });
+
   it("maps a TLS coverage refusal like a site domain add", () => {
     expect(mapped(new TlsCoverageError("DOMAIN_CONFLICT", "foreign_coverage", "x"))).toMatchObject({
       code: "DOMAIN_CONFLICT",

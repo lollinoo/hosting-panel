@@ -137,6 +137,7 @@ function domain(hostname: string, componentKey: string, internalPort: number, pa
     pathRoutes: [],
     createdAt: NOW,
     updatedAt: NOW,
+    removalRequestedAt: null,
     ...patch,
   };
 }
