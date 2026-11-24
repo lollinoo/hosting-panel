@@ -337,14 +337,42 @@ describe("notification settings", () => {
       const h = html(m, createElement(NotificationSettings, { csrfToken: "c", initial: settings(), base: "/api/admin/notifications" }));
       const rows = h.slice(h.indexOf("<tbody>"), h.indexOf("</tbody>")).split("<tr").slice(1);
       expect(rows).toHaveLength(3);
-      for (const text of [t.webhook.title, format(t.deliveries.events, { opened: 2, closed: 1 }), "hooks.example.org", t.deliveries.status.failed, t.problem.server_error, format(t.httpStatus, { status: 502 })]) {
+      for (const text of [t.webhook.title, format(t.deliveries.events, { opened: 2, closed: 1 }), t.deliveries.status.failed, t.problem.server_error, format(t.httpStatus, { status: 502 })]) {
         expect(rows[0], text).toContain(text);
       }
       for (const text of [t.email.title, t.deliveries.test, "ops@example.org", t.deliveries.status.sent]) expect(rows[1], text).toContain(text);
       expect(rows[1]).not.toContain(format(t.deliveries.attempts, { count: 1 }));
-      for (const text of [t.telegram.title, "-1001234500000", t.deliveries.status.pending, t.problem.unreachable, format(t.deliveries.attempts, { count: 2 })]) {
+      for (const text of [t.telegram.title, t.deliveries.status.pending, t.problem.unreachable, format(t.deliveries.attempts, { count: 2 })]) {
         expect(rows[2], text).toContain(text);
       }
+      // A mail keeps its address; a webhook or a chat message keeps none, and its channel may point elsewhere now.
+      const toCell = (row: string) => row.split("<td")[4]!;
+      expect(toCell(rows[0]!)).toContain(`>${t.webhook.title}<`);
+      expect(toCell(rows[1]!)).toContain(">ops@example.org<");
+      expect(toCell(rows[2]!)).toContain(`>${t.telegram.title}<`);
+      expect(rows[0]).not.toContain("hooks.example.org");
+      expect(rows[2]).not.toContain("-1001234500000");
+    }
+  });
+
+  it("does not name the channel's current destination for a message sent before the channel was changed", () => {
+    const later = "2026-11-23T12:00:00.000Z";
+    const before = settings();
+    const changed = settings({
+      channels: {
+        ...before.channels,
+        webhook: { ...before.channels.webhook!, updatedAt: later, host: "elsewhere.example.org" },
+        telegram: { ...before.channels.telegram!, updatedAt: later, chat: "-1009876500000" },
+      },
+    });
+    for (const m of [en, itMsgs]) {
+      const t = m.notifications;
+      const h = html(m, createElement(NotificationSettings, { csrfToken: "c", initial: changed, base: "/api/admin/notifications" }));
+      const rows = h.slice(h.indexOf("<tbody>"), h.indexOf("</tbody>")).split("<tr").slice(1);
+      const toCell = (row: string) => row.split("<td")[4]!;
+      expect(toCell(rows[0]!)).toContain(`>${t.webhook.title}<`);
+      expect(toCell(rows[2]!)).toContain(`>${t.telegram.title}<`);
+      for (const row of rows) for (const now of ["elsewhere.example.org", "-1009876500000"]) expect(row).not.toContain(now);
     }
   });
 
