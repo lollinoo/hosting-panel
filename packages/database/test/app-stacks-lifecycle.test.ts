@@ -4,6 +4,7 @@ import {
   APP_STACK_ENQUEUE_TRANSITIONS,
   APP_STACK_STEPS_BY_KIND,
   canTransitionAppStack,
+  type AppStackComponentHealth,
   type AppStackOperationKind,
   type AppStackStatus,
 } from "@hosting-panel/contracts";
@@ -1124,6 +1125,43 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     ]);
     await setAppStackVolumeStatusTransactional(db(), { organizationId: orgA, stackId: stack.id, volumeKeys: ["data", "ghost"], status: "present" });
     expect((await listAppStackVolumes(db(), { organizationId: orgA, stackId: stack.id })).map((v) => v.status)).toEqual(["present"]);
+  });
+
+  it("a reading never replaces a newer one of the same component; the same time or a later one does", async () => {
+    const { stack } = await create();
+    const at = (minutes: number) => new Date(Date.UTC(2026, 10, 22, 10, minutes));
+    const scope = { organizationId: orgA, stackId: stack.id };
+    const write = (observedAt: Date, web: AppStackComponentHealth, cache: AppStackComponentHealth) =>
+      recordAppStackComponentHealthTransactional(db(), {
+        ...scope,
+        observedAt,
+        components: [
+          { componentKey: "web", health: web },
+          { componentKey: "cache", health: cache },
+        ],
+      });
+    const stored = async () =>
+      (await listAppStackComponents(db(), scope)).map((c) => [c.componentKey, c.health, c.healthObservedAt?.toISOString() ?? null]);
+
+    await write(at(5), "stopped", "stopped");
+    // A reading taken before the stop settled is written after it.
+    await write(at(3), "healthy", "healthy");
+    expect(await stored()).toEqual([
+      ["cache", "stopped", at(5).toISOString()],
+      ["web", "stopped", at(5).toISOString()],
+    ]);
+    await write(at(6), "unhealthy", "unhealthy");
+    await write(at(5), "healthy", "healthy");
+    expect(await stored()).toEqual([
+      ["cache", "unhealthy", at(6).toISOString()],
+      ["web", "unhealthy", at(6).toISOString()],
+    ]);
+    // The same time is not older: two writes of one millisecond keep the later one.
+    await write(at(6), "healthy", "starting");
+    expect(await stored()).toEqual([
+      ["cache", "starting", at(6).toISOString()],
+      ["web", "healthy", at(6).toISOString()],
+    ]);
   });
 
   it("boot repair: busy stacks without an active operation fail, their deployments are interrupted, locked ones are untouched", async () => {

@@ -19,6 +19,7 @@ import {
   organizations,
   outboxEvents,
   platformInstallations,
+  recordAppStackComponentHealthTransactional,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -253,6 +254,8 @@ describe("AppStackObserverService (PGlite)", () => {
       .from(appStackComponents)
       .where(eq(appStackComponents.stackId, stackId))
       .orderBy(appStackComponents.componentKey);
+  /** A reading carries the pass's clock plus the time the pass had run when it was taken: a few milliseconds in a test. */
+  const stampedAt = (stamp: Date | null, from: Date) => stamp !== null && stamp.getTime() >= from.getTime() && stamp.getTime() - from.getTime() < 10_000;
   const domainRow = async (hostname: string) =>
     (await db().select().from(appStackDomains).where(eq(appStackDomains.hostname, hostname)))[0]!;
   const deploys = (stackId: string) =>
@@ -333,10 +336,12 @@ describe("AppStackObserverService (PGlite)", () => {
       await observer().reconcileOnce(NOW);
 
       expect(statusReads()).toEqual([failed.id, degraded.id, unknown.id, running.id]);
-      expect(await health(running.id)).toEqual([
-        { componentKey: "app", health: "healthy", healthObservedAt: NOW },
-        { componentKey: "cache", health: "stopped", healthObservedAt: NOW },
+      const read = await health(running.id);
+      expect(read.map((c) => [c.componentKey, c.health])).toEqual([
+        ["app", "healthy"],
+        ["cache", "stopped"],
       ]);
+      expect(read.map((c) => stampedAt(c.healthObservedAt, NOW))).toEqual([true, true]);
       for (const stack of [...skipped, locked]) expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([null, null]);
       expect(mutatingCalls()).toEqual([]);
       expect((await db().select({ id: appStacks.id, status: appStacks.status }).from(appStacks).where(eq(appStacks.id, failed.id)))[0]!.status).toBe("failed");
@@ -388,7 +393,7 @@ describe("AppStackObserverService (PGlite)", () => {
 
       expect(statusReads()).toEqual([stack.id, stack.id]);
       // The pass that waited is the first one queued after the running one.
-      expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([at(1), at(1)]);
+      expect((await health(stack.id)).map((c) => stampedAt(c.healthObservedAt, at(1)))).toEqual([true, true]);
     });
 
     it("a failed read records every component unknown at the current time", async () => {
@@ -398,14 +403,112 @@ describe("AppStackObserverService (PGlite)", () => {
       await observer().reconcileOnce(at(6));
 
       const rows = await health(stack.id);
-      expect(rows).toEqual([
-        { componentKey: "app", health: "unknown", healthObservedAt: at(6) },
-        { componentKey: "cache", health: "unknown", healthObservedAt: at(6) },
+      expect(rows.map((c) => [c.componentKey, c.health])).toEqual([
+        ["app", "unknown"],
+        ["cache", "unknown"],
       ]);
+      expect(rows.map((c) => stampedAt(c.healthObservedAt, at(6)))).toEqual([true, true]);
       expect(
         appStackDisplayStatus({ stack: { status: "running", appliedRoutesHash: null }, plan: stack.plan, components: rows, domainCount: 0, now: at(6) }),
       ).toBe("unknown");
       expect(mutatingCalls()).toEqual([]);
+    });
+
+    describe("a reading taken before a change is not written over it (#93)", () => {
+      const rows = async (stackId: string) => (await health(stackId)).map((c) => [c.componentKey, c.health, c.healthObservedAt?.toISOString() ?? null]);
+      const statusOf = async (stackId: string) => (await db().select({ status: appStacks.status }).from(appStacks).where(eq(appStacks.id, stackId)))[0]!.status;
+
+      it("a stop that settles while the stack is being read keeps its stopped components", async () => {
+        const stack = await seedStack({ status: "running", observedAt: at(-1) });
+        onStatusRead = async () => {
+          await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+          await recordAppStackComponentHealthTransactional(db(), {
+            organizationId: ORG,
+            stackId: stack.id,
+            observedAt: at(1),
+            components: [
+              { componentKey: "app", health: "stopped" },
+              { componentKey: "cache", health: "stopped" },
+            ],
+          });
+        };
+
+        await observer().reconcileOnce(NOW);
+
+        expect(statusReads()).toEqual([stack.id]);
+        expect(await statusOf(stack.id)).toBe("stopped");
+        expect(await rows(stack.id)).toEqual([
+          ["app", "stopped", at(1).toISOString()],
+          ["cache", "stopped", at(1).toISOString()],
+        ]);
+      });
+
+      it("a stack that is not observed any more when the read comes back is not written, whatever the stamps are", async () => {
+        const stack = await seedStack({ status: "running", observedAt: at(-1) });
+        onStatusRead = async () => {
+          await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+        };
+
+        await observer().reconcileOnce(NOW);
+
+        expect(await rows(stack.id)).toEqual([
+          ["app", "healthy", at(-1).toISOString()],
+          ["cache", "healthy", at(-1).toISOString()],
+        ]);
+      });
+
+      it("an operation queued while the stack is being read keeps the reading out", async () => {
+        const stack = await seedStack({ status: "running", observedAt: at(-1) });
+        onStatusRead = () => insertOperation(stack.id, "unknown", null, "stack.stop");
+
+        await observer().reconcileOnce(NOW);
+
+        expect(statusReads()).toEqual([stack.id]);
+        expect(await rows(stack.id)).toEqual([
+          ["app", "healthy", at(-1).toISOString()],
+          ["cache", "healthy", at(-1).toISOString()],
+        ]);
+      });
+
+      it("a component written after the read began, with a later time, is kept", async () => {
+        const stack = await seedStack({ status: "running", observedAt: at(-1) });
+        onStatusRead = () =>
+          recordAppStackComponentHealthTransactional(db(), {
+            organizationId: ORG,
+            stackId: stack.id,
+            observedAt: at(1),
+            components: [
+              { componentKey: "app", health: "unhealthy" },
+              { componentKey: "cache", health: "unhealthy" },
+            ],
+          });
+
+        await observer().reconcileOnce(NOW);
+
+        expect(await rows(stack.id)).toEqual([
+          ["app", "unhealthy", at(1).toISOString()],
+          ["cache", "unhealthy", at(1).toISOString()],
+        ]);
+      });
+
+      it("each reading is stamped with the time its own read began, not the time the pass began", async () => {
+        const first = await seedStack({ status: "running", observedAt: at(-3) });
+        const second = await seedStack({ status: "running", observedAt: at(-2) });
+        let clock = Date.now();
+        const spy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        onStatusRead = () => {
+          clock += 20_000;
+        };
+        try {
+          await observer().reconcileOnce(NOW);
+        } finally {
+          spy.mockRestore();
+        }
+
+        expect(statusReads()).toEqual([first.id, second.id]);
+        expect((await rows(first.id)).map((r) => r[2])).toEqual([NOW.toISOString(), NOW.toISOString()]);
+        expect((await rows(second.id)).map((r) => r[2])).toEqual([new Date(NOW.getTime() + 20_000).toISOString(), new Date(NOW.getTime() + 20_000).toISOString()]);
+      });
     });
 
     it("stacks whose reads keep failing do not starve the others: a healthy stack is read within two passes", async () => {
@@ -416,10 +519,12 @@ describe("AppStackObserverService (PGlite)", () => {
       await observer().reconcileOnce(at(1));
 
       expect(statusReads()).toContain(healthy.id);
-      expect(await health(healthy.id)).toEqual([
-        { componentKey: "app", health: "healthy", healthObservedAt: at(1) },
-        { componentKey: "cache", health: "stopped", healthObservedAt: at(1) },
+      const read = await health(healthy.id);
+      expect(read.map((c) => [c.componentKey, c.health])).toEqual([
+        ["app", "healthy"],
+        ["cache", "stopped"],
       ]);
+      expect(read.map((c) => stampedAt(c.healthObservedAt, at(1)))).toEqual([true, true]);
     });
 
     it("never selects a stack with no applied revision", async () => {

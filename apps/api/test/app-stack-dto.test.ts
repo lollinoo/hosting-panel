@@ -161,12 +161,18 @@ const deployed = (components: AppStackComponentRow[], change: Partial<Parameters
   });
 
 describe("appStackSummaryDto", () => {
-  const summary = (components: AppStackComponentRow[], domains: AppStackDomainRow[] = []) =>
+  const summary = (
+    components: AppStackComponentRow[],
+    domains: AppStackDomainRow[] = [],
+    appliedPlan: ApprovedStackPlan | null = null,
+    stack: AppStackRow = stackRow({ status: "running" }),
+  ) =>
     appStackSummaryDto({
-      stack: stackRow({ status: "running" }),
+      stack,
       templateName: "Notes Demo",
       templateVersionNumber: 2,
       installed: { revisionNumber: 4, templateVersionNumber: 1 },
+      appliedPlan,
       components,
       domains,
       now: NOW,
@@ -182,6 +188,41 @@ describe("appStackSummaryDto", () => {
     ]);
     expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2, installed: { revisionNumber: 4, templateVersionNumber: 1 } });
     expect(AppStackSummaryDtoSchema.strict().parse(dto)).toEqual(dto);
+  });
+
+  it("shows the status the page shows: a crashed essential component of a running stack reads failed, a stale one unknown (#130)", () => {
+    const running = stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+    const shown = (components: AppStackComponentRow[], plan: ApprovedStackPlan | null = PLAN) => summary(components, [], plan, running).status;
+    expect(shown([component("app", "healthy", FRESH), component("cache", "healthy", FRESH)])).toBe("running");
+    expect(shown([component("app", "stopped", FRESH), component("cache", "healthy", FRESH)])).toBe("failed");
+    expect(shown([component("app", "healthy", STALE), component("cache", "healthy", FRESH)])).toBe("unknown");
+    expect(shown([component("app", "healthy", FRESH)])).toBe("unknown");
+    // No readable plan of what runs: the stored status, as the page shows it.
+    expect(shown([component("app", "stopped", FRESH)], null)).toBe("running");
+    // Another status than running or degraded is shown as stored.
+    const stopped = stackRow({ status: "stopped", desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+    expect(summary([component("app", "stopped", FRESH), component("cache", "stopped", FRESH)], [], PLAN, stopped).status).toBe("stopped");
+  });
+
+  it("the list and the page show the same status for every stored status and every set of readings (#130)", () => {
+    const sets: Record<string, AppStackComponentRow[]> = {
+      healthy: [component("app", "healthy", FRESH), component("cache", "healthy", FRESH)],
+      "essential crashed": [component("app", "stopped", FRESH), component("cache", "healthy", FRESH)],
+      "dependency unhealthy": [component("app", "healthy", FRESH), component("cache", "unhealthy", FRESH)],
+      stale: [component("app", "healthy", STALE), component("cache", "healthy", STALE)],
+      "never read": [component("app", "unknown", null), component("cache", "unknown", null)],
+      "one row missing": [component("app", "healthy", FRESH)],
+    };
+    const statuses = ["running", "degraded", "failed", "unknown", "stopped", "updating", "stopping"] as const;
+    for (const status of statuses) {
+      for (const [label, components] of Object.entries(sets)) {
+        const stack = stackRow({ status, desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+        const page = appStackDetailDto(deployed(components, { stack }));
+        const list = summary(components, [], PLAN, stack);
+        expect(list.status, `${status} with ${label}`).toBe(page.status);
+        expect(list.unhealthyCount, `${status} with ${label}`).toBe(page.unhealthyCount);
+      }
+    }
   });
 
   it("primary hostname: the first active one by name, else the first one, else none", () => {
@@ -380,6 +421,49 @@ describe("issue #106: the outcome in doubt is the stored status, not the shown o
     expect([stale.status, stale.outcomeUnknown]).toEqual(["unknown", false]);
     const doubt = appStackDetailDto(deployed([], { stack: stackRow({ status: "unknown", desiredRevisionId: REVISION, appliedRevisionId: REVISION }) }));
     expect([doubt.status, doubt.outcomeUnknown]).toEqual(["unknown", true]);
+  });
+});
+
+describe("issue #208: the components of a stopped application", () => {
+  const LONG_AGO = new Date(NOW.getTime() - 3 * 60 * 60_000);
+  const withStatus = (status: AppStackRow["status"]) => stackRow({ status, desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+  const bothStopped = () => PLAN.components.map((c) => component(c.key, "stopped", LONG_AGO));
+  const shown = (status: AppStackRow["status"], components: AppStackComponentRow[]) => appStackDetailDto(deployed(components, { stack: withStatus(status) }));
+
+  it("a stopped application keeps the stopped reading it was stopped with, however old it is", () => {
+    const dto = shown("stopped", bothStopped());
+    expect(dto.components.map(({ health }) => health)).toEqual(["stopped", "stopped"]);
+    // The time of the last check is the stored one, not the time of the read.
+    expect(dto.components.map(({ healthObservedAt }) => healthObservedAt)).toEqual([LONG_AGO.toISOString(), LONG_AGO.toISOString()]);
+    // It is not counted as unhealthy, as before, and the status stays the stored one.
+    expect(dto).toMatchObject({ status: "stopped", unhealthyCount: 0, componentCount: 2 });
+    expect(appStackSummaryDto({ ...detailInput(), stack: withStatus("stopped"), appliedPlan: PLAN, components: bothStopped(), domains: [] })).toMatchObject({ status: "stopped", unhealthyCount: 0 });
+  });
+
+  it("a running application with the same old readings reads unknown, and so does its status", () => {
+    const dto = shown("running", bothStopped());
+    expect(dto.components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    expect(dto.status).toBe("unknown");
+  });
+
+  it("only a stopped reading of a stopped application is kept: an old healthy or unhealthy one reads unknown, and so does one never stamped", () => {
+    const dto = shown("stopped", [component("cache", "healthy", LONG_AGO), component("app", "unhealthy", LONG_AGO)]);
+    expect(dto.components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    expect(shown("stopped", [component("cache", "stopped", null), component("app", "unknown", null)]).components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    // No row yet reads unknown too.
+    expect(shown("stopped", []).components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("an application that is not stored as stopped keeps the five-minute rule for a stopped reading", () => {
+    for (const status of ["stopping", "starting", "failed", "degraded", "unknown", "updating"] as const) {
+      expect(shown(status, bothStopped()).components.map(({ health }) => health), status).toEqual(["unknown", "unknown"]);
+    }
+  });
+
+  it("a fresh reading of a stopped application reads as it is", () => {
+    const dto = shown("stopped", [component("cache", "stopped", FRESH), component("app", "unhealthy", FRESH)]);
+    expect(dto.components.map(({ health }) => health)).toEqual(["stopped", "unhealthy"]);
+    expect(dto.unhealthyCount).toBe(1);
   });
 });
 

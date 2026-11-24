@@ -26,7 +26,7 @@ import {
   type AppStackVolumeStatus,
   type ErrorCode,
 } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, exists, inArray, isNull, lt, max, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, exists, inArray, isNull, lt, lte, max, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { deleteRemovedAppStackDomains } from "./app-stack-domains-repository.js";
 import { AppStackQuotaError, chargeAppStackQuota, lockAppStackLimitUsage } from "./app-stack-limit.js";
 import { getAppTemplateVersion, getPublishedAppTemplateVersion } from "./app-templates-repository.js";
@@ -849,7 +849,11 @@ export async function updateAppStackDeploymentTransactional(
   return updated!;
 }
 
-/** Unknown component keys are ignored. */
+/**
+ * Unknown component keys are ignored. A reading never replaces a newer one: a component whose stored time is later than
+ * `observedAt` keeps its row, so a reading taken before a stop settled cannot be written after it. The same time is not
+ * older: two writes of one millisecond keep the later one.
+ */
 export async function recordAppStackComponentHealthTransactional(
   db: DatabaseExecutor,
   input: StackScope & {
@@ -866,6 +870,7 @@ export async function recordAppStackComponentHealthTransactional(
           eq(appStackComponents.stackId, input.stackId),
           eq(appStackComponents.organizationId, input.organizationId),
           eq(appStackComponents.componentKey, component.componentKey),
+          or(isNull(appStackComponents.healthObservedAt), lte(appStackComponents.healthObservedAt, input.observedAt)),
         ),
       );
   }

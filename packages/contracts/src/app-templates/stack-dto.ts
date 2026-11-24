@@ -155,7 +155,8 @@ export const AppStackSummaryDtoSchema = z.object({
   templateName: z.string(),
   templateVersionNumber: z.number().int().positive(),
   // the applied revision whenever it is not the desired one (a change running, a failure after create, a take-back
-  // declined, a deploy with new settings that failed before create); the detail's status follows its plan
+  // declined, a deploy with new settings that failed before create); the status of the list and of the detail follows
+  // the plan that runs (issue #130)
   installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   componentCount: z.number().int().nonnegative(),
   unhealthyCount: z.number().int().nonnegative(), // effective health unhealthy or missing (stale reads as unknown)
@@ -181,7 +182,7 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   components: z.array(
     z.object({
       key: AppStackKeySchema,
-      health: AppStackComponentHealthSchema, // effective: stale → unknown
+      health: AppStackComponentHealthSchema, // effective: stale → unknown, but a stopped application keeps its `stopped` reading (#208)
       healthObservedAt: IsoDateTimeSchema.nullable(),
       dependsOn: z.array(AppStackKeySchema),
       ingress: z.boolean(),
