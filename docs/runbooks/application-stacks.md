@@ -412,6 +412,21 @@ administrator's console has no such action, and nobody writes proxy configuratio
    `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
    reads «In attesa» until a published file holds it.
 
+   An accepted removal of an address whose stack has a route file published does not free the name at once (issue
+   #112): the row stays, marked with `removal_requested_at`, and keeps the hostname until a route file without it is
+   published (the refresh queued with the removal, a later one, a stop, or the deletion of the stack). The customer
+   sees it in the list as «In rimozione», with no button; it is not published, takes no change, is no redirect
+   destination and counts in no limit, and the same name added again, by any customer, is refused with
+   `DOMAIN_CONFLICT`. With nothing published it goes at once. When the refresh fails (the executor does not answer)
+   the address stays marked and the name stays held; the periodic check queues the refresh again after the ten
+   minutes of a failed action, as often as needed. A removal that stays pending for long means the refresh keeps
+   failing: look at the stack's last `stack.deploy` operations with an `sys_routes_` idempotency key and at the
+   executor, then let the next refresh run or restart the application; nobody deletes the row by hand. To list the
+   addresses being removed (read-only):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, hostname, removal_requested_at from app_stack_domains where removal_requested_at is not null order by removal_requested_at"
+   ```
+
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
    what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
    next to every address that shows an option, never the option as active. The next successful start, restart or

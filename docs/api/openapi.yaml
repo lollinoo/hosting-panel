@@ -6560,8 +6560,9 @@ paths:
       description: >-
         The component and port must be an entry point of the application (`VALIDATION_ERROR`,
         `details[0].reason: unknown_ingress`); at most 8 web addresses (`details[0].field: domains`,
-        `details[0].reason: STACK_QUOTA_EXCEEDED`). A hostname already on this application adds nothing and writes no
-        audit row. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        `details[0].reason: STACK_QUOTA_EXCEEDED`; an address being removed is not counted). A hostname already on this
+        application adds nothing and writes no audit row; one being removed from it is refused (`DOMAIN_CONFLICT`)
+        until its route is withdrawn. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
         capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6613,7 +6614,9 @@ paths:
         application that does not redirect itself and that no address redirects to (`redirect_target`,
         `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
         point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
-        pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
+        pathRoutes.<n>.componentKey`); an address being removed is no destination (`redirect_target`) and takes no
+        change (409 `RESOURCE_LOCKED`, `details[0].field: domainId`, `details[0].reason: address_removing`). A change
+        either reaches every route file of the application that may be
         published or is refused: on a running application the route refresh is queued in the same request; while a
         route file may be in place that the panel cannot rewrite now (an action in progress other than the panel's own
         route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
@@ -6663,7 +6666,8 @@ paths:
         "409":
           description: >-
             The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
-            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status), or the address is being removed (`RESOURCE_LOCKED`,
+            `details[0].reason: address_removing`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6675,7 +6679,11 @@ paths:
       description: >-
         Its route is withdrawn: on a running application the route refresh is queued in the same request (ADR-0037).
         Removing frees the hostname, so it is accepted only when that refresh withdraws it now, or when nothing of the
-        application is published and no action is open (never installed, or stopped). Otherwise (any action in
+        application is published and no action is open (never installed, or stopped). With nothing published the
+        address goes at once; otherwise it stays in the list with `removing: true`, keeping its hostname, until a route
+        file of the application without it is published (that refresh, a later one the panel retries after one that
+        failed, or a stop that withdraws the routes). Removing it again is refused (409 `RESOURCE_LOCKED`,
+        `details[0].field: domainId`, `details[0].reason: address_removing`). Otherwise (any action in
         progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
         stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
         status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
@@ -6694,7 +6702,7 @@ paths:
               $ref: "#/components/schemas/AppStackActionInput"
       responses:
         "200":
-          description: The web addresses left
+          description: The web addresses of the application, the one being removed included until its route is withdrawn
           content:
             application/json:
               schema:
@@ -6716,7 +6724,8 @@ paths:
         "409":
           description: >-
             A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
-            `details[0].reason` is the status); the address is kept
+            `details[0].reason` is the status); the address is kept. Or the address is already being removed
+            (`RESOURCE_LOCKED`, `details[0].reason: address_removing`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -14861,7 +14870,7 @@ components:
 
     AppStackDomainDto:
       type: object
-      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes]
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes, removing]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -14908,6 +14917,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppStackDomainPathRoute"
+        removing:
+          type: boolean
+          description: >-
+            The address was removed and still answers until the application's route file without it is published. It
+            keeps its hostname until then, takes no change, is no redirect destination and counts in no limit; it then
+            leaves the list.
 
     CreateAppStackLinkInput:
       type: object
