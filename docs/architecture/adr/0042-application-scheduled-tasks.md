@@ -97,6 +97,8 @@ Una passata dell'API, ogni minuto, mette in coda ciò che è in programma:
 
 Di ogni esecuzione restano: l'attività, il componente, chi l'ha chiesta (una persona o il programma), l'inizio, la fine, l'esito (`succeeded`, `failed`, `timed_out`, `not_started`, `unknown`), il codice di uscita e le **ultime righe stampate**: al massimo 16 KiB e 200 righe, senza caratteri di controllo, con i valori dei segreti del componente mascherati come nei log.
 
+Un'uscita vuota con `outputTruncated` vero vuol dire una cosa sola: l'esecuzione ha stampato qualcosa e nulla è stato conservato, perché era un'unica riga troppo lunga o perché l'esecutore non ha potuto leggere i valori dei segreti del componente per mascherarla; l'uscita si conserva mascherata con tutti quei valori, oppure non si conserva.
+
 Le righe stampate stanno **solo** nella riga dell'esecuzione: mai nell'audit, nell'operazione, nella coda o in un log dell'API, del web o dell'esecutore. Per ogni attività restano le ultime 20 esecuzioni.
 
 Due righe di audit, solo per ciò che fa una persona: `app.task.run` (chi ha lanciato quale attività) e `app.task.schedule` (chi ha cambiato quale programma, e come). Un'esecuzione partita dal programma non ha una riga di audit: la sua traccia è l'esecuzione stessa.
