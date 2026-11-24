@@ -430,9 +430,12 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     tail: TaskOutputTail,
   ): Promise<AppStackTaskRunIpcResult> {
     const kept = tail.lines();
-    // The program never ran: what is there is the engine's message, not something the task printed. The exit code tells.
+    // The program never ran: what is there is the engine's message, not something the task printed. The exit code tells,
+    // or is not known (the engine did not tell it, or reading it failed).
     const engineError =
-      (exitCode === 126 || exitCode === 127) && !kept.cut && kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true;
+      (exitCode === null || exitCode === 126 || exitCode === 127) &&
+      !kept.cut &&
+      kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true;
     const { lines, cut } = engineError ? { lines: [], cut: false } : kept;
     const values = await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey);
     const masked = maskAppStackLogLines(

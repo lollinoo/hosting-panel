@@ -232,17 +232,22 @@ describe("runAppStackTask on the Docker Engine", () => {
       // A program that ran and ended with 127 by itself keeps what it printed; so does the engine's text with another code.
       { frames: [[1, "my own error\n"]], exitCode: 127 },
       { frames: [[1, engine]], exitCode: 1 },
+      // The engine did not tell the exit code: its own message still never comes back.
+      { frames: [[2, engine]], exitCode: null },
+      { frames: [[1, "printed by the task\n"]], exitCode: null },
     ];
     const { adapter } = await setup({ command: () => plans.shift() });
     const results = [];
-    for (let n = 1; n <= 4; n += 1) results.push(await adapter.runAppStackTask(request(n)));
+    for (let n = 1; n <= 6; n += 1) results.push(await adapter.runAppStackTask(request(n)));
     expect(results.map((r) => [r.outcome, r.exitCode, r.output === "" ? "" : r.output.slice(0, 12)])).toEqual([
       ["failed", 127, ""],
       ["failed", 126, ""],
       ["failed", 127, "my own error"],
       ["failed", 1, "OCI runtime "],
+      ["failed", null, ""],
+      ["failed", null, "printed by t"],
     ]);
-    expect(JSON.stringify(results.slice(0, 2))).not.toContain("php");
+    expect(JSON.stringify([...results.slice(0, 2), results[4]])).not.toContain("php");
     for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
   });
 
