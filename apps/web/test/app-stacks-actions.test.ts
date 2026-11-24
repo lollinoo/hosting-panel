@@ -613,6 +613,49 @@ describe("upgrade and rollback plan dialog", () => {
       expect(markup).toContain(text);
     });
 
+    it("a confirm while another request is out sends nothing and leaves the typed value and the dialog as they are (issue #136)", async () => {
+      let release!: (v: unknown) => void;
+      keyedSend.mockReturnValue(new Promise((r) => (release = r)));
+      const parent = callHooks(AppStackActions, actionProps("running"), en, { 4: "upgrade" });
+      const restart = click(button(parent.out, en.apps.actions.restart)); // a request is out: the page's busy flag is set
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(planDialog(parent.out), { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(keyedSend).toHaveBeenCalledTimes(1);
+      expect(input.value).toBe(TYPED);
+      expect(sets.filter(([k, v]) => k === 1 && v !== null)).toEqual([]);
+      expect(parent.sets).not.toContainEqual([4, null]);
+      release(accepted);
+      await restart;
+    });
+
+    it("a refusal of a value the dialog does not ask for is said in the dialog and empties no field (issue #136)", async () => {
+      const refusal = { code: "VALIDATION_ERROR", reason: "value_too_long" };
+      keyedSend.mockResolvedValue({ ok: false, ...refusal, field: "secrets.other_password" });
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(sets).toContainEqual([1, appStackSecretRefusalText(en, refusal)]);
+      expect(sets.filter(([k, v]) => k === 3 && Object.keys(v as object).length > 0)).toEqual([]);
+      expect(input.value).toBe(TYPED);
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(parentSets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+    });
+
+    it("an answer that was accepted but names no operation closes the dialog and tells the page so (issue #136)", async () => {
+      keyedSend.mockResolvedValue({ ok: true, data: { data: {} } });
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(input.value).toBe("");
+      expect(parentSets).toContainEqual([2, appStackRefusalText(en, "")]);
+      expect(parentSets).toContainEqual([4, null]);
+      expect(parentSets).not.toContainEqual([1, en.apps.actions.accepted]);
+      expect(router.refresh).not.toHaveBeenCalled();
+    });
+
     it.each(locales)("a value too long states a number of characters only for a value given in the environment (%s)", async (_l, m) => {
       const environment = format(m.apps.reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
       const stored = m.apps.reasons.value_too_long_store;
