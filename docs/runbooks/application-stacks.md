@@ -181,7 +181,8 @@ names only the key of a task, and the command is read from the template version 
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, task_key, frequency, hour_utc, weekday, served_slot_at, skipped_slot_at, skip_reason from app_stack_task_schedules order by stack_id, task_key"
    ```
    `busy` = the application was being changed or another run of it was waiting or running, `not_running` = it was
-   stopped or failed, `missed` = nothing tried the time within 30 minutes (the panel was off). While `served_slot_at`
+   stopped or failed, `missed` = nothing tried the time within 30 minutes (the panel was off, or the executor has no
+   task calls: then the panel queues nothing). While `served_slot_at`
    is older than `skipped_slot_at` (or empty), the time is still owed and tried every minute; a scheduled run that
    could not begin leaves no row in `app_stack_task_runs` and makes its time owed again this way. After 30 minutes
    the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
