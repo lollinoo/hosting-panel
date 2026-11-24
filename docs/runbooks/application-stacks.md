@@ -336,6 +336,10 @@ names only the key of a task, and the command is read from the template version 
    The start-up clean-up works in four components at once and stops after 60 seconds, before the executor takes calls.
    `app_task_reap_unfinished` with a `count`: that many components were not cleaned by then; each is cleaned by the
    probe of its next run, and while a clean-up of it is still going no task of that application starts.
+   `app_task_output_withheld` with `code` `DOCKER_ENGINE_UNAVAILABLE`: a run printed something and none of it was kept,
+   because the private values of the component could not be read to hide them (the page tells the customer so). The
+   remedy is the one of procedure 13, step 5: **Riavvia** the application; if it comes back, the customer replaces the
+   private value shorter than 6 characters in **Valori riservati** and presses **Reinstalla**.
 7. **Downgrade.** `hp-update --allow-downgrade` exits with **code 8** when the target release does not list the feature
    `app-tasks` and a template version that declares tasks exists: an older release refuses the source of such a version
    and cannot show the applications that use it. Template versions are never deleted, so the only way back is
