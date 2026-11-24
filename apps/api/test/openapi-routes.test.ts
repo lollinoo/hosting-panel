@@ -48,6 +48,55 @@ function documentedOperations(): Map<string, string> {
   return out;
 }
 
+/**
+ * Lines whose unquoted one-line value YAML reads differently from what is written (issue #213): `: ` inside it, or a
+ * `:` at its end, starts a mapping and the whole file stops parsing; ` #` starts a comment and the rest of the value
+ * is lost. The lines of a block value (`|`, `>`) are text and are skipped. The repository has no YAML parser and
+ * every test reads this file as text, so this rule is what notices.
+ */
+function misreadValues(text: string): string[] {
+  const out: string[] = [];
+  let block: number | null = null;
+  text.split("\n").forEach((line, index) => {
+    const indent = line.length - line.trimStart().length;
+    if (block !== null) {
+      if (line.trim() === "" || indent > block) return;
+      block = null;
+    }
+    if (/^\s*(?:- )?[\w$./{}"'-]+:\s*[|>][+-]?\d*\s*$/.test(line)) {
+      block = indent;
+      return;
+    }
+    const value = /^\s*(?:- )?[\w$./{}"'-]+:\s+(\S.*)$/.exec(line)?.[1];
+    if (value === undefined || /^["'[{&*!]/.test(value)) return;
+    if (/: | #|:$/.test(value)) out.push(`${index + 1}: ${line.trim()}`);
+  });
+  return out;
+}
+
+describe("docs/api/openapi.yaml stays readable as YAML (#213)", () => {
+  it("finds a value with a colon and a space, and one with a space and a hash (the scanner itself works)", () => {
+    const sample = [
+      "paths:",
+      "  description: refused (`details[0].reason: gone`)",
+      "  summary: revision #1 created",
+      '  title: "quoted: fine #1"',
+      "  text: |",
+      "    inside a block: anything #1",
+      "",
+      "    still the block: yes",
+      '  $ref: "#/components/schemas/Thing"',
+      "  example: https://panel.example.test/a#b",
+      "  format: date-time",
+    ].join("\n");
+    expect(misreadValues(sample)).toEqual(["2: description: refused (`details[0].reason: gone`)", "3: summary: revision #1 created"]);
+  });
+
+  it("writes no unquoted one-line value that YAML would read differently", () => {
+    expect(misreadValues(api)).toEqual([]);
+  });
+});
+
 describe("controller routes and docs/api/openapi.yaml agree", () => {
   const routes = controllerRoutes();
   const operations = documentedOperations();

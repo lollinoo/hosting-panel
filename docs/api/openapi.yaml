@@ -1912,7 +1912,7 @@ paths:
     post:
       tags: [Services]
       operationId: createService
-      summary: Instantiate service with initial stack revision #1 (service.create, then server administrator)
+      summary: "Instantiate service with initial stack revision #1 (service.create, then server administrator)"
       description: >-
         Server administrators only (R207 addendum 4 A): the caller needs `service.create` in the organization
         and then the server-administrator permission. A server administrator is not a member of a
@@ -1932,7 +1932,7 @@ paths:
               $ref: "#/components/schemas/CreateServiceInstanceInput"
       responses:
         "201":
-          description: Service and immutable revision #1 created
+          description: "Service and immutable revision #1 created"
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -5944,7 +5944,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)
+          description: "Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -5990,7 +5990,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6196,7 +6196,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6248,7 +6248,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: "Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
