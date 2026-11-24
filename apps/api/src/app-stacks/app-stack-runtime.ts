@@ -58,6 +58,7 @@ import {
   appStackAddressesHash,
   appStackAggregate,
   appStackComponentReady,
+  appStackCreateRefusedBeforeChange,
   appStackEssentialKeys,
   appStackHealthRows,
   appStackObservedComponent,
@@ -133,6 +134,8 @@ interface RolloutState {
   created: readonly string[] | null;
   /** The executor was asked to create: set on the line before the call, so an answer that never came still counts. */
   createAsked: boolean;
+  /** The executor refused the create and said it had removed and created nothing (#111). Read from that refusal only. */
+  createRefusedBeforeChange: boolean;
 }
 
 const healthMap = (rows: HealthRows) => new Map(rows.map((h) => [h.componentKey, h.health]));
@@ -349,7 +352,7 @@ export class AppStackRuntime {
   async #rollout(ctx: StackContext, restart: boolean | null): Promise<void> {
     const { db, clock } = this.#deps;
     const deploy = restart === null;
-    const st: RolloutState = { stack: null, plan: null, previous: null, created: null, createAsked: false };
+    const st: RolloutState = { stack: null, plan: null, previous: null, created: null, createAsked: false, createRefusedBeforeChange: false };
     const body = async () => {
       await this.#step(ctx, "validate", () => this.#validate(ctx, st, deploy));
       const stack = st.stack!;
@@ -376,7 +379,13 @@ export class AppStackRuntime {
               ? []
               : (await this.#secretFiles(ctx, plan)).filter((f) => wanted.some((w) => w.parameterKey === f.parameterKey && w.version === f.version));
           st.createAsked = true;
-          const result = await port.createAppStackComponents(wanted.length === 0 ? { plan } : { plan, secretContents });
+          let result;
+          try {
+            result = await port.createAppStackComponents(wanted.length === 0 ? { plan } : { plan, secretContents });
+          } catch (err) {
+            st.createRefusedBeforeChange = appStackCreateRefusedBeforeChange(err);
+            throw err;
+          }
           st.created = result.components.filter((c) => c.outcome !== "unchanged").map((c) => c.componentKey);
         });
       }
@@ -462,10 +471,12 @@ export class AppStackRuntime {
         // The containers are healthy and the old route file is still in place.
         return settle({ stackStatus: "degraded", ...(deploy ? { appliedRevisionId: st.plan!.revisionId } : {}) }, ctx.lastHealth);
       }
-      if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare" || (step === "create" && !st.createAsked)))) {
+      const createChangedNothing = step === "create" && (!st.createAsked || st.createRefusedBeforeChange);
+      if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare" || createChangedNothing))) {
         // Pre-flight: create was never called (a create step that failed in the API before the executor was asked is
-        // the same), so no container was touched; the stack keeps the status the plan that runs shows, and an upgrade
-        // or a rollback takes back what its request wrote.
+        // the same, and so is a create the executor refused saying that it had removed and created nothing), so no
+        // container was touched; the stack keeps the status the plan that runs shows, and an upgrade or a rollback
+        // takes back what its request wrote.
         const { stack } = st;
         const previous = deploy ? st.previous : st.plan;
         const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};

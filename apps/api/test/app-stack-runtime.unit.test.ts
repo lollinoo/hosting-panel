@@ -965,6 +965,148 @@ describe("AppStackRuntime (RT3)", () => {
     });
   });
 
+  describe("a create the executor refuses before it changes anything (#111)", () => {
+    // A further variable makes this plan different from the one that runs.
+    const WEB_V2 = { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] };
+    const STOPPED = { cache: "stopped", web: "stopped" };
+    const touched = () => trace().filter((c) => /^(create|start|restart|remove)AppStack|^publishAppStackRoutes/.test(c));
+    // A policy refusal of the plan, which the executor raises before its first removal or create.
+    const REFUSED = "STACK_IMAGE_NOT_ALLOWED";
+    const MARKED = { beforeChange: true };
+
+    it("an upgrade of a running application refused that way leaves it as it was and takes its target back", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+
+      expectFailure(await run(upgrade), REFUSED);
+
+      // Nothing was started or removed, and the application's status is read, not guessed.
+      expect(touched()).toEqual(["createAppStackComponents"]);
+      expect(trace().at(-1)).toBe("getAppStackStatus");
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      expect(fake.stack(stackId).routes).toHaveLength(1);
+      // The operation still ends failed with its reason, and the history keeps what was tried.
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2.revisionId, problem: REFUSED });
+      expect((await opOf(upgrade.operation!.id)).status).toBe("failed");
+      expect((await opOf(upgrade.operation!.id)).errorCode).toBe("HOST_POLICY_DENIED");
+      expect((await stepsOf(upgrade))["create"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+    });
+
+    it("the same refusal without the mark keeps the target and fails the application: the executor may have changed a component", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("createAppStackComponents", "definite", REFUSED);
+
+      expectFailure(await run(upgrade), REFUSED);
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: REFUSED });
+    });
+
+    it("a refusal of any reason, or of none, that carries the mark is read the same way", async () => {
+      for (const reason of [undefined, "STACK_BUSY", "STACK_NAMESPACE_CONFLICT", "STACK_COMPONENT_NOT_READY"]) {
+        const { stackId, rev } = await running([CACHE, WEB]);
+        const upgrade = await enqueue(stackId, "stack.upgrade", revision(stackId, [CACHE, WEB_V2]));
+        fake.failNext("createAppStackComponents", "definite", reason, MARKED);
+        expect(await run(upgrade)).toBeInstanceOf(ControlPlaneError);
+        expect(await stackOf(stackId), String(reason)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+        expect(touched()).toEqual(["createAppStackComponents"]);
+      }
+    });
+
+    it("a rollback refused that way goes back to the revision that runs", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      const rollback = await enqueue(stackId, "stack.rollback", revision(stackId, rev.plan.components as AppStackPlanComponent[]));
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+
+      expectFailure(await run(rollback), REFUSED);
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: v2.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+    });
+
+    it("a stopped application stays stopped: nothing was started", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      fake.calls.length = 0;
+      const upgrade = await enqueue(stackId, "stack.upgrade", revision(stackId, [CACHE, WEB_V2]));
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+
+      expectFailure(await run(upgrade), REFUSED);
+
+      expect(touched()).toEqual(["createAppStackComponents"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId, appliedRoutesHash: null });
+      expect(await healthOf(stackId)).toEqual(STOPPED);
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: REFUSED, replacedStatus: "stopped" });
+      expect(fake.stack(stackId).routes).toEqual([]);
+    });
+
+    it("a redeploy with new settings refused that way keeps its target, as a deploy refused at pull does", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const deploy = await enqueue(stackId, "stack.deploy", v2);
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+
+      expectFailure(await run(deploy), REFUSED);
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+    });
+
+    it("a first deploy refused that way ends as one refused at prepare ends", async () => {
+      const early = await create([CACHE, WEB]);
+      fake.failNext("prepareAppStack", "definite", REFUSED);
+      expectFailure(await run(early.write), REFUSED);
+      const atPrepare = { stack: await stackOf(early.stackId), health: await healthOf(early.stackId), deployment: await deploymentOf(early.write) };
+
+      const late = await create([CACHE, WEB]);
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+      expectFailure(await run(late.write), REFUSED);
+      const atCreate = { stack: await stackOf(late.stackId), health: await healthOf(late.stackId), deployment: await deploymentOf(late.write) };
+
+      expect(atPrepare.stack).toMatchObject({ status: "failed", appliedRevisionId: null });
+      expect(atCreate.stack).toMatchObject({ status: atPrepare.stack.status, appliedRevisionId: atPrepare.stack.appliedRevisionId });
+      expect(atCreate.health).toEqual(atPrepare.health);
+      expect(atCreate.deployment).toMatchObject({ status: atPrepare.deployment.status, problem: atPrepare.deployment.problem });
+    });
+
+    it("a refusal that is only an engine failure, or an answer that was lost, is not read as one that changed nothing", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      // An engine failure carries no mark, wherever it comes from.
+      fake.failNext("createAppStackComponents", "definite");
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+
+      // A lost answer is unknown, never a refusal.
+      const again = await running([CACHE, WEB]);
+      const lost = await enqueue(again.stackId, "stack.upgrade", revision(again.stackId, [CACHE, WEB_V2]));
+      fake.failNext("createAppStackComponents", "ambiguous");
+      expect(await run(lost)).toMatchObject({ code: "OPERATION_AMBIGUOUS" });
+      expect((await stackOf(again.stackId)).status).toBe("unknown");
+    });
+
+    it("the mark is stored nowhere: the problem of the operation and the deployment is the reason alone", async () => {
+      const { stackId } = await running([CACHE, WEB]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", revision(stackId, [CACHE, WEB_V2]));
+      fake.failNext("createAppStackComponents", "definite", REFUSED, MARKED);
+      const err = await run(upgrade);
+
+      expectFailure(err, REFUSED);
+      const stored = JSON.stringify([await opOf(upgrade.operation!.id), await deploymentOf(upgrade), await stepsOf(upgrade), await stackOf(stackId)]);
+      expect(stored).not.toContain("before_change");
+      expect(JSON.stringify(err)).not.toContain("before_change");
+    });
+  });
+
   describe("start, restart, stop, delete (13)", () => {
     it("stop withdraws the routes then stops; start brings it back and republishes", async () => {
       const { stackId } = await running();

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   aggregateAppStackStatus,
   canTransitionAppStack,
   effectiveComponentHealth,
@@ -122,6 +123,19 @@ export function appStackProblemOf(err: unknown): AppStackRuntimeProblem {
   const reason: unknown = Array.isArray(e?.details) ? (e.details[0] as { reason?: unknown } | null | undefined)?.reason : undefined;
   if (isRuntimeProblem(reason)) return reason;
   return (typeof e?.code === "string" ? PROBLEM_BY_CODE[e.code] : undefined) ?? "DOCKER_ENGINE_UNAVAILABLE";
+}
+
+/**
+ * True when a refusal of the executor's create call says that nothing was removed or created before it (#111): its
+ * details carry the executor's mark. Read only from an error of that one call; the mark is never shown to a customer
+ * and never stored (appStackProblemOf reads details[0].reason and the code only, so it does not move the problem).
+ */
+export function appStackCreateRefusedBeforeChange(err: unknown): boolean {
+  const details: unknown = (err as { details?: unknown } | null | undefined)?.details;
+  return (
+    Array.isArray(details) &&
+    details.some((d: { field?: unknown; message?: unknown } | null | undefined) => d?.field === APP_STACK_REFUSED_BEFORE_CHANGE.field && d?.message === APP_STACK_REFUSED_BEFORE_CHANGE.message)
+  );
 }
 
 /** A plan key absent from `components` is "missing". */
