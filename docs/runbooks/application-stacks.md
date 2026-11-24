@@ -3,7 +3,8 @@
 Operator procedures for application stacks (`ADR-0035`). Design record:
 `docs/architecture/adr/0035-application-stacks.md`. Acceptance evidence and what is still pending:
 `docs/security/hcp-spec-005-acceptance-report.md`. The routing options of a stack's addresses (`ADR-0037`,
-`docs/architecture/adr/0037-application-routing-options.md`) are procedure 10.
+`docs/architecture/adr/0037-application-routing-options.md`) are procedure 10. Backup and restore of an application
+(`ADR-0038`): `docs/architecture/adr/0038-application-backups.md`.
 
 `<stackId>` is the id in the address of the application page (`/apps/<stackId>`, it starts with `stk_`);
 `<componentKey>` and `<volumeKey>` are the names the template gives a component and a volume. The database commands
@@ -23,14 +24,17 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   `STACK_UNSUPPORTED_FEATURE`). Release `0.9.0` has all four `false`: there nobody can create, start, stop or delete
   a stack from the panel, and the procedures below do not apply.
 - **First release scope:** images only (no build, no Git), Dedicated allocations only, HTTP ingress only, Let's Encrypt
-  (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
+  (ACME) certificates only for stack domains, no public TCP/UDP port. An application's data is backed up only when
+  someone creates a backup from its page (procedure 11); no backup of an application runs on a schedule.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
   `app.create`, `app.update`, `app.control`, `app.delete`). The server administrator's console has the template catalog
   (**Modelli**, kind «Applicazione multi-servizio») and a read-only list of every stack in **Applicazioni**; it has no
   stack actions; collaborators and support access have no stack permission.
 - **Never run `docker rm`, `docker volume rm`, `docker network rm` or any `prune` on a stack's objects by hand**, except
   where a step below says so. The panel owns them; removing one by hand leaves the panel's view wrong.
-- **Stack data is in no backup.** The site and panel backups (S3 or local) do not include stacks or their volumes.
+- **Stack data is in no backup unless someone creates one.** The site and panel backups (S3 or local) do not include
+  stacks or their volumes. A customer owner or a hosting administrator of the organisation creates a backup of one
+  application from its page (procedure 11, `ADR-0038`); nothing does it automatically.
 - **Known limits** (`ADR-0035` §4): manual TLS certificates are not available on stack domains; the downgrade gate does
   not see the retained volumes of deleted stacks; after a forced downgrade the stack containers keep running without
   management; the panel console (`hp-web`, tcp 3000) is reachable from every Docker bridge, stack networks included, and
@@ -154,7 +158,7 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migrations `0025` and `0026` are additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026` and `0027` are additive.
 6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
    knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
    with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
@@ -175,6 +179,18 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    an older release that still manages the stacks writes the route files without the options at its next route
    refresh: **a protected address becomes public**, a redirecting address serves the application and the path rules
    stop. The rows keep the options; after upgrading again they apply at the next route refresh.
+8. **Backups of applications.** The same command exits with **code 8** also when the target release does not list the
+   feature `app-stack-backups` and a row exists in `app_stack_backups`, whatever its status and also when its
+   application is deleted. See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select b.id, b.stack_id, b.kind, b.status, b.started_at, s.status as application from app_stack_backups b left join app_stacks s on s.id = b.stack_id order by b.started_at"
+   ```
+   No command of the panel deletes a backup; a row goes only with the nightly clean-up (procedure 11 step 7). An
+   application that exists keeps its newest good backups whatever their age, so this check holds as long as that
+   application lives: to go back without forcing, delete the application (procedure 3) and wait for the retention
+   period, or keep the current release. With `--allow-feature-loss` the older release has no code for these backups: it
+   does not list, restore or remove them. Their rows stay in the database and their copies on the destinations, and
+   the database still refuses to delete a destination that holds one.
 
 ## 5. Restore the panel on a new server
 
@@ -187,8 +203,12 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 3. The customer presses **Reinstalla** on each stack: images are pulled again by digest (the server needs the
    registries), new **empty** volumes are created, the secret files are written from the stored values. The routes
    and the Let's Encrypt certificates come back once the stack runs.
-4. **The data of the volumes is not restored**: it was in no backup. Copying data back into a volume is outside the
-   panel.
+4. **The data of the volumes does not come back with the panel.** The restored database lists the backups of each
+   application, and the restore SQL closes the backups and restores that were open as failed (`interrupted`); a copy
+   that had finished stays good. The copies are on the backup destinations: a local destination is on the new server
+   only if its folder was brought there. Writing a backup back after a panel restore (**Reinstalla** first, then
+   **Ripristina**, procedure 11) **was not tried**: `ADR-0038` leaves it out of scope. Try it on the application whose
+   data matters least before relying on it.
 5. A `delete_failed` stack: delete it again from the panel (procedure 3).
 
 ## 6. Incident: a stack misbehaves
@@ -258,10 +278,11 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
-   templates of the first format) and `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
+   templates of the first format), `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
    template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
-   the images are local). They import the built packages: build first (`corepack pnpm run build`), then run one at a
-   time, never next to a test run (memory):
+   the images are local) and `infra/linux/accept-app-stack-backups.mjs` (backup and restore of an application,
+   `ADR-0038`). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
+   next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
    ```
@@ -291,11 +312,16 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker network disconnect <network> hp_ingress_proxy
    sudo docker network rm <network>
    ```
+   The backups script uses `hp_swarmtest_<hex>` too; its job containers are named `hp_bk_op_<hex>…`, plus one
+   `hp_bk_test_<16 hex>` for the destination test. It gives its application no address, so it creates no edge network.
+   Its job containers carry the role of the panel's own jobs (`site_job`), and `hp-docker-executor` removes such
+   containers when it starts: do not restart the executor while this script runs (the run would fail, without harm).
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
-   for the template scripts), it prints `SKIP … nothing was created` and exits 1. Without a build a template
-   script prints `FAIL preflight: run corepack pnpm run build first`.
+   for the template scripts, the test image or the backup tool's image for the backups script), it prints
+   `SKIP … nothing was created` and exits 1. Without a build a template script prints
+   `FAIL preflight: run corepack pnpm run build first`.
 4. The last line is `RESULT <n>/<m> passed`, followed by `, <k> skipped (not counted in n/m)` when steps were skipped,
    and the time. The exit code is 0 only when every counted step passed.
 5. A `FAIL` of `gate-clean` means the script sent a Docker request the gate refused; that request never reached
@@ -304,7 +330,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker ps -a --filter name=swarmtest_
    sudo docker network ls --filter name=swarmtest_
    sudo docker volume ls --filter name=swarmtest_
+   sudo docker ps -a --filter name=hp_bk_op_
    ```
+   The last command also lists the job of a backup the panel is running right now (`hp_bk_op_…`): remove a container
+   only when its name holds the `<hex>` the script printed.
 6. The routing options (`ADR-0037`) have their own check, `infra/linux/accept-app-routing-options.mjs`:
    ```bash
    node infra/linux/accept-app-routing-options.mjs
@@ -390,3 +419,123 @@ administrator's console has no such action, and nobody writes proxy configuratio
    (`pathTargets` of the application's detail) and marks a target the application no longer offers as «Non più
    disponibile».
 7. **Downgrade:** procedure 4, step 7. **The real-Docker check:** procedure 9, step 6.
+
+## 11. Backup and restore of an application
+
+Design record: `docs/architecture/adr/0038-application-backups.md`. The choices in it (K1 to K12) wait for the owner's
+approval.
+
+1. **Who and where.** A customer owner or a hosting administrator of the organisation, on the application page
+   (`/apps/<stackId>`), section **Backup**: the list needs `app.read`, **Crea backup** and **Ripristina** need
+   `app.control`. The server administrator's console has no command for it, and nothing runs on a schedule. A customer
+   starts at most six backups or restores of one application per hour (`QUOTA_EXCEEDED`); the requests of a server
+   administrator are not counted.
+2. **When the section offers no command**, it says why:
+   - backups cannot run on this server (the executor is not available, or the sites' backups are not available on
+     it): the routes answer `NOT_SUPPORTED`;
+   - the application keeps no data (its template has no data volume);
+   - the server has no usable backup destination: the server administrator sets one for the sites' backups
+     (`docs/runbooks/tls-and-backup-targets.md`). Applications use those destinations, at most two, and cannot choose.
+
+   An application that was never deployed (a draft) has nothing to save: `409` with its status.
+3. **What a backup does.** Its web addresses are withdrawn, the application is stopped, every data volume is copied to
+   each destination (one after the other), and the application is started again by an action of its own, which the
+   history shows after the backup. **The application does not answer for the whole copy.** An application that was
+   stopped stays stopped. While the backup runs, every other action on that application is refused
+   (`409 RESOURCE_LOCKED`, to try again later). The executor keeps the rule by itself: while a copy, restore or
+   removal job of the application runs or is being cleaned up, it refuses to start, restart, install, update or remove
+   that application or a part of it, also when the panel has already closed its action; stopping it stays possible. The same refusals,
+   and the refusal of a new copy or restore, hold while a job container of an earlier one still runs, even after its
+   job ended or the executor restarted (the executor could not stop or remove it:
+   `sudo docker ps --filter label=io.hostingpanel.app_backup_of=<stackId>`); one that has stopped (created, exited or
+   dead) does not count, and the executor removes it at its next start, going on to the next one when a removal fails.
+   Actions on other applications are not held up: backups and restores
+   run in a worker lane of their own, one at a time (a second one waits for its turn), and the nightly clean-ups in
+   another. The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
+
+   A job container that never exits blocks start, restart, install, update and removal of that application for good,
+   and the customer only reads that the action could not finish. The way out (server administrator), either:
+   - restart the executor, `sudo systemctl restart hp-docker-executor`: at its start it stops and removes every job
+     container (label `io.hostingpanel.role=site_job`), running ones included. That also ends every other backup job
+     running at that moment (of a site, of the panel, of another application), which then closes as interrupted: first
+     check with `sudo docker ps --filter label=io.hostingpanel.role=site_job` that the leftover is the only one listed;
+   - or remove that one container by the name the `app_backup_of` filter prints (the one `docker rm` this procedure
+     allows): `sudo docker rm -f <name>`.
+
+   Afterwards `sudo docker ps -a --filter label=io.hostingpanel.app_backup_of=<stackId>` lists nothing (if it still
+   lists the container, Docker itself cannot remove it: `sudo systemctl status docker`), and only then the customer
+   presses **Avvia**. A name with `_rs_` was a restore writing a volume back: its data may be half written, so read
+   step 6 first (the **Backup** section names the backup to restore).
+4. **Read the result.** «Completato»: every destination has the copy. «Parziale»: one destination has it and the other
+   failed; the backup can be restored. «Non riuscito»: no destination has it; the application runs again and its data
+   did not change. The list gives a reason in words; the stable code is the `problem` of the row:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select b.id, b.kind, b.status, b.problem, b.started_at, b.finished_at, b.restore_status, b.restore_problem, c.priority, c.status as copy, c.problem as copy_problem from app_stack_backups b left join app_stack_backup_copies c on c.backup_id = b.id where b.stack_id = '<stackId>' order by b.started_at desc, c.priority"
+   ```
+5. **Restore.** **Ripristina** on a backup, then the application's name typed again. The panel stops the application,
+   saves the data as they are in a backup of kind «Prima di un ripristino», writes the chosen backup back volume by
+   volume (what the backup does not hold is deleted from the volume), and starts the application again. The version
+   and the settings of the application do not change. If the safety backup reaches no destination, nothing is written
+   and the application starts again untouched. The executor checks this by itself: it writes a backup back only after
+   it took, in the same run of the executor, a good safety copy of the same restore holding every volume it writes
+   (one destination is enough); after
+   an executor restart in between, the restore fails with nothing written. Only a volume that is both in the backup and in the application today
+   is written; a backup none of whose volumes exist any more cannot be restored.
+6. **A restore that failed.** When it failed before anything was written, the application starts again by itself.
+   When it failed **while writing**, or the panel cannot tell, the application **stays stopped**: its data may be
+   incomplete. The **Backup** section then names, by its date and time, the backup to restore: the newest
+   «Prima di un ripristino» backup taken from whole data. It is not always the newest of its kind: a backup or a
+   restore asked while the data were still half written saves a copy of those half written data, and the list marks it
+   («Questa copia è stata fatta dopo un ripristino non finito»), a backup made by hand as well as a safety backup.
+   Restoring such a marked copy succeeds but brings the
+   half written data back: the section goes on naming the backup of whole data. Do not press **Avvia** first unless losing the state
+   before the restore is acceptable: a start, or any other action asked of the application except a backup, takes the
+   data as they are once it succeeds, and from then on the section names no backup to go back to. An action that
+   fails takes nothing (a start the executor refuses because a backup job of the application still runs, for example:
+   step 3), and while one is under way the section still names the backup. The data are half written **now** only
+   while the newest operation of the application that decides is a restore whose safety backup (the row with the same
+   `operation_id`) has `left_incomplete`: a restore decides unless it was cancelled, failed or not; any other action
+   decides only once it succeeded; a backup or a clean-up never. `incomplete_data` marks a copy of half written data,
+   of either kind. To see both:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, status, submitted_at from operations where lock_key = 'stack:<stackId>' and kind not in ('stack.backup', 'stack.prune') and ((kind = 'stack.restore' and status <> 'cancelled') or status = 'succeeded') order by submitted_at desc, id desc limit 1"
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, operation_id, status, started_at, incomplete_data, left_incomplete from app_stack_backups where stack_id = '<stackId>' order by started_at desc"
+   ```
+7. **What is kept.** For each application the three newest good backups made by hand and the three newest good safety
+   backups, whatever their age; a failed backup until the retention period of the sites' backup policy is over (14 days
+   unless changed). While the data are half written now (step 6), the safety backup the section names to go back to
+   is kept too, whatever the count of newer ones; once an action takes the data as they are, it is kept like any other. The backups of a **deleted**
+   application stay for that period, then every copy and row goes. The
+   clean-up runs with the nightly backup run (`stack.prune`, «Pulizia dei backup»), so the list can show more than
+   three for some hours. It is an operation of the platform, not of the customer: the customer cannot open it, and
+   while it runs the application page says that its expired backups are being removed and every action on it answers
+   `409 RESOURCE_LOCKED`. A destination that fails keeps the rows, and the next night finishes the work.
+   On a server with no usable destination the nightly run does nothing, and no backup of an application is removed.
+   The executor runs two backup jobs at a time: the sites' nightly backups and the panel's own nightly copy, queued in
+   the same run, may find both taken by a clean-up, an application's backup or restore, or another job (the copy
+   before a WordPress update). A refused one is asked again every minute under its own operation, but the night has
+   one wait, shared by the sites and the panel copy with all its destinations: **15 minutes** in all from its first
+   refusal. After it, each one still refused fails at once as before (a site as `site_busy`) and gets its next backup
+   the next night; each night has at most one panel copy. It is reported like any failed nightly backup: the site's
+   backup list shows it failed, and the server administrator's **Stato** page shows the alert of the site's failed
+   backup or of the panel's. While the night waits, the worker lane of the sites' and the panel's backups is held: a
+   backup, a restore or a download a person asks for then starts when the wait ends, at most 15 minutes later. A site
+   that waits is locked as during its backup (its actions answer `409 RESOURCE_LOCKED`). The wait is kept in memory:
+   restarting `hp-api` during the run starts another one. A backup a person asks for, and the one before a WordPress
+   update, never wait for a job: with both taken they are refused at once.
+8. **Where the copies are** (server administrator). One encrypted repository per application per destination, next to
+   the sites' ones and with their key: on a local destination the folder `stacks/<stackId>` under that destination's
+   folder (`/var/lib/hosting-panel/local-repos/<targetId>` unless `HP_BACKUP_LOCAL_ROOT` says otherwise), on S3 the
+   same path under the destination's location. Never write, move or delete there by hand. The page
+   **Amministrazione › Backup** counts these copies with the others of a destination, and a destination that holds one
+   cannot be deleted.
+9. **The backup or the restore reads «Da verificare».** Procedure 2 applies: the panel reads the state of the
+   application and of the job from the executor and settles the action; it never sends a copy or a restore twice. A
+   job the executor no longer knows (it restarted) is closed as interrupted. The action also reads so when the panel
+   lost track of a job the executor had accepted (no answer, or the database failed while the job ran): until the
+   job's end is read, the application keeps its lock and nothing can start it, because the job may still be reading
+   or writing its data.
+10. **Limits.** No scheduled backup, no restore into another application, no download of a backup, no backup without
+    stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: hard links, extended
+    attributes, file capabilities, device files, an S3 destination, two destinations at once. A copy is taken with the
+    application stopped, so a database inside it is saved as its files on disk.

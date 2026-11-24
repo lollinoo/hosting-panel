@@ -1,4 +1,5 @@
 import {
+  APP_STACK_ID_PATTERN,
   BACKUP_JOB_ID_PATTERN,
   RESTIC_IMAGE,
   SHARED_MARIADB_IMAGE,
@@ -120,7 +121,28 @@ export interface BackupContainerSpec {
 
 export type BackupResticRepoKind =
   | { readonly kind: "site"; readonly siteId: string }
-  | { readonly kind: "panel" };
+  | { readonly kind: "panel" }
+  | { readonly kind: "stack"; readonly stackId: string };
+
+/** The id of an application, checked where it becomes part of a repository location (ADR-0038). */
+export function assertAppStackRepoId(stackId: string): string {
+  if (typeof stackId !== "string" || !APP_STACK_ID_PATTERN.test(stackId)) {
+    throw new ExecutorCodedError("Invalid stackId", "VALIDATION_ERROR");
+  }
+  return stackId;
+}
+
+/** The path of a repository below its destination: one explicit branch per scope, never a fallback. */
+export function backupRepoSegments(scope: BackupResticRepoKind): readonly string[] {
+  switch (scope.kind) {
+    case "panel":
+      return ["panel"];
+    case "stack":
+      return ["stacks", assertAppStackRepoId(scope.stackId)];
+    case "site":
+      return ["sites", assertSafeIdentifier(scope.siteId, "siteId")];
+  }
+}
 
 /** An already-guarded local repository directory (only the local target guard produces it). */
 export interface GuardedLocalRepo {
@@ -291,11 +313,10 @@ export function buildJobLabels(siteId: string, jobId: string): Readonly<Record<s
   };
 }
 
-/** Builds the S3 restic repository URI for a site or the panel repository. */
+/** Builds the S3 restic repository URI for a site, an application or the panel repository. */
 export function buildResticRepositoryUrl(target: BackupTarget, repo: BackupResticRepoKind): string {
   const prefixSegment = target.prefix ? `${target.prefix}/` : "";
-  const suffix =
-    repo.kind === "panel" ? "panel" : `sites/${assertSafeIdentifier(repo.siteId, "siteId")}`;
+  const suffix = backupRepoSegments(repo).join("/");
   return `s3:${target.endpoint}/${target.bucket}/${prefixSegment}${suffix}`;
 }
 
@@ -304,9 +325,7 @@ const isLocalTarget = (t: BackupDispatchTarget): t is Extract<BackupDispatchTarg
 
 /** Container-side path of a local repository: the leaf host dir is bound exactly here. */
 const localContainerPath = (scope: BackupResticRepoKind): string =>
-  scope.kind === "panel"
-    ? "/backup/repository/panel"
-    : `/backup/repository/sites/${assertSafeIdentifier(scope.siteId, "siteId")}`;
+  `/backup/repository/${backupRepoSegments(scope).join("/")}`;
 
 /**
  * Pure: turns a dispatch target into everything a restic container needs. S3 keeps today's exact strings; a local

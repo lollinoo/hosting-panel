@@ -1,0 +1,182 @@
+# ADR 0038 — Backup e Ripristino delle Applicazioni
+
+- **Stato:** `PROPOSTO` — scelte K1–K12 prese dall'agente su direttiva del proprietario del 2026-11-22 («vorrei funzionasse come funziona Coolify»); in attesa di approvazione
+- **Data:** 2026-11-23
+- **Riferimento:** `ADR-0035` (stack applicativi: questo ADR sostituisce la decisione D6 e la frase sul backup del §2.11), `ADR-0022` (backup dei siti), `ADR-0032` (destinazioni di backup); issue #56, PR #57
+- **Migrazioni:** `0027` (additiva; file `packages/database/migrations/0027_app_stack_backups.sql`)
+
+Questo ADR dà a ogni applicazione installata da un modello un backup dei suoi dati e il ripristino nella stessa applicazione. Il backup usa le destinazioni che il server ha già per i siti, lo stesso programma (`restic`) e la stessa chiave. I backup dei siti e del pannello non cambiano.
+
+## 1. Contesto
+
+Con `ADR-0035` un'applicazione tiene i dati in volumi Docker con nome (`hp_appvol_<stackId>_<volumeKey>`). La decisione D6 ha lasciato il backup fuori: la route `POST …/app-stacks/:stackId/backups` esiste solo per rispondere `422 NOT_SUPPORTED` e la pagina dell'applicazione dice che il backup non è disponibile. Un cliente che installa un'applicazione oggi non ha modo di salvarne i dati dal pannello.
+
+I siti hanno già tutto il necessario (`ADR-0022`, `ADR-0032`): destinazioni S3 e locale, fino a due copie per backup, lavori `restic` avviati dall'esecutore in container usa-e-getta, regole di conservazione. Quel codice però conosce la forma di un sito: un volume di file con un proprietario noto (`33:33`) e un database nel MariaDB condiviso. Un'applicazione ha un numero qualsiasi di volumi, con file di proprietari qualsiasi (un database scrive come `999`, un server web come `101`), e nessun database condiviso.
+
+I vincoli sono quelli di `HARNESS.md` e di `ADR-0035`:
+
+- Solo `hp-docker-executor` parla con Docker. L'API non sceglie percorsi né repository.
+- La chiave di backup, i segreti S3 e i segreti dell'applicazione non compaiono in DTO, righe di audit, righe dell'outbox, operazioni, log o variabili d'ambiente di un container.
+- Un `POST` verso l'esecutore non si ripete mai alla cieca dopo un esito incerto.
+- Nessuna dipendenza npm, programma dell'host o variabile d'ambiente nuova. Nulla è copiato da altri pannelli.
+
+## 2. Decisioni
+
+### K1 — Che cosa contiene un backup
+
+Un backup contiene tutti i volumi di dati dell'applicazione, in un solo snapshot per copia. Ogni volume è montato in sola lettura in `/data/<volumeKey>` e `restic` salva `/data`. Non contiene immagini, configurazione, indirizzi web o segreti dell'applicazione: quelli stanno nel database del pannello e nel suo backup. La riga del backup ricorda l'elenco dei volumi (`volume_keys`), fissato al momento della richiesta, e la revisione dell'applicazione. Un'applicazione senza volumi di dati non ha nulla da salvare e la richiesta è rifiutata.
+
+### K2 — L'applicazione è ferma durante la copia
+
+Prima della copia l'applicazione viene fermata, poi riavviata. Copiare i file di un database mentre scrive dà una copia che può non aprirsi; il pannello non sa che cosa gira dentro un'applicazione e non può chiederle un dump. La fermata rende la copia coerente per qualunque applicazione.
+
+Il costo è il fermo: dura quanto la copia, e con due destinazioni le due copie si fanno una dopo l'altra mentre l'applicazione è ferma. Un'applicazione che era già ferma resta ferma.
+
+### K3 — Destinazioni
+
+Il backup va sulle destinazioni utilizzabili del criterio di backup predefinito dei siti (`default_site`), al massimo due, nell'ordine di priorità. In questa versione non c'è una scelta per applicazione. Ogni applicazione ha un repository `restic` proprio per destinazione: `stacks/<stackId>` sotto il prefisso di una destinazione S3, `<radice>/<targetId>/stacks/<stackId>` su quella locale. La chiave è la stessa dei siti. Il tipo di repository dell'esecutore guadagna la variante `stack`, con rami espliciti: le stringhe dei siti e del pannello restano identiche byte per byte.
+
+Senza una destinazione utilizzabile la richiesta è rifiutata subito, con la stessa frase dei siti.
+
+### K4 — Privilegi dei lavori
+
+I file di un volume hanno proprietari qualsiasi e permessi anche chiusi. I container di lavoro girano come utente `0:0` senza alcuna capacità (`CapDrop: ALL`), più le sole capacità che servono:
+
+- copia: `DAC_READ_SEARCH` (leggere file che non sono dell'utente);
+- ripristino: `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID` (ricreare proprietari, permessi e bit speciali);
+- preparazione del repository e rimozione di snapshot: nessuna.
+
+Il resto è quello dei lavori dei siti: file system in sola lettura, `no-new-privileges`, limiti di memoria e processi, nessuna rete per una destinazione locale e la sola rete dei backup per S3, segreti montati come file. Il repository locale si raggiunge con il gruppo dell'esecutore (`GroupAdd`) e la cartella `2770` con setgid, come per i siti.
+
+I costruttori dei container stanno in un file nuovo (`apps/docker-executor/src/app-stack-backup-jobs.ts`) e chiamano la base comune senza cambiarla. Un container di lavoro non porta mai l'etichetta `io.hostingpanel.stack_id`: il motore degli stack tratterebbe come conflitto qualunque risorsa con quell'etichetta che non sia sua. Porta il ruolo `site_job`, così la pulizia all'avvio dell'esecutore lo rimuove come gli altri lavori.
+
+Prima di una copia o di un ripristino l'esecutore prende la corsia dell'applicazione (`stack:<stackId>`), poi controlla che ogni volume sia dell'applicazione (etichette di stack e organizzazione) e che non sia in esecuzione né un container dell'applicazione né un container di lavoro di una sua copia o di un suo ripristino precedente (etichetta `io.hostingpanel.app_backup_of=<stackId>`). Se uno gira, rifiuta subito e lascia la corsia. Un container di lavoro sopravvive al suo lavoro solo se non è stato possibile ucciderlo o rimuoverlo, anche dalla pulizia all'avvio dell'esecutore, che dopo una rimozione fallita passa comunque ai container successivi: finché è in uno stato diverso da `created`, `exited` o `dead` può ancora scrivere nei volumi e blocca copie e ripristini dell'applicazione, e anche il suo avvio (sotto); quando si è fermato non blocca nulla, e la pulizia all'avvio dell'esecutore lo rimuove.
+
+La corsia è la stessa per l'esecutore e per il suo motore degli stack. Un lavoro di copia, ripristino o rimozione la tiene dal momento in cui è accettato, prima del suo primo container, fino alla fine della sua pulizia, anche quando il container è stato ucciso per tempo scaduto. Intanto il motore rifiuta avvio, riavvio, creazione e rimozione di quell'applicazione o di sue parti con `RESOURCE_LOCKED` (motivo `STACK_BUSY`) prima di qualunque richiesta a Docker; l'arresto resta possibile, perché non nuoce a una copia. A sua volta il motore tiene la corsia mentre avvia, riavvia, crea o rimuove l'applicazione, e un lavoro chiesto in quel momento è rifiutato con `RESOURCE_LOCKED`. La corsia però finisce con il lavoro, anche quando il suo container non si è lasciato uccidere né rimuovere, e un riavvio dell'esecutore la dimentica: per questo il motore, con la corsia in mano e prima di toccare l'applicazione, elenca anche i container di lavoro di lei (una richiesta a Docker, tutti gli stati) e rifiuta allo stesso modo finché uno non è `created`, `exited` o `dead`, che la corsia sia libera o no. È lo stesso controllo, la stessa funzione, che l'esecutore fa prima di un lavoro. Un piano rifiutato non arriva a Docker, nemmeno con questa lettura. Il blocco delle operazioni dell'API (K6) da solo non basta: un'azione chiusa dall'API mentre il lavoro dell'esecutore scrive ancora libera il blocco dell'API, non la corsia.
+
+### K5 — Ripristino
+
+Il ripristino riporta i dati **nella stessa applicazione**. Chi lo chiede riscrive il nome dell'applicazione. I passi:
+
+1. l'applicazione viene fermata;
+2. si fa un backup di sicurezza dei dati attuali (tipo `pre_restore`). Se non riesce su almeno una destinazione, nulla viene toccato e l'applicazione riparte;
+3. per ogni volume presente sia nel backup sia nell'applicazione di oggi, `restic restore <snapshot>:/data --target /data --include /<volumeKey>` scrive nel volume e cancella ciò che nel backup non c'è (`--delete`). La forma con `--include` riporta anche proprietario, permessi e data della cartella del volume stesso; `<snapshot>:/data/<volumeKey>` riporterebbe solo ciò che contiene (provato su Docker reale);
+4. l'applicazione riparte.
+
+L'esecutore tiene la regola del passo 2 anche da sé: accetta la riscrittura (`<op>-apply`) solo dopo aver eseguito, nello stesso processo, una copia riuscita della stessa applicazione sotto la stessa operazione (`<op>` o `<op>-t2`; ne basta una delle due) che comprende ogni volume da riscrivere. La prova è il ricordo in memoria di quel lavoro di copia, per cui dopo un riavvio dell'esecutore la riscrittura è rifiutata (`VALIDATION_ERROR`) e nulla viene scritto: è il lato sicuro. Un'etichetta dello snapshot nel repository sopravviverebbe al riavvio, ma la sola copia di sicurezza riuscita può stare sull'altra destinazione, che la richiesta di ripristino non nomina. La stessa richiesta mandata due volte risponde il lavoro già avviato, senza un secondo ripristino.
+
+La versione dell'applicazione non cambia: tornano i dati, non il software. La copia usata è la prima riuscita, in ordine di priorità, la cui destinazione è ancora configurata. Un volume aggiunto dopo il backup non viene toccato; un volume che non esiste più viene saltato.
+
+Se il ripristino fallisce dopo aver cominciato a scrivere, l'applicazione **resta ferma**: i dati possono essere a metà, il problema è scritto sulla riga e il backup di sicurezza è nell'elenco per tornare indietro.
+
+Il backup di sicurezza di un ripristino dice se quel ripristino ha lasciato i dati a metà (`left_incomplete`). Per un ripristino fallito: sì se il lavoro che riscrive era stato accettato, o se il ripristino è fallito prima ma i dati erano già a metà; quando non si sa (chiusura di ultima istanza, `hp-restore-panel`), sì se il backup di sicurezza era buono, perché solo allora la scrittura può essere cominciata. Per un ripristino riuscito: sì se il backup riscritto era a sua volta una copia di dati a metà (`incomplete_data`), perché riscriverlo li riporta a metà; così la protezione dell'ultimo backup di dati interi non sparisce. I dati di un'applicazione sono a metà **adesso** solo finché l'ultima sua operazione che decide è un ripristino il cui backup di sicurezza dice così. Decide un ripristino che non sia stato annullato, anche se è fallito; un'altra azione decide solo quando è riuscita; backup e pulizie non decidono mai. Così un'azione chiesta dopo, un avvio soprattutto, prende i dati come sono quando riesce; finché è in corso, o se fallisce (un avvio che l'esecutore rifiuta perché un lavoro di backup è ancora acceso, per esempio), li lascia come erano, e un ripristino annullato prima di partire non conta. È l'unica definizione (`getAppStackIncompleteDataMark` in `packages/database/src/app-stack-backups-repository.ts`) e la usano tutti e tre: il segno su un nuovo backup, di sicurezza o fatto a mano, che sa così se i dati che copia erano interi (`incomplete_data`); la conservazione (K7); l'avviso della pagina, che finché i dati sono a metà indica con data e ora il backup di sicurezza più recente di dati interi, quello da ripristinare per tornare indietro. La pagina segna nell'elenco le copie fatte da dati incompleti, allo stesso modo per i due tipi. Anche un backup fatto a mano in quello stato è segnato: riscriverlo riporta i dati a metà come riscrivere una copia di sicurezza segnata, e la protezione resta.
+
+### K6 — Operazioni
+
+Tre tipi di operazione nuovi: `stack.backup`, `stack.restore` e `stack.prune`. Prendono lo stesso blocco `stack:<stackId>` di deploy, avvio e arresto: mentre un backup lavora nessun'altra azione parte sull'applicazione. Non stanno nella corsia degli stack: backup e ripristino hanno una corsia del worker propria e la pulizia un'altra, così un backup di ore non fa aspettare le azioni delle altre applicazioni, e le pulizie notturne, che in coda tengono già il blocco della loro applicazione, non aspettano dietro un backup.
+
+- **Passi.** Backup: controllo, ritiro degli indirizzi, arresto, copia, chiusura. Ripristino: controllo, ritiro, arresto, copia di sicurezza, ripristino, chiusura. Pulizia: controllo, rimozione, chiusura.
+- **Stati.** Un backup non usa `updating`. Da `running`, `degraded` o `failed` l'applicazione passa a `stopping` e poi a `stopped`; da `stopped` resta `stopped`. Da ogni altro stato la richiesta è rifiutata.
+- **Riavvio.** L'applicazione non è riavviata dentro l'operazione di backup. Alla chiusura, nella stessa transazione, si accoda una normale operazione di avvio (`stack.start` da `stopped`, `stack.restart` da `degraded`), che passa per il codice di avvio già provato. Vale sia quando il backup riesce sia quando fallisce in modo certo, se l'applicazione non era ferma al momento della richiesta. L'esito dell'operazione di backup è l'esito del backup; un avvio fallito si vede come operazione di avvio fallita.
+- **Attese.** Copia e ripristino sono lavori lunghi: l'API li avvia con una chiamata breve e ne legge lo stato a intervalli sotto un lease rinnovato, come per i siti.
+- **Esito incerto.** Un timeout dopo la connessione lascia l'operazione `unknown`. Così anche ogni errore tra l'accettazione di un lavoro da parte dell'esecutore e la lettura della sua fine, compreso un errore del database (il rinnovo del lease): chiudere l'operazione in quel momento libererebbe l'applicazione, e qualcuno potrebbe avviarla, mentre il lavoro legge o riscrive ancora i suoi dati. Il recupero legge soltanto: lo stato dei container e lo stato dei lavori. Non ripete mai una chiamata che modifica. Un lavoro di cui l'esecutore non sa più nulla è chiuso come interrotto; se era il ripristino ed era già stato avviato, l'applicazione resta ferma.
+
+L'indice unico sul blocco delle operazioni attive impone che l'avvio sia accodato dopo che l'operazione di backup è diventata terminale, nella stessa transazione: `settleOperation` guadagna un passaggio facoltativo eseguito dopo la transizione.
+
+### K7 — Conservazione e cancellazione
+
+La regola è quella dei siti (`selectExpired`): i tre backup manuali riusciti più recenti e i tre backup di sicurezza più recenti restano; i backup buoni più recenti non sono mai rimossi per età; il resto scade dopo i giorni di conservazione del criterio. Un backup riuscito su una sola destinazione (`partial`) conta come buono. Un'eccezione: finché i dati di un'applicazione sono a metà (K5), il backup di sicurezza più recente di dati interi non è mai rimosso, anche quando ne esistono tre più recenti, che fatti da dati a metà non servono a tornare indietro. Quando un'azione prende i dati come sono (un avvio, per esempio) quel backup torna alla regola normale. L'eccezione non vale per un'applicazione cancellata.
+
+La rimozione ha un solo percorso: l'operazione di sistema `stack.prune`, accodata dal passaggio notturno per ogni applicazione che ha backup. È un'operazione della piattaforma e il cliente non la può leggere; finché tiene il blocco dell'applicazione, la pagina dice che i backup scaduti vengono tolti (il dettaglio dell'applicazione porta solo il tipo di lavoro, `platformWork`) e ogni azione risponde `409`. Per ogni destinazione un lavoro toglie gli snapshot scaduti; le righe sono cancellate solo quando gli snapshot sono stati tolti da tutte le destinazioni ancora configurate, altrimenti restano per il passaggio successivo.
+
+I backup di un'applicazione cancellata non spariscono con lei: restano sulle destinazioni finché non superano i giorni di conservazione, poi la stessa pulizia li rimuove. Per questo le righe dei backup non hanno chiave esterna verso l'applicazione.
+
+### K8 — Permessi e limiti
+
+Nessun permesso nuovo. Creare un backup e ripristinare chiedono `app.control`, l'elenco chiede `app.read`: li hanno l'amministratore dell'hosting e il proprietario del cliente. Una visita di assistenza non ha permessi sulle applicazioni e quindi non può fare né l'uno né l'altro.
+
+Un cliente può avviare al massimo sei tra backup e ripristini per applicazione ogni ora; oltre, `QUOTA_EXCEEDED` con l'ora da cui riprovare. Il limite non vale per l'amministratore.
+
+### K9 — Dati
+
+Migrazione additiva `0027` con due tabelle:
+
+- `app_stack_backups`: una riga per backup (tipo `manual` o `pre_restore`; stato `running`, `succeeded`, `partial`, `failed`), con l'operazione, la revisione, l'elenco dei volumi, se l'applicazione va riavviata, la dimensione, il problema e, sulla riga usata come sorgente di un ripristino, l'esito dell'ultimo ripristino; su ogni backup, se ha copiato dati a metà, e su un backup di sicurezza se il suo ripristino li ha lasciati a metà (K5);
+- `app_stack_backup_copies`: una riga per destinazione, sul modello di `site_backup_copies`.
+
+Lo stato del backup segue le copie: tutte riuscite `succeeded`, almeno una `partial`, nessuna `failed`. Una destinazione con copie di applicazioni non si può cancellare, come per le copie dei siti. `hp-restore-panel` chiude come interrotti i backup e i ripristini rimasti a metà.
+
+### K10 — Downgrade
+
+`hp-update` rifiuta di tornare a una versione che non conosce i backup delle applicazioni finché esiste una riga in `app_stack_backups` (funzione `app-stack-backups`, uscita `8`). Nessun flag di capacità nuovo: il backup è raggiungibile dove le applicazioni sono accese e il backup dei siti è disponibile.
+
+### K11 — API e interfaccia
+
+- `GET /v1/organizations/:orgId/app-stacks/:stackId/backups` (`app.read`): l'elenco.
+- `POST …/app-stacks/:stackId/backups` (`app.control`): `202` con l'operazione. Sostituisce la risposta fissa `422`.
+- `POST …/app-stacks/:stackId/backups/:backupId/restore` (`app.control`): corpo `{ confirmName }`, `202`.
+
+L'applicazione di un altro cliente risponde `404`. La pagina dell'applicazione ha una sezione «Backup» al posto della riga «non disponibile»: elenco, «Crea backup», «Ripristina» con la conferma del nome, e l'avviso che l'applicazione si ferma per la durata della copia.
+
+### K12 — Fuori ambito
+
+Backup programmati delle applicazioni, ripristino in un'applicazione nuova o dopo il ripristino del pannello, download di un backup, backup senza fermare l'applicazione, scelta della destinazione per applicazione. Ognuno ha una issue propria: backup programmati #59, ripristino in un'applicazione nuova o dopo il ripristino del pannello #60, download #61, backup senza fermare l'applicazione #58, destinazione per applicazione #62.
+
+### Alternative scartate
+
+- **Sospendere i container (`docker pause`) invece di fermarli.** Il fermo è più breve, ma i file di un database sospeso sono nello stato di un'interruzione di corrente: il ripristino dipende dal recupero del database.
+- **Copiare prima i volumi in un'area locale e caricare dopo.** Il fermo dura solo la copia locale, ma serve spazio su disco pari ai dati e un secondo percorso di pulizia.
+- **Comandi di dump dichiarati nel modello.** Danno copie migliori per i database, ma portano l'esecuzione di comandi dentro i container dell'applicazione: è una decisione di sicurezza a parte.
+- **Riavviare l'applicazione dentro l'operazione di backup.** Avrebbe duplicato il codice di avvio e di recupero.
+- **Girare come l'utente dei siti (`33:33`).** Non leggerebbe i file di altri proprietari.
+
+## 3. Conseguenze
+
+- Un backup ferma l'applicazione: il cliente lo legge prima di confermare. Applicazioni con molti dati e due destinazioni restano ferme a lungo.
+- Backup e ripristini di applicazioni diverse vanno uno dopo l'altro nella loro corsia: uno chiesto mentre un altro copia aspetta, e la sua applicazione resta nello stato `stopping` fino al suo turno. L'esecutore accetta due lavori di backup alla volta per tutto il server: se due sono già in corso (di un sito, di un aggiornamento WordPress, di una pulizia notturna), una copia o un ripristino chiesto in quel momento è rifiutato come occupato e va ripetuto. I backup notturni dei siti e la copia notturna del pannello, accodati nello stesso giro delle pulizie, possono trovare i due posti presi da una pulizia, dal backup o dal ripristino di un cliente o da un altro lavoro (la copia prima di un aggiornamento WordPress): rifiutato come occupato, un backup notturno è chiesto di nuovo ogni minuto nella stessa operazione, ma l'attesa è una sola per tutta la notte, condivisa dai siti e dalla copia del pannello, con tutte le sue destinazioni: al più 15 minuti in tutto dal primo rifiuto. Passata quella, ogni backup notturno ancora rifiutato fallisce subito, un sito come `site_busy`, come prima, e il successivo è quello della notte dopo; ogni data ha al più una copia del pannello. È segnalato come ogni backup notturno fallito: l'elenco dei backup del sito lo mostra fallito, e la pagina **Stato** dell'amministratore del server mostra l'avviso del backup fallito del sito o quello della copia del pannello. Durante l'attesa la corsia del worker dei backup dei siti e del pannello resta occupata: un backup, un ripristino o un download chiesto da una persona in quel momento parte quando l'attesa finisce, al più 15 minuti dopo, e il sito che aspetta resta bloccato come durante il suo backup. L'attesa del giro è tenuta in memoria: un riavvio dell'API a metà giro ne comincia un'altra. Un backup chiesto da una persona e quello prima di un aggiornamento WordPress non aspettano un posto: se i due sono presi sono rifiutati subito, come prima (`apps/api/src/backups/site-backups-applier.ts`, `apps/api/src/backups/panel-backup-applier.ts`, provati in `apps/api/test/panel-backup.integration.test.ts` e `apps/api/test/panel-backup-qa.integration.test.ts`).
+- I lavori di backup delle applicazioni girano come `root` del container con capacità limitate. È più di quanto serve ai siti; è il minimo che legge e riscrive file di proprietari qualsiasi.
+- I file che `restic` crea in un repository locale sono di `root` con il gruppo dell'esecutore. L'esecutore li legge e li cancella attraverso il gruppo.
+- Dopo `hp-restore-panel` le applicazioni sono `failed` e i loro volumi mancano: il ripristino dei dati in quel caso non è provato (K12).
+- La route B4 di `ADR-0035` non risponde più `422 NOT_SUPPORTED` dove il backup è disponibile.
+
+## 4. Come è stato costruito
+
+- **Contratti.** `packages/contracts/src/app-templates/stack-backups.ts` ha i tipi, gli stati e le classi di problema di un backup, i numeri della conservazione e del limite orario e la forma della risposta; `packages/contracts/src/app-templates/stack-operations.ts` aggiunge `stack.backup`, `stack.restore` e `stack.prune`; `packages/contracts/src/ipc-schemas.ts` aggiunge i lavori dell'esecutore (la copia, `stackRestore`, `stackForget`).
+- **Database.** `packages/database/migrations/0027_app_stack_backups.sql` crea le due tabelle di K9; `packages/database/src/app-stack-backups-repository.ts` le legge e le scrive, e chiude una riga rimasta aperta.
+- **Esecutore.** `apps/docker-executor/src/app-stack-backup-jobs.ts` costruisce i container dei lavori (K4); `apps/docker-executor/src/backup-runner.ts` li esegue e, prima di accettarne uno, controlla che i volumi siano dell'applicazione e che nessun suo container sia acceso; la sua corsia per applicazione è chiesta anche dal motore degli stack (`apps/docker-executor/src/app-stacks/engine.ts`, K4); `apps/docker-executor/src/backup-jobs.ts` dà la cartella `stacks/<stackId>` del repository. `apps/docker-executor/src/simulator-backups.ts` risponde allo stesso modo senza Docker.
+- **API.** `apps/api/src/app-stacks/app-stack-backups.service.ts` controlla la richiesta e la mette in coda; `apps/api/src/app-stacks/app-stack-backup-runtime.ts` è il lavoro delle tre operazioni (K2, K5, K6), con la lettura dello stato dopo una risposta persa, e `apps/api/src/runtime/outbox-worker.service.ts` lo fa girare nelle due corsie del worker di K6; `apps/api/src/app-stacks/app-stack-backup-retention.ts` applica la regola di K7 e `apps/api/src/backups/backup-scheduler.service.ts` la avvia con il giro notturno; le route di K11 sono in `apps/api/src/controllers/app-stacks.controller.ts` e in `docs/api/openapi.yaml`.
+- **Pagina.** `apps/web/src/components/app-stacks/app-stack-backups.tsx` è la sezione «Backup» della pagina dell'applicazione; i testi sono in `apps/web/src/i18n/it.ts` e `apps/web/src/i18n/en.ts`.
+- **Installazione.** `infra/linux/lib/common.sh` e `infra/linux/update.sh` hanno il controllo del downgrade (K10); `infra/linux/hp-restore-panel.sql` chiude i backup e i ripristini rimasti aperti (K9).
+
+Scostamenti dalla proposta scritta prima del codice:
+
+- **Il comando di ripristino è cambiato dopo la prova su Docker reale.** La prima forma (`<snapshot>:/data/<volumeKey>` come origine) riportava il contenuto del volume ma non il proprietario e i permessi della cartella del volume stesso: un volume `65534:65534` con permessi `750` tornava `0:0` con `755`. K5 descrive la forma che è nel codice.
+- **Il numero dei backup di sicurezza conservati** (`APP_STACK_PRE_RESTORE_BACKUPS_KEPT`) è quello che la pagina mostra; la regola dei siti, che il codice riusa, conta per conto suo. Che i due numeri coincidano lo tiene fermo una prova (`apps/api/test/app-stack-backup-retention.unit.test.ts`), non una riga di codice.
+
+## 5. Che cosa è provato
+
+- **Con Docker reale, prima del codice** (prova usa-e-getta del 2026-11-23, `restic` 0.19.1): `restic init` come `0:<gid>` senza capacità su una cartella `0770`; copia come utente `0` con la sola `DAC_READ_SEARCH` di due volumi con file di più proprietari, permessi `0000`, setuid, setgid, collegamenti e una pipe; la stessa copia senza la capacità fallisce (uscita `3`); ripristino per volume con le quattro capacità e il repository in sola lettura, elenco di proprietari, permessi, collegamenti e contenuti identico a prima.
+- **Con Docker reale, sul codice** (`infra/linux/accept-app-stack-backups.mjs`, 24 passi su 24 il 2026-11-23, una destinazione locale): l'adattatore di produzione dietro un socket che lascia passare solo le richieste previste (74 richieste, nessuna rifiutata, 9 container creati). Un'applicazione accesa è rifiutata, come quella di un altro cliente e un volume che manca; a applicazione ferma un solo snapshot contiene i due volumi; i container dei lavori hanno i privilegi di K4 e nient'altro; i file del repository sono del gruppo dell'esecutore, senza permessi per gli altri, e non contengono in chiaro né i dati né la chiave; dopo aver rovinato i dati, il ripristino riporta contenuti, proprietari, permessi (setuid e setgid compresi) e date delle cartelle, e l'applicazione riparte e li legge; lo stesso identificativo di lavoro risponde lo stesso lavoro senza una seconda richiesta a Docker; la rimozione di uno snapshot lo toglie, e su un repository che non esiste non crea nulla. Alla fine nessun oggetto preesistente è cambiato e nulla resta sul server.
+- **Costruzione dei lavori** (`apps/docker-executor/test/app-stack-backup-jobs.test.ts`): volumi in sola lettura per la copia, un solo volume scrivibile e il repository in sola lettura per il ripristino, capacità di K4, nessuna etichetta `io.hostingpanel.stack_id`, nessun segreto nell'ambiente del container (solo percorsi di file).
+- **Esecuzione dei lavori** (`apps/docker-executor/test/app-stack-backup-runner.test.ts`, `apps/docker-executor/test/simulator-app-stack-backups.test.ts`): i rifiuti prima di qualunque lettura o scrittura (anche per un container di lavoro precedente ancora acceso), la cartella `stacks/<stackId>`, la ripetizione di un lavoro già noto; la riscrittura rifiutata senza una copia di sicurezza riuscita della stessa applicazione e della stessa operazione, o per un volume che quella copia non ha salvato, anche dopo un riavvio dell'esecutore, e accettata quando è riuscita una sola delle due copie; la corsia condivisa con il motore degli stack (avvio, riavvio, creazione e rimozione rifiutati senza richieste a Docker mentre un ripristino scrive, prima del suo primo container e durante la pulizia dopo un container ucciso; un lavoro rifiutato mentre il motore avvia l'applicazione; un'azione del motore rifiutata mentre il controllo di un lavoro legge Docker), anche nell'adattatore di produzione (`apps/docker-executor/test/app-stack-engine.test.ts` per il motore da solo); un container di lavoro che resta acceso dopo che uccisione e rimozione hanno risposto `500`, a corsia ormai libera, fa rifiutare al motore avvio, riavvio, creazione e rimozione senza richieste a Docker per i componenti, finché non risulta uscito; la pulizia all'avvio dell'esecutore passa ai container successivi dopo una rimozione fallita (`apps/docker-executor/test/site-jobs.test.ts`).
+- **Operazioni** (`apps/api/test/app-stack-backup-runtime.unit.test.ts`): il fermo e la ripartenza anche quando la copia fallisce; due destinazioni e il backup parziale; nessuna scrittura senza il backup di sicurezza; un ripristino fallito durante la scrittura lascia l'applicazione ferma; dopo una risposta persa lo stato si legge e nessuna copia o ripristino parte due volte; un rinnovo del lease che fallisce mentre una copia o un ripristino lavora lascia l'operazione in sospeso, l'applicazione non si può avviare e il recupero la chiude quando legge la fine del lavoro, riuscito o no; la pulizia toglie prima le copie e poi le righe, e le lascia se una destinazione fallisce; nel worker, un backup che sta copiando non fa aspettare il riavvio di un'altra applicazione (`apps/api/test/app-stack-lane.unit.test.ts` fissa le corsie del worker).
+- **Route** (`apps/api/test/app-stack-backups.integration.test.ts`): il nome riscritto, i motivi per cui un backup non si può fare, `409` per una bozza e per un'azione già in corso, la stessa `Idempotency-Key` che risponde una sola azione, sei azioni l'ora per applicazione; nessuna risposta, operazione, riga di audit o dell'outbox contiene una destinazione, un percorso o uno snapshot; durante una pulizia della piattaforma la pagina sa che l'applicazione è occupata e da che cosa, ma non legge l'operazione; un ripristino il cui rinnovo del lease fallisce mentre il lavoro riscrive tiene l'applicazione ferma (l'avvio è rifiutato dal pannello e, con il simulatore, anche dall'esecutore) finché il recupero non legge la fine del lavoro, poi l'applicazione riparte. L'applicazione di un altro cliente risponde `404` (`apps/api/test/app-stacks-tenancy.qa.test.ts`).
+- **Copia del pannello** (`apps/api/test/panel-backup.integration.test.ts`): rifiutata come occupata, è chiesta di nuovo nella stessa operazione e riesce, con un solo dump e nessuna seconda operazione per la data; ancora rifiutata alla fine dell'attesa, fallisce; con due destinazioni l'attesa è una sola, e la seconda rifiutata dopo la fine fallisce subito; l'attesa è quella della notte, già finita se i siti l'hanno esaurita, e allora la copia rifiutata fallisce subito (`apps/api/test/panel-backup-qa.integration.test.ts`).
+- **Backup notturni dei siti con l'esecutore pieno** (`apps/api/test/panel-backup-qa.integration.test.ts`): con i due posti presi da lavori del simulatore, un backup notturno rifiutato è chiesto di nuovo nella stessa operazione e riesce quando un posto si libera; i backup notturni di un giro hanno una sola attesa, di 15 minuti, e finita quella il sito successivo rifiutato fallisce subito come `site_busy`; un backup chiesto dal cliente è rifiutato subito, e uno chiesto durante l'attesa della notte parte quando l'attesa finisce.
+- **Conservazione** (`apps/api/test/app-stack-backup-retention.unit.test.ts`): tre backup manuali e tre di sicurezza, ciascun tipo per conto suo; un backup fallito va via solo con il periodo; un'applicazione cancellata tiene i suoi backup per il periodo e poi li perde tutti; mentre i dati sono a metà il backup di sicurezza di dati interi resta, anche dopo quattro ripristini falliti di fila e dopo un ripristino riuscito di una copia di dati a metà, di sicurezza o fatta a mano (`apps/api/test/app-stack-backup-runtime.unit.test.ts`), e va con la regola normale quando un ripristino di dati interi riesce o quando l'applicazione viene avviata con i dati come sono: settimane dopo un avvio la pagina non indica più un backup a cui tornare; dopo un avvio fallito la pagina lo indica ancora e la pulizia lo tiene.
+- **Database** (`packages/database/test/app-stack-backups-repository.test.ts`, `packages/database/test/rollback-compat.test.ts`, `packages/database/test/restore-panel-sql.test.ts`, `packages/database/test/app-stack-backups-downgrade-gate.test.ts`): i vincoli di K9, i segni dei dati a metà sui backup di sicurezza e su quelli fatti a mano, anche dopo un ripristino riuscito di una copia di dati a metà, e la loro unica definizione, che un avvio riuscito chiude e un'azione fallita o ancora in corso, o un ripristino annullato, no (K5), la release precedente che lavora con le tabelle nuove presenti, la chiusura delle righe aperte dopo un ripristino del pannello, il testo SQL del controllo del downgrade eseguito sullo schema vero.
+- **Pagina** (`apps/web/test/app-stacks-backups.test.ts`): ciò che la sezione mostra per ogni stato di un backup e di un ripristino, il motivo quando non offre comandi, il nome da riscrivere prima di un ripristino, il backup da ripristinare indicato con data e ora dopo un ripristino che ha lasciato i dati a metà, il segno sulle copie di dati incompleti, uguale per un backup fatto a mano, nessun identificativo e nessuna indicazione di dove stanno le copie.
+
+Non provato:
+
+- **Su Docker reale** (#63): collegamenti fisici (hard link), attributi estesi, capacità dei file, file di dispositivo, una destinazione S3 (per S3 è provata solo la costruzione dei container e dell'indirizzo del repository), due destinazioni insieme e il backup parziale (provati solo dalle prove dell'operazione, senza Docker).
+- **Il ripristino dei dati dopo `hp-restore-panel`** (K12, #60).
+- **`infra/linux/accept-app-stack-backups.mjs` dopo le correzioni della revisione**: lo script ora prende la copia di sicurezza sotto l'operazione prima della riscrittura e toglie anche quello snapshot, e l'esecutore elenca anche i container di lavoro rimasti; non è stato rieseguito su Docker reale dopo queste modifiche.
+- **`infra/linux/accept-m3-panel.mjs`** non è stato rieseguito con le righe nuove di `infra/linux/hp-restore-panel.sql`; quelle righe sono provate su PGlite (#63).
+- **Le pagine viste da una persona** su un pannello installato.
+
+Punti aperti:
+
+- Un server senza destinazioni utilizzabili non fa il giro notturno: i backup di un'applicazione cancellata restano finché una destinazione torna utilizzabile (#64).
+- Se la chiusura di un'azione fallita fallisce a sua volta, l'applicazione può restare nello stato `stopping`; che cosa la riporta a uno stato leggibile non è provato (#65).
+- Un'applicazione viva tiene i suoi backup riusciti più recenti senza limite di età: il controllo del downgrade (K10) vale finché l'applicazione esiste.

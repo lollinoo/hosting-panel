@@ -448,7 +448,7 @@ describe("Site backups restore & download BFF routes", () => {
       const unauth = await handler(
         new Request(url, {
           method: "POST",
-          headers: { origin: "http://localhost:3000" },
+          headers: { origin: "http://localhost:3000", "content-type": "application/json" },
           body: validBody,
         }),
         backupRouteContext(),
@@ -458,7 +458,7 @@ describe("Site backups restore & download BFF routes", () => {
       const badCsrf = await handler(
         new Request(url, {
           method: "POST",
-          headers: { origin: "http://localhost:3000", "x-csrf-token": "wrong" },
+          headers: { origin: "http://localhost:3000", "x-csrf-token": "wrong", "content-type": "application/json" },
           body: validBody,
         }),
         backupRouteContext(),
@@ -468,7 +468,7 @@ describe("Site backups restore & download BFF routes", () => {
       const badOrigin = await handler(
         new Request(url, {
           method: "POST",
-          headers: { origin: "https://evil.example", "x-csrf-token": ADMIN_SESSION.csrfToken },
+          headers: { origin: "https://evil.example", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
           body: validBody,
         }),
         backupRouteContext(),
@@ -478,7 +478,7 @@ describe("Site backups restore & download BFF routes", () => {
       const oversize = await handler(
         new Request(url, {
           method: "POST",
-          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
           body: "x".repeat(1_048_577),
         }),
         backupRouteContext(),
@@ -495,7 +495,7 @@ describe("Site backups restore & download BFF routes", () => {
       const badRes = await restorePost(
         new Request(url, {
           method: "POST",
-          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
           body: badBody,
         }),
         backupRouteContext(),
@@ -517,6 +517,7 @@ describe("Site backups restore & download BFF routes", () => {
           origin: "http://localhost:3000",
           "x-csrf-token": ADMIN_SESSION.csrfToken,
           "Idempotency-Key": "idem-restore-1",
+          "content-type": "application/json",
         },
         body: JSON.stringify({ confirmName: "Demo" }),
       }),
@@ -549,7 +550,7 @@ describe("Site backups restore & download BFF routes", () => {
     const errRes = await restorePost(
       new Request(url, {
         method: "POST",
-        headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+        headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
         body: JSON.stringify({ confirmName: "Demo" }),
       }),
       backupRouteContext(),
@@ -572,7 +573,7 @@ describe("Site backups restore & download BFF routes", () => {
       const badRes = await backupDownloadPost(
         new Request(url, {
           method: "POST",
-          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+          headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
           body: badBody,
         }),
         backupRouteContext(),
@@ -590,6 +591,7 @@ describe("Site backups restore & download BFF routes", () => {
           origin: "http://localhost:3000",
           "x-csrf-token": ADMIN_SESSION.csrfToken,
           "Idempotency-Key": "idem-dl-1",
+          "content-type": "application/json",
         },
         body: "{}",
       }),
@@ -621,7 +623,7 @@ describe("Site backups restore & download BFF routes", () => {
     const resTarget = await backupDownloadPost(
       new Request(url, {
         method: "POST",
-        headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+        headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken, "content-type": "application/json" },
         body: JSON.stringify({ targetId }),
       }),
       backupRouteContext(),

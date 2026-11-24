@@ -12,6 +12,7 @@ import {
   sql,
   transitionOperation,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "../src/index.js";
 
 describe("settleOperation (D15)", () => {
@@ -111,5 +112,80 @@ describe("settleOperation (D15)", () => {
     );
     expect(await statusOf(id)).toBe("failed");
     expect(await audits("test.settle.ended")).toBe(0);
+  });
+
+  describe("the after hook", () => {
+    const lockOf = async (id: string) => (await client.db.select().from(operations).where(eq(operations.id, id)))[0]!.lockKey!;
+    const next = (lockKey: string) => (tx: HostingPanelDatabase) =>
+      enqueueOperationTransactional(tx, {
+        organizationId: DEMO_IDS.organizations.acme,
+        kind: "service.deploy",
+        resourceType: "service",
+        resourceId: DEMO_IDS.services.acmeShopWp,
+        lockKey,
+      });
+
+    it("runs once the operation is terminal: the next operation on the same lock can be queued there, not in write", async () => {
+      const id = await processingOp();
+      const lockKey = await lockOf(id);
+      // While the operation is active its lock is held: `write` is too early.
+      const early = await settleOperation(client.db, id, { status: "succeeded" }, async (tx) => {
+        await next(lockKey)(tx);
+      }).catch((e: unknown) => e);
+      expect(early).toMatchObject({ code: "RESOURCE_LOCKED" });
+      expect(await statusOf(id)).toBe("processing");
+
+      let queued = "";
+      await expect(
+        settleOperation(client.db, id, { status: "succeeded" }, write("test.settle.after"), async (tx) => {
+          queued = (await next(lockKey)(tx)).operation.id;
+        }),
+      ).resolves.toBe(true);
+      expect(await statusOf(id)).toBe("succeeded");
+      expect(await statusOf(queued)).toBe("queued");
+      expect(await lockOf(queued)).toBe(lockKey);
+      expect(await audits("test.settle.after")).toBe(1);
+    });
+
+    it("runs after a failed outcome too", async () => {
+      const id = await processingOp();
+      const lockKey = await lockOf(id);
+      let queued = "";
+      await settleOperation(
+        client.db,
+        id,
+        { status: "failed", errorCode: "INTERNAL_ERROR", errorMessage: "Could not finish" },
+        undefined,
+        async (tx) => {
+          queued = (await next(lockKey)(tx)).operation.id;
+        },
+      );
+      expect(await statusOf(id)).toBe("failed");
+      expect(await statusOf(queued)).toBe("queued");
+    });
+
+    it("does not run for an operation that already ended, and a throw in it undoes the whole settle", async () => {
+      const ended = await processingOp();
+      await settleOperation(client.db, ended, { status: "succeeded" });
+      let ran = false;
+      await expect(
+        settleOperation(client.db, ended, { status: "succeeded" }, undefined, async () => {
+          ran = true;
+        }),
+      ).resolves.toBe(false);
+      expect(ran).toBe(false);
+
+      const id = await processingOp();
+      const lockKey = await lockOf(id);
+      const err = await settleOperation(client.db, id, { status: "succeeded" }, write("test.settle.after.throw"), async (tx) => {
+        await next(lockKey)(tx);
+        throw new Error("after broke");
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ message: "after broke", ambiguousOutcome: true });
+      expect(await statusOf(id)).toBe("processing");
+      expect(await audits("test.settle.after.throw")).toBe(0);
+      const onLock = await client.db.select().from(operations).where(eq(operations.lockKey, lockKey));
+      expect(onLock.map((o) => o.id)).toEqual([id]);
+    });
   });
 });

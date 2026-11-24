@@ -127,11 +127,12 @@ function toDto(row: BackupTargetRow, usage: Usage): AdminBackupTargetDto {
   };
 }
 
-/** Site and panel copies per target, and the policies that name it. A target id is never filtered by user input. */
+/** Site, application and panel copies per target, and the policies that name it. A target id is never filtered by user input. */
 async function usageByTarget(db: HostingPanelDatabase | Tx, targetId?: string): Promise<Map<string, Usage>> {
   const only = (column: string) => (targetId === undefined ? sql`` : sql` WHERE ${sql.raw(column)} = ${targetId}`);
   const copies = await db.execute(sql`SELECT target_id AS "targetId", SUM(n)::int AS n FROM (
     SELECT target_id, COUNT(*) AS n FROM site_backup_copies${only("target_id")} GROUP BY target_id
+    UNION ALL SELECT target_id, COUNT(*) AS n FROM app_stack_backup_copies${only("target_id")} GROUP BY target_id
     UNION ALL SELECT target_id, COUNT(*) AS n FROM panel_backup_copies${only("target_id")} GROUP BY target_id) c
     GROUP BY target_id`);
   const policies = await db.execute(sql`SELECT DISTINCT pt.target_id AS "targetId", p.scope AS scope

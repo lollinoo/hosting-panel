@@ -676,6 +676,48 @@ describe("AppStackProgress", () => {
     }
   });
 
+  it.each(locales)("a backup and a restore have their own title, step words and failure line (%s)", (_l, m) => {
+    const own = [
+      { id: "b1", key: "stop", label: "Stop", status: "succeeded", message: null, startedAt: NOW, completedAt: NOW },
+      { id: "b2", key: "copy", label: "Copy", status: "running", message: null, startedAt: NOW, completedAt: null },
+      { id: "b3", key: "restore", label: "Restore", status: "pending", message: null, startedAt: null, completedAt: null },
+      { id: "b4", key: "expire", label: "Expire", status: "pending", message: null, startedAt: null, completedAt: null },
+    ] as OperationDto["steps"];
+    const of = (kind: OperationDto["kind"], status: OperationDto["status"]) => ({ ...operation(status, kind), steps: own }) as OperationDto;
+    const t = m.apps.progress;
+    const running = render(m, { 0: of("stack.backup", "processing") });
+    expect(running).toContain(`>${t.title.backup}<`);
+    for (const w of [m.apps.steps.stop, m.apps.backups.steps.copy, m.apps.backups.steps.restore, m.apps.backups.steps.expire]) expect(running).toContain(w);
+    for (const english of ["Copy<", "Restore<", "Expire<"]) expect(running).not.toContain(`>${english}`);
+    expect(render(m, { 0: of("stack.restore", "processing") })).toContain(`>${t.title.restore}<`);
+    expect(render(m, { 0: of("stack.prune", "processing") })).toContain(`>${t.title.prune}<`);
+
+    const backup = render(m, { 0: of("stack.backup", "failed"), 1: "done" });
+    expect(backup).toContain('role="alert"');
+    expect(backup).toContain(t.backupFailed);
+    expect(backup).not.toContain(t.failed);
+    expect(backup).not.toContain(t.restoreFailed);
+    for (const s of ["failed", "cancelled"] as const) {
+      const restore = render(m, { 0: of("stack.restore", s), 1: "done" });
+      expect(restore).toContain('role="alert"');
+      expect(restore).toContain(t.restoreFailed);
+      expect(restore).not.toContain(t.failed);
+      expect(restore).not.toContain(t.backupFailed);
+    }
+    expect(new Set([t.failed, t.backupFailed, t.restoreFailed]).size).toBe(3);
+  });
+
+  it.each(locales)("says a backup or a restore can take a while only while it is followed, and only for those two (%s)", (_l, m) => {
+    const note = m.apps.progress.longNote;
+    for (const kind of ["stack.backup", "stack.restore"] as const) {
+      expect(render(m, { 0: operation("processing", kind) }), kind).toContain(note);
+      expect(render(m, { 0: operation("succeeded", kind), 1: "done" }), kind).not.toContain(note);
+      expect(render(m, { 0: operation("processing", kind), 1: "slow" }), kind).not.toContain(note);
+    }
+    for (const kind of ["stack.upgrade", "stack.deploy", "stack.prune"] as const) expect(render(m, { 0: operation("processing", kind) }), kind).not.toContain(note);
+    expect(render(m, { 0: null })).not.toContain(note);
+  });
+
   it.each(locales)("poll error, slow and signed-out lines; an unknown kind falls back to the install title (%s)", (_l, m) => {
     expect(render(m, { 0: null, 2: true })).toContain(m.apps.progress.pollError);
     expect(render(m, { 0: null })).toContain(m.apps.progress.title.deploy);

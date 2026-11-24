@@ -344,7 +344,7 @@ export async function archiveBackupTarget(tx: DatabaseExecutor, id: string): Pro
 }
 
 /**
- * Deletes the row of a target nothing refers to (copies, panel copies, policies, a restore/download in progress
+ * Deletes the row of a target nothing refers to (site, application and panel copies, policies, a restore/download in progress
  * or finished). The legacy target never goes. Repository data is not touched: the row only.
  */
 export async function deleteBackupTargetIfUnreferenced(
@@ -361,6 +361,7 @@ export async function deleteBackupTargetIfUnreferenced(
   if (target.legacySettings) return "in_use";
   const referenced = await tx.execute(sql`SELECT 1 AS x WHERE
     EXISTS (SELECT 1 FROM site_backup_copies WHERE target_id = ${id})
+    OR EXISTS (SELECT 1 FROM app_stack_backup_copies WHERE target_id = ${id})
     OR EXISTS (SELECT 1 FROM panel_backup_copies WHERE target_id = ${id})
     OR EXISTS (SELECT 1 FROM backup_policy_targets WHERE target_id = ${id})
     OR EXISTS (SELECT 1 FROM site_backups WHERE restore_target_id = ${id} OR archive_target_id = ${id})`);
@@ -611,6 +612,11 @@ export async function resolveEffectiveTargets(db: DatabaseExecutor, siteId: stri
     .where(and(eq(backupPolicies.scope, "site"), eq(backupPolicies.siteId, siteId)))
     .limit(1);
   return policyTargets(db, own?.id ?? (await scopePolicyId(db, "default_site")), true);
+}
+
+/** The targets a new backup of an application goes to: the usable ones of default_site, no choice per application (ADR-0038). */
+export async function resolveAppStackBackupTargets(db: DatabaseExecutor): Promise<EffectiveTarget[]> {
+  return policyTargets(db, await scopePolicyId(db, "default_site"), true);
 }
 
 export async function resolvePanelTargets(db: DatabaseExecutor): Promise<EffectiveTarget[]> {

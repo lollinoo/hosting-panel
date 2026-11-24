@@ -143,6 +143,7 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   secrets: [],
   activeOperationId: null,
   installed: null,
+  platformWork: null,
   upgrade: null,
   rollback: null,
   now: NOW,
@@ -345,12 +346,13 @@ describe("appStackDetailDto", () => {
     expect(appStackDetailDto(detailInput())).toMatchObject({ ingress: [app], pathTargets: [app] });
   });
 
-  it("passes volumes, the active operation, upgrade and rollback through", () => {
+  it("passes volumes, the active operation, the platform's work, upgrade and rollback through", () => {
     const dto = appStackDetailDto(
       deployed([], {
         volumes: [{ stackId: STACK, organizationId: ORG, volumeKey: "data", retentionPolicy: "retain", status: "present", createdAt: NOW, updatedAt: NOW }],
         activeOperationId: "op_1",
         installed: { revisionNumber: 2, templateVersionNumber: 1 },
+        platformWork: "backups_cleanup",
         upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
         rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
       }),
@@ -359,6 +361,7 @@ describe("appStackDetailDto", () => {
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       activeOperationId: "op_1",
       installed: { revisionNumber: 2, templateVersionNumber: 1 },
+      platformWork: "backups_cleanup",
       upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
       rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
     });

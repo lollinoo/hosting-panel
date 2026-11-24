@@ -100,6 +100,8 @@ export const APP_AUDIT_ACTIONS = Object.freeze({
   domainAssign: "app.stack.domain.assign",
   domainRemove: "app.stack.domain.remove",
   domainUpdate: "app.stack.domain.update",
+  backupCreate: "app.stack.backup.create",
+  backupRestore: "app.stack.backup.restore",
 } as const);
 export const APP_AUDIT_TARGET_TYPES = Object.freeze({ template: "app_template", stack: "app_stack", domain: "app_stack_domain" } as const);
 

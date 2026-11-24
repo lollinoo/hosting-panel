@@ -6,6 +6,7 @@ import {
   APP_STACK_REVISION_KINDS,
   APP_STACK_SECRET_ENV_LIMITS,
   AppTemplateSpecSchema,
+  PLATFORM_OPS_ORG_ID,
   ApprovedStackPlanSchema,
   appStackLockKey,
   appStackPlanImageProblems,
@@ -352,16 +353,11 @@ export class AppStacksService {
       listAppStackParameters(db, scope),
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
+      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7).
       db
-        .select({ id: operations.id })
+        .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
         .from(operations)
-        .where(
-          and(
-            eq(operations.organizationId, stack.organizationId),
-            eq(operations.lockKey, appStackLockKey(stack.id)),
-            inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
-          ),
-        )
+        .where(and(eq(operations.lockKey, appStackLockKey(stack.id)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
         .limit(1),
       // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
       // (only the routes were refused, and that revision was applied).
@@ -379,6 +375,9 @@ export class AppStacksService {
           ),
         ),
     ]);
+    const own = active?.organizationId === stack.organizationId ? active : undefined;
+    // Of an operation of the platform the customer learns the kind of work, never the operation.
+    const platformWork = active?.organizationId === PLATFORM_OPS_ORG_ID && active.kind === "stack.prune" ? "backups_cleanup" : null;
     const { defaultVersionId } = template;
     const latest =
       desired !== null &&
@@ -413,8 +412,9 @@ export class AppStacksService {
       domains,
       parameters,
       secrets,
-      activeOperationId: active?.id ?? null,
+      activeOperationId: own?.id ?? null,
       installed,
+      platformWork,
       upgrade:
         latest && latest.versionNumber > version.versionNumber ? { templateVersionId: latest.id, versionNumber: latest.versionNumber } : null,
       rollback:
