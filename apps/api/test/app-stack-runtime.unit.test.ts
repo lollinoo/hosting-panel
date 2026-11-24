@@ -1277,6 +1277,33 @@ describe("AppStackRuntime (RT3)", () => {
         expect(requestOf("unpublishAppStackRoutes")).toEqual(goneRef);
       });
 
+      /** An upgrade that failed past create: the containers may be the asked-for version's, which the applied plan does not name. */
+      const diverged = async () => {
+        const created = await running();
+        const v2 = revision(created.stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+        fake.failNext("createAppStackComponents", "definite");
+        expect(await run(await enqueue(created.stackId, "stack.upgrade", v2))).toBeInstanceOf(ControlPlaneError);
+        expect(await stackOf(created.stackId)).toMatchObject({ status: "failed", appliedRevisionId: created.rev.revisionId, desiredRevisionId: v2.revisionId });
+        fake.calls.length = 0;
+        return created.stackId;
+      };
+
+      it("an application whose installed version is not the one asked for is stopped without one", async () => {
+        const stackId = await diverged();
+        expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).toEqual({ stackId, organizationId: ORG });
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+      });
+
+      it("an application whose installed version is not the one asked for is deleted without one", async () => {
+        const stackId = await diverged();
+        expect(await run(await enqueue(stackId, "stack.delete"))).toBeUndefined();
+        expect(requestOf("stopAppStack")).not.toHaveProperty("order");
+        expect(requestOf("removeAppStack")).not.toHaveProperty("order");
+        expect(requestOf("removeAppStack")).toMatchObject({ removeVolumes: false });
+        expect((await stackOf(stackId)).status).toBe("deleted");
+      });
+
       it("an application whose first deploy never applied a revision is stopped and deleted without one", async () => {
         const { stackId, write } = await create([CACHE, WEB]);
         fake.failNext("createAppStackComponents", "definite");

@@ -128,10 +128,17 @@ export async function readAppStackPlan(
 }
 
 /** What the executor's stop and remove take to go in the applied plan's order (#100): an upgrade keeps the position
- *  label of a component it does not replace, so the labels alone can stop a database before what uses it. Nothing when
- *  no revision was applied or the applied plan cannot be read: the executor then goes by the labels, as before. */
-export function appStackStopOrder(plan: ApprovedStackPlan | null): { order?: string[] } {
-  return plan === null ? {} : { order: plan.components.map((c) => c.key) };
+ *  label of a component it does not replace, so the labels alone can stop a database before what uses it. Only when the
+ *  installed version is the one asked for: after an upgrade that failed past create, or stayed unknown, the containers
+ *  may be the asked-for version's, which the applied plan does not name, and the labels serve better. Nothing either
+ *  when no revision was applied or the applied plan cannot be read: the executor then goes by the labels, as before.
+ *  `plan` is the applied plan; the one place that decides, so every caller sends or withholds it alike. */
+export function appStackStopOrder(
+  stack: { readonly appliedRevisionId: string | null; readonly desiredRevisionId: string | null },
+  plan: ApprovedStackPlan | null,
+): { order?: string[] } {
+  const installedIsAsked = stack.appliedRevisionId !== null && stack.appliedRevisionId === stack.desiredRevisionId;
+  return installedIsAsked && plan !== null ? { order: plan.components.map((c) => c.key) } : {};
 }
 
 /** A refusal of the handler itself (plan invalid, secret missing, runtime unavailable, health timeout). */
@@ -616,11 +623,12 @@ export class AppStackRuntime {
     const { db } = this.#deps;
     const st = { unpublished: false };
     const body = async () => {
-      const { plan, planned, applied } = await this.#step(ctx, "validate", async () => {
+      const { plan, planned, order } = await this.#step(ctx, "validate", async () => {
         const stack = await this.#begin(ctx, false);
         const revisionId = stack.appliedRevisionId ?? stack.desiredRevisionId;
         if (revisionId !== null && !ctx.port) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
-        return { plan: await this.#planOf(ctx, revisionId), planned: revisionId !== null, applied: stack.appliedRevisionId !== null };
+        const plan = await this.#planOf(ctx, revisionId);
+        return { plan, planned: revisionId !== null, order: appStackStopOrder(stack, plan) };
       });
       if (!planned) {
         ctx.current = "settle";
@@ -633,7 +641,7 @@ export class AppStackRuntime {
         await port.unpublishAppStackRoutes(ctx.ref);
         st.unpublished = true;
       });
-      await this.#step(ctx, "stop", () => port.stopAppStack({ ...ctx.ref, ...appStackStopOrder(applied ? plan : null) }));
+      await this.#step(ctx, "stop", () => port.stopAppStack({ ...ctx.ref, ...order }));
       ctx.current = "settle";
       const stopped = plan?.components.map((c) => ({ componentKey: c.key, health: "stopped" as const }));
       await settleAppStackOperation(db, ctx.op, ctx.deploymentId, {
@@ -665,7 +673,7 @@ export class AppStackRuntime {
         if (!ctx.port && stack.appliedRevisionId !== null) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
         return {
           destroy: (await listAppStackVolumes(db, ctx.ref)).some((v) => v.retentionPolicy === "destroy"),
-          order: ctx.port ? appStackStopOrder(await this.#planOf(ctx, stack.appliedRevisionId)) : {},
+          order: ctx.port ? appStackStopOrder(stack, await this.#planOf(ctx, stack.appliedRevisionId)) : {},
         };
       });
       const port = ctx.port;

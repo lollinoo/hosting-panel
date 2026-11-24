@@ -433,7 +433,7 @@ export class AppStackBackupRuntime {
       if (!executor) throw new BackupStepFailure("tool_unavailable", "NOT_SUPPORTED");
       // The applied plan's order, so a database goes down after what uses it even when an upgrade shifted positions.
       const applied = stack.status === "stopped" ? null : await readAppStackPlan(db, scope, stack.appliedRevisionId);
-      return { backup: row, source: from, port: executor, wasStopped: stack.status === "stopped", order: appStackStopOrder(applied) };
+      return { backup: row, source: from, port: executor, wasStopped: stack.status === "stopped", order: appStackStopOrder(stack, applied) };
     });
 
     if (wasStopped) {
