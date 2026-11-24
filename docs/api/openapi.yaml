@@ -1838,10 +1838,10 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: >-
+            The organization already has a site with this `slug` (`ALREADY_EXISTS`, `details[0].reason: slug_taken`);
             `initialDomain` is already another site's, an application's or a server's name or address
-            (`DOMAIN_CONFLICT`) or a manual certificate captures it (`CERTIFICATE_IN_USE`), a slug
-            conflict, or the customer's site limit is reached
-            (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
+            (`DOMAIN_CONFLICT`) or a manual certificate captures it (`CERTIFICATE_IN_USE`); or the customer's site
+            limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/sites/{siteId}:
