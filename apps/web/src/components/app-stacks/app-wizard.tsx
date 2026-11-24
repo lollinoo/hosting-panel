@@ -254,6 +254,8 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
           autoComplete="new-password"
           spellCheck={false}
           maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
+          // The loop reads each value at its turn: one typed while an earlier one is sent would go out half-typed.
+          disabled={busy}
           onChange={(e) => (finishing ? retypeSecret : typeSecret)(p.key, e.target.value)}
         />
       );

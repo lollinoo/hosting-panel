@@ -638,6 +638,17 @@ describe("AppWizard after the application is created", () => {
     expect(used[3]).not.toBe(used[0]);
     expect(router.push).toHaveBeenCalledTimes(1);
   });
+
+  it("while a request runs the private values left cannot be typed into: a value typed meanwhile would be sent half-typed", () => {
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const tag = (out: string, key: string) => out.match(new RegExp(`<input[^>]*id="app-param-${key}"[^>]*>`))![0];
+    const running = html(wizard({ ...state, 6: null, 7: true }).tree);
+    const idle = html(wizard(state).tree);
+    for (const key of ["admin_password", "api_token"]) {
+      expect(tag(running, key)).toMatch(/\sdisabled=""/);
+      expect(tag(idle, key)).not.toMatch(/\sdisabled=""/);
+    }
+  });
 });
 
 describe("wizard page", () => {
