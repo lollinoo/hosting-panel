@@ -64,6 +64,10 @@ function mapRepositoryError(err: AppStackRepositoryError): ControlPlaneError {
       const message = "A web address still points at a part this version removes. Remove the address first.";
       return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "domain_target_removed" });
     }
+    case "PATH_IN_USE": {
+      const message = "A path of a web address still points at a part this version removes. Remove the path first.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "path_target_removed" });
+    }
   }
 }
 

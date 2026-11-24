@@ -57,7 +57,8 @@ export type AppStackRepositoryErrorCode =
   | "TEMPLATE_MISMATCH"
   | "INVALID_TRANSITION"
   | "NO_REVISION"
-  | "COMPONENT_IN_USE";
+  | "COMPONENT_IN_USE"
+  | "PATH_IN_USE";
 
 export class AppStackRepositoryError extends Error {
   constructor(
@@ -496,11 +497,16 @@ export async function enqueueAppStackOperationTransactional(
       assertRevision(next, { ...scope, hostAllocationId: stack.hostAllocationId, templateVersionId: next.templateVersionId });
       const ingress = planList(next.plan, "ingress");
       const domains = await tx
-        .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort })
+        .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort, pathRoutes: appStackDomains.pathRoutes })
         .from(appStackDomains)
         .where(eq(appStackDomains.stackId, stack.id));
-      if (domains.some((d) => !ingress.some((route) => route.componentKey === d.componentKey && route.port === d.internalPort))) {
+      const isIngress = (componentKey: string, port: number) => ingress.some((route) => route.componentKey === componentKey && route.port === port);
+      if (domains.some((d) => !isIngress(d.componentKey, d.internalPort))) {
         throw new AppStackRepositoryError("COMPONENT_IN_USE", "A web address still points at a part this version removes.");
+      }
+      // ADR-0037: a path committed after the API checked the plan would stop routing unseen.
+      if (domains.some((d) => d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
+        throw new AppStackRepositoryError("PATH_IN_USE", "A path of a web address still points at a part this version removes.");
       }
 
       const [last] = await tx

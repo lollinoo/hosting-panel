@@ -54,6 +54,13 @@ describe("mapAppStackError", () => {
         reason: "domain_target_removed",
       }),
     ],
+    [
+      "PATH_IN_USE",
+      one(400, "VALIDATION_ERROR", "A path of a web address still points at a part this version removes. Remove the path first.", {
+        field: "domains",
+        reason: "path_target_removed",
+      }),
+    ],
   ] as const)("AppStackRepositoryError %s", (code, expected) => {
     expect(mapped(new AppStackRepositoryError(code, "repository text"))).toMatchObject(expected);
   });

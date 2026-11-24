@@ -394,6 +394,33 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect((await enqueue(stack, "stack.upgrade", { plan: { ingress } })).revision?.revisionNumber).toBe(2);
   });
 
+  it("refuses PATH_IN_USE when a new plan drops the target of a path rule (ADR-0037), whatever the API checked before", async () => {
+    const ingress = [
+      { componentKey: "web", port: 8080 },
+      { componentKey: "cache", port: 6379 },
+    ];
+    const stack = await ready((await create(orgA, { ingress })).stack.id);
+    const [row] = await domain(stack, "path.inuse.example", "web", 8080);
+    // The path commits between the API's own check of the new plan and this transaction.
+    await db()
+      .update(appStackDomains)
+      .set({ pathRoutes: [{ pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false }] })
+      .where(eq(appStackDomains.id, row!.id));
+    const plans: PlanOptions[] = [
+      { ingress: [{ componentKey: "web", port: 8080 }] },
+      { ingress: [{ componentKey: "web", port: 8080 }, { componentKey: "cache", port: 7000 }] },
+    ];
+    for (const kind of ["stack.upgrade", "stack.rollback"] as const) {
+      for (const plan of plans) {
+        const err = await enqueue(stack, kind, { plan }).catch((e: unknown) => e);
+        expect(err, kind).toBeInstanceOf(AppStackRepositoryError);
+        expect(err, kind).toMatchObject({ code: "PATH_IN_USE" });
+        expect(await keysOf(stack.id)).toEqual({ components: ["cache", "web"], volumes: ["data"], revisions: 1, deployments: 1 });
+      }
+    }
+    expect((await enqueue(stack, "stack.upgrade", { plan: { ingress } })).revision?.revisionNumber).toBe(2);
+  });
+
   it("delete with destroyData marks every volume for destruction", async () => {
     const stack = await ready((await create(orgA, { volumes: ["data", "logs"] })).stack.id);
     const result = await enqueue(stack, "stack.delete", { destroyData: true });
