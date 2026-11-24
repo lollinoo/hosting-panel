@@ -901,8 +901,9 @@ at 2 MB.
    owner or a hosting administrator of its organisation presses **Aggiorna alla versione 2** (or the number above) on
    the application's page and confirms. Nothing upgrades it automatically, and that button is the only notice the customer gets. The review
    shows the WordPress component modified and restarted, nothing else changed and no value to enter; the application
-   does not answer for a few moments while WordPress restarts. The first upgrade after this update also replaces the
-   database container once (procedure 8a); its data stay. **Torna alla versione 1** brings the old behaviour back.
+   does not answer for a few moments while WordPress restarts. Unless a **Reinstalla** already did it, the upgrade
+   also replaces the database container once (procedure 8a); its data stay. **Torna alla versione 1** brings the old
+   behaviour back.
    The applications still on version 1:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where template_version_id = 'atv_wordpress_mariadb_1' and status <> 'deleted' order by id"
