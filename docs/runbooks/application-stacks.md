@@ -338,8 +338,8 @@ names only the key of a task, and the command is read from the template version 
    times, five seconds apart, and none was confirmed, or that the component's own environment carries the mark so
    the clean-up cannot work (it is then written at once, not retried). The attempts are part of the run: the
    application stays held, and the run is answered after them, about a minute and a half after its time limit when
-   the engine does not answer at all. A **slow** engine (each step answered just before its time-out) can take almost
-   six minutes past the limit (ADR-0042, A4), longer than the panel waits: the operation then reads
+   the engine does not answer at all. A **slow** engine (each step answered just before its time-out) can take about
+   six and a half minutes past the limit (ADR-0042, A4), longer than the panel waits: the operation then reads
    «Da verificare», the application stays refused as busy while the executor still tries, and the recovery pass
    writes the run when the executor has answered. The run reads «esito non noto» (item 5), never «stopped».
    `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
