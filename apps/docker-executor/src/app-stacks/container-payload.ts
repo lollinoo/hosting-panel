@@ -20,6 +20,7 @@ import {
   type AppStackPlanComponent,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
+import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { ExecutorCodedError } from "../traefik-config.js";
 import { AppStackExecutorError } from "./errors.js";
 import {
@@ -46,6 +47,12 @@ export const APP_STACK_STANDARD_CAP_ADD: readonly string[] = Object.freeze([
   "SETUID",
   "NET_BIND_SERVICE",
 ]);
+/** The version of what this builder writes, labelled on every application container (#96). Raise it whenever the body
+ *  built for the same plan changes (a setting, a label, a mount, where the secret files are): the component hash only
+ *  covers the plan, so without this an existing container would keep its old body. Only the next create (deploy,
+ *  upgrade, rollback, deploy with new settings) replaces an older container; a start or a restart never does, and
+ *  nothing replaces a running container by itself. */
+export const APP_STACK_CONTAINER_BODY_VERSION = 1;
 export const APP_STACK_STOP_TIMEOUT_SECONDS = 10;
 export const APP_STACK_RESTART_POLICY = Object.freeze({ Name: "unless-stopped" });
 export const APP_STACK_LOG_CONFIG = Object.freeze({
@@ -235,6 +242,19 @@ const MOUNT_KEYS = new Set(["Type", "Source", "Target", "ReadOnly"]);
 const onlyKeys = (value: object, allowed: ReadonlySet<string>) => Object.keys(value).every((key) => allowed.has(key));
 const inRange = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
+/** "Unchanged" at create: built from this plan (hash) by this builder (body version). A container without the version
+ *  label predates it and counts as older. Only create asks this; the other hash checks stay on the hash alone. */
+export function appStackContainerIsCurrent(
+  labels: Readonly<Record<string, string>>,
+  plan: ApprovedStackPlan,
+  componentKey: string,
+): boolean {
+  return (
+    labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, componentKey) &&
+    labels[APP_STACK_LABELS.bodyVersion] === String(APP_STACK_CONTAINER_BODY_VERSION)
+  );
+}
+
 /** Run on every body before POST /containers/create: refuses a body that lost any hardening property.
  *  With the plan, the User, the edge network, the run profile and the environment names must also be the plan
  *  component's; without it only the "strict" body passes. The temporary areas of a "strict" body must be exactly the
@@ -266,8 +286,10 @@ export function assertAppStackPayloadHardening(
     label.startIndex,
     label.health,
     label.secretEnvironment,
+    label.bodyVersion,
   ]);
   if (!onlyKeys(payload.Labels, labelKeys) || payload.Labels[label.role] !== APP_STACK_COMPONENT_ROLE) refuse("Labels");
+  if (payload.Labels[label.bodyVersion] !== String(APP_STACK_CONTAINER_BODY_VERSION)) refuse("Labels");
   const { plan } = ctx;
   const component = plan?.stackId === stackId ? plan.components.find((c) => c.key === key) : undefined;
   if (plan !== undefined && component === undefined) refuse("Labels");

@@ -5,6 +5,7 @@ import { AppStackStatusIpcResultSchema, type AppStackRouteWire, type ApprovedSta
 import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_STACK_CONTAINER_BODY_VERSION,
   APP_STACK_LABELS,
   APP_STACK_PULL_ENGINE_TIMEOUT_MS,
   AppStackEngine,
@@ -111,6 +112,14 @@ const exists = (file: string) => stat(file).then(() => true, () => false);
 async function foreignContainer(h: Harness, name: string, labels: Record<string, string> = {}, extra: object = {}) {
   await h.fake.request("POST", `/containers/create?name=${name}`, { Image: "traefik:test", Labels: labels, ...extra });
   h.fake.log.length = 0;
+}
+
+/** Makes a container look built by an older release: no body version label, or another value (#96). */
+function olderBody(h: Harness, name: string, version?: string) {
+  const container = h.fake.containers.get(name);
+  if (container === undefined) throw new Error(`no container ${name}`);
+  const labels = Object.entries(container.Labels).filter(([key]) => key !== APP_STACK_LABELS.bodyVersion);
+  container.Labels = Object.fromEntries(version === undefined ? labels : [...labels, [APP_STACK_LABELS.bodyVersion, version]]);
 }
 
 function withWorkerEnv(value: string): ApprovedStackPlan {
@@ -381,8 +390,10 @@ describe("createAppStackComponents (5.10)", () => {
       buildAppStackContainerCreatePayload(plan, "web", { secretsRootDir: h.root }),
     ]);
     expect(h.fake.containers.get(WORKER)?.State.Status).toBe("created");
+    expect(h.fake.containers.get(WORKER)?.Labels[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
     expect(h.fake.log.some((line) => /\/(start|restart)/.test(line))).toBe(false);
     h.fake.log.length = 0;
+    // The current body version and an equal hash: unchanged.
     const again = await h.engine.createAppStackComponents({ plan });
     expect(again.components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
     expect(mutations(h.fake.log)).toEqual([]);
@@ -407,6 +418,36 @@ describe("createAppStackComponents (5.10)", () => {
     expect(h.fake.containers.get(WEB)?.State.Running).toBe(true);
     expect(h.fake.volumes.has(VOL)).toBe(true);
     expect(await exists(secretDir(h, "worker"))).toBe(true);
+  });
+
+  it.each([
+    ["no body version label", undefined],
+    ["another body version", "0"],
+  ])("replaces a component with an equal hash and %s, once and in place", async (_name, version) => {
+    const h = await setup();
+    await deployed(h);
+    const oldWeb = idOf(h, WEB);
+    const oldWorker = idOf(h, WORKER);
+    olderBody(h, WEB, version);
+    await expect(h.engine.createAppStackComponents({ plan })).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "replaced" },
+        { componentKey: "worker", outcome: "unchanged" },
+      ],
+      removedComponents: [],
+    });
+    expect(mutations(h.fake.log)).toEqual([
+      `POST /containers/${oldWeb}/stop?t=10`,
+      `DELETE /containers/${oldWeb}?force=true&v=true`,
+      `POST /containers/create?name=${WEB}`,
+    ]);
+    expect(h.fake.containers.get(WEB)?.Labels[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
+    expect(idOf(h, WORKER)).toBe(oldWorker);
+    expect(h.fake.volumes.has(VOL)).toBe(true);
+    h.fake.log.length = 0;
+    const again = await h.engine.createAppStackComponents({ plan });
+    expect(again.components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
+    expect(mutations(h.fake.log)).toEqual([]);
   });
 
   it("removes a stale component and purges its secret dir", async () => {
@@ -614,6 +655,32 @@ describe("start and restart (5.11)", () => {
     held.release();
     await expect(pending).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
     expect(h.fake.containers.get(WORKER)?.State.Running).toBe(true);
+  });
+
+  it("start and restart leave alone a container built before the body version label", async () => {
+    const h = await setup();
+    await deployed(h);
+    olderBody(h, WEB);
+    olderBody(h, WORKER);
+    const ids = [idOf(h, WEB), idOf(h, WORKER)];
+    await expect(h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).resolves.toEqual({
+      componentKey: "web",
+      outcome: "already_running",
+    });
+    await expect(
+      h.engine.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: SECRETS }),
+    ).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
+    await h.engine.stopAppStack(REF);
+    await expect(h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).resolves.toEqual({
+      componentKey: "web",
+      outcome: "started",
+    });
+    await expect(
+      h.engine.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: SECRETS }),
+    ).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
+    expect(h.fake.log.filter((line) => line.startsWith("DELETE ") || line.startsWith("POST /containers/create"))).toEqual([]);
+    expect([idOf(h, WEB), idOf(h, WORKER)]).toEqual(ids);
+    expect(h.fake.containers.get(WEB)?.Labels[APP_STACK_LABELS.bodyVersion]).toBeUndefined();
   });
 
   it("a secret write failure names no value", async () => {

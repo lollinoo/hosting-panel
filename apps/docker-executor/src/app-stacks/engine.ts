@@ -43,6 +43,7 @@ import { appStackBackupJobAwake } from "../app-stack-backup-jobs.js";
 import { LOG_READ_MAX_BYTES } from "../docker-logs.js";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
 import {
+  appStackContainerIsCurrent,
   assertAppStackPayloadHardening,
   buildAppStackContainerCreatePayload,
   decodeAppStackHealthLabel,
@@ -417,7 +418,8 @@ export class AppStackEngine implements StackExecutorPort {
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);
-        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        // An equal hash with an older body version (or none) is replaced, in place, like a changed hash (#96).
+        if (existing !== undefined && appStackContainerIsCurrent(existing.labels, plan, key)) continue;
         const name = appStackContainerName(plan.stackId, key);
         if (existing === undefined && (await this.get(`/containers/${enc(name)}/json`, "inspect an application container")) !== null) {
           throw conflict();
