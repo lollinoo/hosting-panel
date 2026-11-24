@@ -796,7 +796,9 @@ describe("AppWizard when the create's outcome is unknown", () => {
     ["a membership removed (404)", refusal(404, "NOT_FOUND"), t.createUnknown],
     ["too many requests (429)", refusal(429, "RATE_LIMITED"), en.apps.codes.RATE_LIMITED],
     ["a 403 whose body is not JSON", notJson(403), t.createUnknown],
-  ])("a Retry answered by %s says nothing of the create: the state, the key and the body stay, the answer's sentence shows, the next Retry sends the same", async (_what, said, text) => {
+    // Only an application that holds the key answers this on a create: it may well exist, the list is where to look.
+    ["a key already used for another request (409)", refusal(409, "IDEMPOTENCY_CONFLICT"), t.createUnknown],
+  ])("a Retry answered by %s does not settle the create: the state, the key and the body stay, the answer's sentence shows, the next Retry sends the same", async (_what, said, text) => {
     const keys = { current: {} as Record<string, string> };
     const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
     answer({
@@ -849,6 +851,16 @@ describe("AppWizard when the create's outcome is unknown", () => {
     await click(again.tree, t.retry);
     expect(again.sets).toContainEqual([10, null]);
     expect(again.sets.filter(([k]) => k === 0)).toEqual(step ? [[0, step]] : []);
+    expect(keys.current.create).toBeUndefined();
+  });
+
+  it("a first Install answered «key already used» (409) is settled like any other refusal: the key is dropped, no unknown state", async () => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [BASE]: [refusal(409, "IDEMPOTENCY_CONFLICT")] });
+    const first = wizard(ready, { 0: secretsRef({ admin_password: PLANTED }), 1: keys });
+    await click(first.tree, t.install);
+    expect(first.sets.filter(([k]) => k === 10)).toEqual([[10, null]]);
+    expect(first.sets).toContainEqual([6, en.apps.codes.IDEMPOTENCY_CONFLICT]);
     expect(keys.current.create).toBeUndefined();
   });
 
