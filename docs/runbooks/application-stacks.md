@@ -822,6 +822,11 @@ approval.
    `/var/lib/postgresql/18/docker`, the one version 1 already used), so an image of another major version would find the
    data instead of starting an empty database beside them: PostgreSQL is then expected to refuse to start (not tested,
    no image of another major version is allowed today); its upgrade keeps the data.
+   A change of major version of a database is not a template upgrade: it is a dump of the old database and a restore
+   into a new database application of the new version, made with the database's own tools; the panel has no step for
+   it and never converts the data. Whoever writes a template with a database image keeps the same major version in
+   every version of that template, publishes another major version as a template of its own and, where the image
+   chooses its data folder by version (PostgreSQL does), names that folder in the template.
 2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
    presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
    applications of the same customer; an application has at most 4 databases and a database at most 8 applications.
