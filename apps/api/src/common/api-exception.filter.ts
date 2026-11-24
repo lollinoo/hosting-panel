@@ -49,6 +49,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
         ...(d.field ? { field: redactSensitiveString(d.field) } : {}),
         message: redactSensitiveString(d.message),
         ...(d.reason ? { reason: redactSensitiveString(d.reason) } : {}),
+        // A closed value (APP_STACK_SECRET_VALUE_LIMITS): nothing to redact.
+        ...(d.limit ? { limit: d.limit } : {}),
       }));
       if (exception.retryAfterMs !== undefined && exception.retryAfterMs > 0) {
         retryAfterSeconds = Math.max(1, Math.ceil(exception.retryAfterMs / 1_000));

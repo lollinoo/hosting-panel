@@ -3480,6 +3480,9 @@ x-hp-ingress:
       downtime: "L'applicazione non risponderà per qualche momento.",
       dataRemoved: "Questa versione non usa più alcuni dati: restano conservati ma l'applicazione non li vedrà.",
       dataWarning: "Tornare a una versione precedente non riporta indietro i dati: se la nuova versione li modifica, quelle modifiche restano.",
+      secretsTitle: "Valori riservati della nuova versione",
+      secretsHint:
+        "La nuova versione ha bisogno di questi valori riservati per funzionare: scrivili per aggiornare. Vengono salvati con l'aggiornamento e potrai sostituirli in seguito tra i valori riservati.",
       confirm: "Aggiorna",
     },
     rollback: {
@@ -3695,6 +3698,8 @@ x-hp-ingress:
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
       path_target_removed: "Un percorso di un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima il percorso.",
       value_too_long: "Il valore è troppo lungo: questa applicazione accetta al massimo {max} caratteri, meno se contiene lettere accentate o simboli.",
+      value_too_long_store: "Il valore è troppo lungo per essere conservato: accorcialo.",
+      secret_not_needed: "L'aggiornamento non ha bisogno di questo valore: impostalo tra i valori riservati dell'applicazione.",
       database_as_application: "Un database non si collega a un altro database.",
       not_a_database: "Questa applicazione non è un database.",
       database_not_linkable: "Questo database non può essere collegato alle applicazioni.",
