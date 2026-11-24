@@ -48,7 +48,8 @@ describe("notifications docs", () => {
     }
     expect(reasons).toHaveLength(NOTIFICATION_PROBLEMS.length);
     for (const s of ["ADR-0040", "/admin/notifications", "/account/notifications", "X-Hosting-Panel-Signature", "--allow-feature-loss",
-      "hp-restore-panel", "secrets-master.key", "notification_pass_failed", "notification_observe_failed", "notification_send_failed"]) {
+      "hp-restore-panel", "secrets-master.key", "notification_pass_failed", "notification_observe_failed", "notification_channel_failed",
+      "notification_send_failed"]) {
       expect(runbook, s).toContain(s);
     }
     for (const p of citedPaths(runbook)) expect(existsSync(join(root, p)), `runbook: ${p}`).toBe(true);

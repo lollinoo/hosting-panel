@@ -91,11 +91,14 @@ message is **Non consegnato** for good. A pass sends at most 20 messages; the re
 What the API logs about notifications holds no address, key or token, only that something failed:
 
 ```bash
-journalctl -u hp-api --since "-2 hours" | grep -E 'notification_(pass|observe|send)_failed'
+journalctl -u hp-api --since "-2 hours" | grep -E 'notification_(pass|observe|channel|send)_failed'
 ```
 
 - `notification_observe_failed`: the pass could not read the alerts. Nothing opens and nothing closes; the messages
   that wait still go.
+- `notification_channel_failed`: the pass could not compare the alerts with what one channel was told, most often
+  because the database did not answer. That channel keeps what it had; the other channels and the sends go on, and
+  the next pass compares it again.
 - `notification_send_failed`: a send broke in an unexpected way; it counts as `unreachable` and is tried again.
 - `notification_pass_failed`: the whole pass failed, most often because the database did not answer. The next pass
   starts from what is stored.
