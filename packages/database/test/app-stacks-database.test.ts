@@ -279,18 +279,26 @@ describe("0025 app_stacks migration", () => {
       appStackDomains,
       appStackDeployments,
     ];
+    // schema.ts follows the newest migration: the later ones (0032) are applied on top before comparing.
+    let colsLatest: Column[] = [];
+    let consLatest: Named[] = [];
+    beforeAll(async () => {
+      for (const file of files.filter((f) => f > M0025)) await pg.exec(read(file));
+      colsLatest = await rows<Column>(pg, COLUMNS);
+      consLatest = await rows<Named>(pg, CONSTRAINTS);
+    });
 
-    it("declares exactly the columns the migration creates for the ten tables and organizations", () => {
+    it("declares exactly the columns the migrations create for the ten tables and organizations", () => {
       for (const table of [...tables, organizations]) {
         const config = getTableConfig(table);
-        const present = colsAfter.filter((c) => c.table_name === config.name).map((c) => c.column_name);
+        const present = colsLatest.filter((c) => c.table_name === config.name).map((c) => c.column_name);
         expect(config.columns.map((c) => c.name).sort(), config.name).toEqual(present.sort());
       }
       expect(tables.map((t) => getTableConfig(t).name).sort()).toEqual(NEW_TABLES);
     });
 
-    it("names in schema.ts every unique, primary key and composite foreign key the migration creates", () => {
-      const present = new Set(consAfter.map(qualified));
+    it("names in schema.ts every unique, primary key and composite foreign key the migrations create", () => {
+      const present = new Set(consLatest.map(qualified));
       const declared = tables.flatMap((table) => {
         const config = getTableConfig(table);
         return [
@@ -299,7 +307,7 @@ describe("0025 app_stacks migration", () => {
           ...config.foreignKeys.map((f) => f.getName()).filter((name) => name.startsWith("fk_")),
         ].map((name) => `${config.name}.${name}`);
       });
-      expect(declared.length).toBe(24);
+      expect(declared.length).toBe(25);
       expect(declared.filter((name) => !present.has(name))).toEqual([]);
     });
   });
@@ -577,5 +585,59 @@ describe("0025 app_stacks migration", () => {
         named("uq_app_stack_secrets_version"),
       );
     });
+  });
+});
+
+describe("0032 the revision a deployment's request replaced", () => {
+  const M0032 = "0032_app_stack_deployment_replaced.sql";
+  let pg: PGlite;
+  const COLUMNS = `SELECT table_name, column_name, data_type, is_nullable, column_default
+    FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, column_name`;
+  const CONSTRAINTS = `SELECT conrelid::regclass::text AS tbl, conname AS name, pg_get_constraintdef(oid) AS def
+    FROM pg_constraint WHERE connamespace = 'public'::regnamespace ORDER BY 1, 2`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0032);
+    await pg.exec(SEED_0024);
+    await pg.exec(FIXTURES);
+    await pg.exec(insert("app_stack_deployments", { id: "'sdep_old'", operation_id: "'op_old'", revision_id: "'srev_a1'" }));
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("adds one nullable column and its composite foreign key, leaves the existing rows alone, and runs again unchanged", async () => {
+    const colsBefore = await rows<Record<string, unknown>>(pg, COLUMNS);
+    const consBefore = await rows<Record<string, unknown>>(pg, CONSTRAINTS);
+    await pg.exec(read(M0032));
+    const colsAfter = await rows<Record<string, unknown>>(pg, COLUMNS);
+    const consAfter = await rows<Record<string, unknown>>(pg, CONSTRAINTS);
+    const text = (r: Record<string, unknown>) => JSON.stringify(r);
+    expect(colsAfter.filter((c) => !colsBefore.map(text).includes(text(c)))).toEqual([
+      { table_name: "app_stack_deployments", column_name: "replaced_revision_id", data_type: "text", is_nullable: "YES", column_default: null },
+    ]);
+    expect(colsBefore.filter((c) => !colsAfter.map(text).includes(text(c)))).toEqual([]);
+    expect(consAfter.filter((c) => !consBefore.map(text).includes(text(c))).map((c) => c.name)).toEqual([
+      "fk_app_stack_deployments_replaced_revision",
+    ]);
+    expect(await rows(pg, "SELECT id, replaced_revision_id FROM app_stack_deployments")).toEqual([{ id: "sdep_old", replaced_revision_id: null }]);
+    await pg.exec(read(M0032));
+    expect(await rows(pg, COLUMNS)).toEqual(colsAfter);
+    expect(await rows(pg, CONSTRAINTS)).toEqual(consAfter);
+  });
+
+  it("refuses a replaced revision of another stack and accepts its own", async () => {
+    await pg.exec("BEGIN");
+    try {
+      await expect(pg.exec(insert("app_stack_deployments", { replaced_revision_id: "'srev_b1'" }))).rejects.toThrow(
+        named("fk_app_stack_deployments_replaced_revision"),
+      );
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+    await pg.exec(insert("app_stack_deployments", { replaced_revision_id: "'srev_a1'" }));
+    expect(await rows(pg, "SELECT replaced_revision_id FROM app_stack_deployments WHERE id = 'sdep_p'")).toEqual([{ replaced_revision_id: "srev_a1" }]);
   });
 });

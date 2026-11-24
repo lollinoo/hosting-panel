@@ -285,6 +285,7 @@ describe("row mappers", () => {
       problem: "STACK_HEALTH_TIMEOUT",
       startedAt: FRESH,
       endedAt: null,
+      replacedRevisionId: null,
     };
     const dto = appStackDeploymentDto(row, "stack.deploy", 3);
     expect(dto).toEqual({

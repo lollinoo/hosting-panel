@@ -141,7 +141,7 @@ export async function recoverAppStackOperation(
     problem: v.problem,
     stackStatus: v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
-    ...(create?.status === "pending" ? { restoreApplied: true } : {}),
+    ...(create?.status === "pending" ? { restoreReplaced: true } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),
     ...(v.health.length > 0 ? { health: { observedAt: now, components: v.health } } : {}),
     failedStep: null,

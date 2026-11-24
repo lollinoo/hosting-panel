@@ -509,6 +509,7 @@ erDiagram
     app_stack_components ||--o{ app_stack_domains : "(stack_id, component_key)"
     app_stacks ||--o{ app_stack_deployments : "(stack_id, organization_id) CASCADE"
     app_stack_revisions |o--o{ app_stack_deployments : "(revision_id, stack_id)"
+    app_stack_revisions |o--o{ app_stack_deployments : "(replaced_revision_id, stack_id) (0032)"
 
     organizations {
         integer max_app_stacks "NULL = nessun limite, CHECK >= 0 (0025)"
@@ -600,6 +601,7 @@ erDiagram
         text revision_id FK "NULL quando l'operazione non ha una revisione"
         text status "queued, running, succeeded, failed, unknown, cancelled"
         text problem "codice stabile o NULL"
+        text replaced_revision_id FK "revisione desiderata che la richiesta ha sostituito, o NULL (0032)"
     }
 ```
 
@@ -664,3 +666,6 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0032 (`0032_app_stack_deployment_replaced.sql`, `ADR-0035` §2.10, additiva)**:
+  - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
+  - Nessun backfill: le righe esistenti restano `NULL` (nulla da riportare indietro) e la release precedente ignora la colonna.

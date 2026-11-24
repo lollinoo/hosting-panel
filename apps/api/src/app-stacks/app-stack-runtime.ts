@@ -444,7 +444,7 @@ export class AppStackRuntime {
         // runs shows, and an upgrade or a rollback takes back what its request wrote.
         const { stack } = st;
         const previous = deploy ? st.previous : st.plan;
-        const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreApplied: true } : {};
+        const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
         const observed = stack && previous ? await this.#status(ctx) : null;
         if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");

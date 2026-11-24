@@ -271,16 +271,24 @@ async function revisionOf(db: DatabaseExecutor, stackId: string, revisionId: str
   return row ?? null;
 }
 
+const planKeys = (plan: Readonly<Record<string, unknown>>) => planList(plan, "components").map((c) => String(c.key));
+
 /**
- * Takes back what enqueueing an upgrade or a rollback wrote, from the applied revision: parameters, component rows and
- * quota (the caller writes desired_revision_id and template_version_id). Null, and nothing written, when no revision is
- * applied, when the applied one is the desired one, or when a web address now targets a pair only the desired plan has.
+ * Takes back what enqueueing an upgrade or a rollback wrote, to the desired revision that request replaced: parameters,
+ * component rows and quota (the caller writes desired_revision_id and template_version_id). Null, and nothing written,
+ * when the deployment replaced no revision, when its revision is no longer the desired one, or when a web address now
+ * targets a pair only the desired plan has.
  */
-async function restoreAppliedRevision(db: DatabaseExecutor, stack: AppStackRow, now: Date): Promise<AppStackRevisionRow | null> {
-  if (stack.appliedRevisionId === null || stack.appliedRevisionId === stack.desiredRevisionId) return null;
-  const applied = await revisionOf(db, stack.id, stack.appliedRevisionId);
-  if (!applied) return null;
-  const ingress = planList(applied.plan, "ingress");
+async function restoreReplacedRevision(
+  db: DatabaseExecutor,
+  stack: AppStackRow,
+  deployment: { readonly revisionId: string | null; readonly replacedRevisionId: string | null },
+  now: Date,
+): Promise<AppStackRevisionRow | null> {
+  if (deployment.replacedRevisionId === null || deployment.revisionId !== stack.desiredRevisionId) return null;
+  const replaced = await revisionOf(db, stack.id, deployment.replacedRevisionId);
+  if (!replaced) return null;
+  const ingress = planList(replaced.plan, "ingress");
   const domains = await db
     .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort })
     .from(appStackDomains)
@@ -289,20 +297,28 @@ async function restoreAppliedRevision(db: DatabaseExecutor, stack: AppStackRow, 
 
   const scope = { organizationId: stack.organizationId, stackId: stack.id };
   await db.delete(appStackParameters).where(eq(appStackParameters.stackId, stack.id));
-  await insertParameters(db, scope, applied.parameters.map((p) => ({ parameterKey: p.key, value: p.value })));
-  await syncComponentsAndVolumes(db, scope, { componentKeys: planList(applied.plan, "components").map((c) => String(c.key)), volumeKeys: [] });
-  // A row the request dropped comes back as the applied revision left it; its health is the next observation's.
-  await db.update(appStackComponents).set({ appliedRevisionId: applied.id, updatedAt: now }).where(eq(appStackComponents.stackId, stack.id));
+  await insertParameters(db, scope, replaced.parameters.map((p) => ({ parameterKey: p.key, value: p.value })));
+  await syncComponentsAndVolumes(db, scope, { componentKeys: planKeys(replaced.plan), volumeKeys: [] });
+  // A row the request dropped comes back as the applied revision left it (none when that revision lacks it); its health
+  // is the next observation's.
+  const applied = await revisionOf(db, stack.id, stack.appliedRevisionId);
+  if (applied) {
+    await db
+      .update(appStackComponents)
+      .set({ appliedRevisionId: applied.id, updatedAt: now })
+      .where(and(eq(appStackComponents.stackId, stack.id), inArray(appStackComponents.componentKey, planKeys(applied.plan))));
+  }
   const desired = await revisionOf(db, stack.id, stack.desiredRevisionId);
+  // The exact reverse of the request's charge; never refused, as another application may have taken a share it freed.
   await chargeAppStackQuota(db, {
     ...scope,
     hostAllocationId: stack.hostAllocationId,
     resourceQuotaId: stack.resourceQuotaId,
     previous: desired && totals(desired),
-    next: totals(applied),
+    next: totals(replaced),
     restore: true,
   });
-  return applied;
+  return replaced;
 }
 
 async function enqueueDeployment(
@@ -310,6 +326,8 @@ async function enqueueDeployment(
   input: StackScope & {
     kind: AppStackOperationKind;
     revisionId: string | null;
+    /** The desired revision this request replaced with `revisionId`; null when it wrote none. */
+    replacedRevisionId: string | null;
     requestedByUserId: string | null;
     idempotencyKey: string;
     requestHash: string;
@@ -336,6 +354,7 @@ async function enqueueDeployment(
       organizationId: input.organizationId,
       operationId: operation.id,
       revisionId: input.revisionId,
+      replacedRevisionId: input.replacedRevisionId,
       status: "queued",
       startedAt: new Date(),
     })
@@ -442,6 +461,7 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       ...scope,
       kind: "stack.deploy",
       revisionId: revision.id,
+      replacedRevisionId: null,
       requestedByUserId: input.createdBy,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,
@@ -563,6 +583,7 @@ export async function enqueueAppStackOperationTransactional(
       ...scope,
       kind: input.kind,
       revisionId,
+      replacedRevisionId: revision ? stack.desiredRevisionId : null,
       requestedByUserId: input.requestedByUserId,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,
@@ -627,8 +648,8 @@ export async function transitionAppStackTransactional(
 /**
  * Deployment progress/outcome plus the stack status in one call. `ended_at` is set on a terminal deployment status.
  * appliedRevisionId: sets app_stacks.applied_revision_id and applied_revision_id of every component row.
- * restoreApplied: an upgrade or a rollback that changed nothing on the executor; the desired revision, template version,
- * parameters, component rows and quota become the applied revision's again (see restoreAppliedRevision).
+ * restoreReplaced: an upgrade or a rollback that changed nothing on the executor; the desired revision, template version,
+ * parameters, component rows and quota become those of the revision its request replaced (see restoreReplacedRevision).
  * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy, pending or missing→removed,
  * component rows deleted, status + deleted_at set, then secret versions purged when no volume is `retained`.
  */
@@ -641,7 +662,7 @@ export async function updateAppStackDeploymentTransactional(
     readonly stackStatus: AppStackStatus | null;
     readonly appliedRevisionId?: string;
     readonly appliedRoutesHash?: string | null;
-    readonly restoreApplied?: boolean;
+    readonly restoreReplaced?: boolean;
   },
 ): Promise<AppStackRow> {
   const stack = await lockStack(db, input, false);
@@ -652,7 +673,7 @@ export async function updateAppStackDeploymentTransactional(
     .update(appStackDeployments)
     .set({ status: input.deploymentStatus, problem: input.problem, ...(terminal ? { endedAt: now } : {}) })
     .where(and(eq(appStackDeployments.id, input.deploymentId), eq(appStackDeployments.stackId, stack.id)))
-    .returning({ id: appStackDeployments.id });
+    .returning({ revisionId: appStackDeployments.revisionId, replacedRevisionId: appStackDeployments.replacedRevisionId });
   if (!deployment) throw new AppStackRepositoryError("NOT_FOUND", "Deployment not found.");
   if (input.appliedRevisionId !== undefined) {
     await db
@@ -660,7 +681,7 @@ export async function updateAppStackDeploymentTransactional(
       .set({ appliedRevisionId: input.appliedRevisionId, updatedAt: now })
       .where(eq(appStackComponents.stackId, stack.id));
   }
-  const restored = input.restoreApplied === true ? await restoreAppliedRevision(db, stack, now) : null;
+  const restored = input.restoreReplaced === true ? await restoreReplacedRevision(db, stack, deployment, now) : null;
 
   const deleted = input.stackStatus === "deleted" && stack.status !== "deleted";
   if (deleted) {

@@ -71,8 +71,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    - deploy, upgrade, rollback, start, restart: every component of the plan exists with the plan's hash → `running` or
      `degraded` (`failed` if an essential component is not healthy); if instead the previous revision is still the one
      running, the operation fails (`OPERATION_INTERRUPTED`) and the stack keeps the status of that revision (an upgrade
-     or a rollback whose create step never started also goes back to that revision's version, settings and quota);
-     otherwise the stack is `failed` with `OPERATION_INTERRUPTED`;
+     or a rollback whose create step never started also goes back to the version, settings and quota its request
+     replaced); otherwise the stack is `failed` with `OPERATION_INTERRUPTED`;
    - route refresh (the panel's own `stack.deploy`, no user, which only changes routes): done when the routes seen are
      today's addresses of the healthy targets, otherwise it fails with `OPERATION_INTERRUPTED`; the stack is `running`
      when it is done and every component is healthy, otherwise `degraded`, never `failed`; a later route refresh
