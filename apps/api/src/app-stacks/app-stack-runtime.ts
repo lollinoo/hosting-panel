@@ -280,9 +280,11 @@ export class AppStackRuntime {
   }
 
   /** The live stack; the deployment moves to running (a first deploy also moves the stack queued → deploying). */
-  async #begin(ctx: StackContext, deploy: boolean): Promise<AppStackRow> {
+  async #begin(ctx: StackContext, deploy: boolean, st?: RolloutState): Promise<AppStackRow> {
     const stack = await getAppStack(this.#deps.db, ctx.ref);
     if (!stack) throw new AppStackStepRefusal("STACK_TEMPLATE_INVALID");
+    // Known before the write below, so a failure of that write still settles from what the stack was.
+    if (st) st.stack = stack;
     await this.#deps.db.transaction(async (tx) => {
       if (deploy && stack.status === "queued") await transitionAppStackTransactional(tx, { ...ctx.ref, to: "deploying" });
       await updateAppStackDeploymentTransactional(tx, {
@@ -328,7 +330,7 @@ export class AppStackRuntime {
   }
 
   async #validate(ctx: StackContext, st: RolloutState, deploy: boolean): Promise<void> {
-    st.stack = await this.#begin(ctx, deploy);
+    st.stack = await this.#begin(ctx, deploy, st);
     if (deploy) st.previous = await this.#planOf(ctx, st.stack.appliedRevisionId);
     st.plan = await this.#planOf(
       ctx,

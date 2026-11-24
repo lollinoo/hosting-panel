@@ -696,6 +696,29 @@ describe("AppStackRuntime (RT3)", () => {
       expect(await deploymentOf(again)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
     });
 
+    it("a redeploy whose first database write fails leaves it stopped: the application was read before it", async () => {
+      const { stackId, rev } = await stopped();
+      const deploy = await enqueue(stackId, "stack.deploy");
+      // A database error on the write that moves the deployment to running, and on that write only.
+      await db().execute(sql`CREATE FUNCTION rt3_refuse_running() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`);
+      await db().execute(
+        sql`CREATE TRIGGER rt3_refuse_running BEFORE UPDATE ON app_stack_deployments FOR EACH ROW WHEN (NEW.status = 'running') EXECUTE FUNCTION rt3_refuse_running()`,
+      );
+      let err: unknown;
+      try {
+        err = await run(deploy);
+      } finally {
+        await db().execute(sql`DROP TRIGGER rt3_refuse_running ON app_stack_deployments`);
+        await db().execute(sql`DROP FUNCTION rt3_refuse_running()`);
+      }
+
+      expectFailure(err, "DOCKER_ENGINE_UNAVAILABLE");
+      expect(trace()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+      expect(await deploymentOf(deploy)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+      expect((await stepsOf(deploy))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+    });
+
     it("a failure at create still ends failed: the executor may have replaced a component", async () => {
       const { stackId, rev } = await stopped();
       const v2 = revision(stackId, [CACHE, WEB_V2]);
