@@ -126,22 +126,24 @@ export async function recoverAppStackOperation(
     destroyVolumes: (await listAppStackVolumes(db, scope)).some((volume) => volume.retentionPolicy === "destroy"),
   });
   // A create step still pending was never called: an upgrade or a rollback in doubt before it changed nothing, so what
-  // its request wrote is taken back. Once create has started, the executor may have replaced components.
-  const [create] =
-    (kind === "stack.upgrade" || kind === "stack.rollback") && !v.applied
-      ? await db
-          .select({ status: operationSteps.status })
-          .from(operationSteps)
-          .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "create")))
-      : [];
+  // its request wrote is taken back, and an application that was stopped stays stopped. Once create has started, the
+  // executor may have replaced components.
+  const [create] = deploys
+    ? await db
+        .select({ status: operationSteps.status })
+        .from(operationSteps)
+        .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "create")))
+    : [];
+  const untouched = create?.status === "pending";
   // Routes seen published keep the stored hash; else none is published. The observer republishes a stale route set
   // through a tracked operation.
   await settleAppStackOperation(db, op, deployment.id, {
     outcome: v.outcome,
     problem: v.problem,
-    stackStatus: v.stackStatus,
+    // A redeploy's plan matches the stopped containers, so the verdict reads them as applied and failed.
+    stackStatus: untouched && v.outcome === "failed" && deployment.replacedStatus === "stopped" ? "stopped" : v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
-    ...(create?.status === "pending" ? { restoreReplaced: true } : {}),
+    ...(untouched && !v.applied && (kind === "stack.upgrade" || kind === "stack.rollback") ? { restoreReplaced: true } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),
     ...(v.health.length > 0 ? { health: { observedAt: now, components: v.health } } : {}),
     failedStep: null,

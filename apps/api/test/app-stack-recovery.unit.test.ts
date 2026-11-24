@@ -509,6 +509,33 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
   });
 
+  it("(8c) a stopped application whose upgrade or redeploy is in doubt before create settles stopped (#129)", async () => {
+    const { stackId, rev } = await running();
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    expect((await stackOf(stackId)).status).toBe("stopped");
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("prepareAppStack", "ambiguous");
+    await parked(upgrade);
+    expect((await stackOf(stackId)).status).toBe("unknown");
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stepsOf(upgrade)).toMatchObject({ pull: "succeeded", prepare: "failed", create: "failed" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId, appliedRoutesHash: null });
+    expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+
+    // A deploy is not taken back, and its application stays stopped all the same.
+    const redeploy = await enqueue(stackId, "stack.deploy");
+    fake.failNext("pullAppStackImage", "ambiguous");
+    await parked(redeploy);
+    expect(await recover(redeploy)).toBe("settled");
+    await expectInterrupted(redeploy);
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId });
+  });
+
   it("(9) routes observed published keep the stored routes hash", async () => {
     const { stackId } = await running();
     const routesHash = (await stackOf(stackId)).appliedRoutesHash;
