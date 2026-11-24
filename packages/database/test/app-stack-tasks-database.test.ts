@@ -931,6 +931,53 @@ describe("@hosting-panel/database — tasks of applications", () => {
     });
   });
 
+  describe("a time that already has a run", () => {
+    const STACK = "stk_tk_ran";
+    const scope = { organizationId: orgA, stackId: STACK, taskKey: "cleanup" };
+    const T0 = at("2026-11-22T12:00:00.000Z");
+    const S1 = at("2026-11-23T03:00:00.000Z");
+    const S2 = at("2026-11-24T03:00:00.000Z");
+    const slot = (value: Date) => ({ stackId: STACK, taskKey: "cleanup", changedAt: T0, slot: value });
+
+    beforeAll(async () => {
+      await stack(STACK);
+      await setAppStackTaskScheduleTransactional(db(), { ...scope, schedule: { frequency: "daily", hourUtc: 3 }, changedBy: USER, now: T0 });
+    });
+
+    it("is served and not run again, with the note of an earlier refusal gone", async () => {
+      const first = await scheduled(STACK, "cleanup", S1, T0);
+      if (first.outcome !== "queued") throw new Error(first.outcome);
+      await settle(STACK);
+      // The served time was forgotten (it lay ahead of the clock) and the time was refused once before it came back.
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+      expect(await noteAppStackTaskSlotRefused(db(), { ...slot(S1), reason: "busy" })).toBe(true);
+
+      expect(await scheduled(STACK, "cleanup", S1, T0)).toEqual({ outcome: "stale" });
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null });
+      expect((await runsOf(STACK)).map((run) => run.id)).toEqual([first.run.id]);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(1);
+      // Served: the same time is not owed any more.
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S1), skipped: true })).toBe(false);
+    });
+
+    it("is told from another refusal of the database by the name of its index", async () => {
+      const [first] = await runsOf(STACK);
+      const refused = await enqueueAppStackTaskRunTransactional(db(), {
+        ...scope,
+        runId: first!.id,
+        componentKey: "app",
+        appliedRevisionId: `srev_${STACK}`,
+        request: { trigger: "schedule", slot: S2, changedAt: T0 },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(stateOf(refused)).toBe("23505");
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1 });
+      expect(await runsOf(STACK)).toHaveLength(1);
+    });
+  });
+
   describe("a run that waits for the lane of tasks", () => {
     // The lane of tasks takes one run at a time for the whole server: A, B and C each have a run queued, and C's run
     // waits behind the other two. Only a run that executes holds its application.

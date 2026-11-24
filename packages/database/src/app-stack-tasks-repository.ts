@@ -113,12 +113,28 @@ export type EnqueueAppStackTaskRunResult =
 
 /**
  * One transaction: replay, the application's row and lock, the operation, the run row and (for a schedule) the served
- * time. Keeps the last runs of the task and drops the older ones.
+ * time. Keeps the last runs of the task and drops the older ones. A time of a schedule that already has a run (it ran
+ * while the clock was ahead, and its served time was reset since) is served again without a second run: `stale`.
  */
 export async function enqueueAppStackTaskRunTransactional(
   db: HostingPanelDatabase,
   input: EnqueueAppStackTaskRunInput,
 ): Promise<EnqueueAppStackTaskRunResult> {
+  try {
+    return await enqueueInOneTransaction(db, input);
+  } catch (err) {
+    const request = input.request;
+    if (request.trigger !== "schedule" || !isUniqueViolationOf(err, "uq_app_stack_task_runs_slot")) throw err;
+    // The transaction is rolled back: the operation it queued is gone too. Written as the queued run would have.
+    await db
+      .update(appStackTaskSchedules)
+      .set({ servedSlotAt: request.slot, skippedSlotAt: null, skipReason: null })
+      .where(ofSlot({ stackId: input.stackId, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot }));
+    return { outcome: "stale" };
+  }
+}
+
+async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueAppStackTaskRunInput): Promise<EnqueueAppStackTaskRunResult> {
   const request = input.request;
   return db.transaction(async (tx) => {
     if (request.trigger === "manual") {
@@ -256,14 +272,16 @@ export type BeginAppStackTaskRunResult =
   /** The run is not a queued run of this operation any more, or its application is gone. */
   | { readonly outcome: "gone" };
 
-const isActiveLockTaken = (err: unknown): boolean => {
+/** A unique index refused the write (the driver's error may be nested in `cause`). */
+const isUniqueViolationOf = (err: unknown, index: string): boolean => {
   for (let current: unknown = err, depth = 0; current && typeof current === "object" && depth < 4; depth += 1) {
     const e = current as { code?: unknown; constraint?: unknown; message?: unknown; cause?: unknown };
-    if (e.code === "23505" && (e.constraint === "uq_operations_active_lock" || String(e.message).includes("uq_operations_active_lock"))) return true;
+    if (e.code === "23505" && (e.constraint === index || String(e.message).includes(index))) return true;
     current = e.cause;
   }
   return false;
 };
+const isActiveLockTaken = (err: unknown): boolean => isUniqueViolationOf(err, "uq_operations_active_lock");
 
 /**
  * A queued run begins: in one transaction its operation trades the lock it waited under for the application's lock and

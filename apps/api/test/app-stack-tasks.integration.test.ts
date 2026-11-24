@@ -515,6 +515,28 @@ describe("tasks of an application (ADR-0042)", () => {
       expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
       expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: nextHour, changedAt: now, skippedSlotAt: null });
     });
+
+    it("does not run again, nor write as skipped, a time that ran while the clock was ahead", async () => {
+      const stackId = await alone();
+      const now = new Date();
+      const slot = new Date((Math.floor(now.getTime() / HOUR) + 3) * HOUR);
+      const at = (minutes: number) => new Date(slot.getTime() + minutes * 60_000);
+
+      // The clock is three hours ahead: the time is queued and the run ends.
+      expect(await scheduler.tick(at(5))).toEqual({ ...NONE, queued: 1 });
+      await worker.processPendingOnce();
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot });
+      // The clock is set right: the served time lies ahead and is not trusted.
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: null, changedAt: now });
+      // Real time reaches the time. Its run exists: the time is served, no second run, no note, not even after its window.
+      expect(await scheduler.tick(at(1))).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot, skippedSlotAt: null, skipReason: null });
+      expect(await scheduler.tick(at(31))).toEqual(NONE);
+      expect((await runRows(stackId)).map((r) => [r.status, r.slotAt?.getTime()])).toEqual([["succeeded", slot.getTime()]]);
+      expect(taskCalls(stackId)).toHaveLength(1);
+      expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
+    });
   });
 
   it("never starts again a run whose answer was lost: it asks the executor how it went", async () => {
