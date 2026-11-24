@@ -944,7 +944,9 @@ async function main() {
       assert(same(made.components, [{ componentKey: "db", outcome: "replaced" }]), "the new version replaces the container", JSON.stringify(made));
       const fresh = await inspectOf(DB(stackId));
       assert(fresh.Id !== oldId && fresh.State.Running === false, "a new container, not started", `${String(fresh.Id !== oldId)} ${String(fresh.State.Running)}`);
-      assert(same((fresh.Mounts ?? []).map((mt) => mt.Name), [appStackVolumeName(stackId, "data")]), "on the same volume", JSON.stringify((fresh.Mounts ?? []).map((mt) => mt.Name)));
+      // The password files are mounts too (read-only binds, checked by `passwordFiles`): only the volumes are counted here.
+      const volumes = (fresh.Mounts ?? []).filter((mt) => mt.Type === "volume").map((mt) => mt.Name);
+      assert(same(volumes, [appStackVolumeName(stackId, "data")]), "on the same volume, and no other", JSON.stringify(volumes));
       const started = await adapter.startAppStackComponent(startReq(newest, "db", contents));
       assert(started.outcome === "started", "the new container starts on the data of version 1", JSON.stringify(started));
       await waitHealthy(stackId, ["db"], 180_000);
