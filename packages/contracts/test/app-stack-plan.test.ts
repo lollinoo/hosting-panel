@@ -123,6 +123,10 @@ describe("ApprovedStackPlanSchema: refine rules", () => {
     ["forbidden text in argv", (_, __, app) => void (app.argv = ["serve", "--socket=/run/docker.sock"]), ["components.1.argv.1"]],
     ["metadata endpoint in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "http://169.254.169.254/"), ["components.1.environment.0.value"]],
     ["control character in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "a\nb"), ["components.1.environment.0.value"]],
+    // ADR-0041: no value carries the mark a clean-up looks for (HP_TERMINAL_SESSION=, HP_TASK_RUN=, any HP_<NAME>=).
+    ["a terminal's mark in env", (_, __, app) => void ((app.environment[0] as { value: string }).value = "x HP_TERMINAL_SESSION=term_"), ["components.1.environment.0.value"]],
+    ["a platform variable name ending an env value", (_, __, app) => void ((app.environment[0] as { value: string }).value = "xHP_TASK"), ["components.1.environment.0.value"]],
+    ["a platform variable assignment in argv", (_, __, app) => void (app.argv = ["serve", "HP_HOME=/x"]), ["components.1.argv.1"]],
     ["unsorted expose", (_, __, app) => void (app.expose = [8081, 8080]), ["components.1.expose.1"]],
     ["expose over 16 in total", (_, cache, app) => void ((app.expose = ports(8080, 9)), (cache.expose = ports(6379, 9))), ["components"]],
     ["health port not exposed", (_, __, app) => void ((app.healthcheck as { port: number }).port = 9000), ["components.1.healthcheck.port"]],

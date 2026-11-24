@@ -432,7 +432,7 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string
     const itemPath = [...path, index];
     if (typeof item !== "string") return issues.add("ARGV_ITEM_NOT_STRING", itemPath, "Every command item must be a string: quote it.");
     if (item === "" || item.length > LIMITS.argvItemLength || appStackTextProblem(item) !== null) {
-      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints or URL credentials.`);
+      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints, URL credentials or a platform variable (HP_<NAME>=).`);
     }
     const scan = scanInterpolation(item);
     if (!scan.ok) return issues.add(scan.code, itemPath, scan.message);
@@ -518,9 +518,12 @@ function validateEnvValue(ctx: Context, name: string, value: unknown, entryPath:
   const tooLong = (): void => issues.add("ENV_VALUE_TOO_LONG", path, `The value could exceed ${LIMITS.envValueLength} characters once filled in.`);
   if (value.length > LIMITS.envValueLength) tooLong();
   const valueProblem = envValueProblem(value);
+  const textProblem = valueProblem === null ? appStackTextProblem(value) : null;
   if (valueProblem !== null) issues.add(valueProblem, path, VALUE_PROBLEM_MESSAGES[valueProblem]);
-  else if (appStackTextProblem(value) === "metadata_endpoint") {
+  else if (textProblem === "metadata_endpoint") {
     issues.add("ENV_VALUE_METADATA_ENDPOINT", path, "The value names a cloud metadata endpoint, which is never reachable from a stack.");
+  } else if (textProblem === "platform_variable") {
+    issues.add("ENV_VALUE_PLATFORM_VARIABLE", path, "The value holds a platform variable (HP_<NAME>= anywhere, or HP_<NAME> at its end), which the platform keeps for its own marks.");
   }
   const scan = scanInterpolation(value);
   if (!scan.ok) {

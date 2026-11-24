@@ -322,6 +322,15 @@ describe("AppWizard markup", () => {
     ]);
   });
 
+  it("Next refuses a private value that carries a platform variable assignment, and says why (ADR-0041)", () => {
+    const values = secretsRef({ admin_password: "pw HP_TERMINAL_SESSION=term_", api_token: "the HP_ prefix" });
+    const refused = wizard({ 1: "team-notes", 3: ["admin_password", "api_token"] }, { 0: values });
+    click(refused.tree, t.next);
+    expect(refused.sets).toEqual([[5, { "param:admin_password": t.secretReserved }]]);
+    for (const m of [en, itMsgs]) expect(m.apps.wizard.secretReserved).toContain("HP_");
+    expect(JSON.stringify(refused.sets)).not.toContain("term_");
+  });
+
   it("domains: labelled hostname and target per row, a named remove button, blank rows dropped on Next", () => {
     const rows = [
       { hostname: "notes.example.test", target: 1 },

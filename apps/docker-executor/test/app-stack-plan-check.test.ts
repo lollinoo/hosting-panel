@@ -182,6 +182,14 @@ describe("assertExecutableAppStackPlan", () => {
     ["9 components", () => rehash({ ...plan, volumes: [], ingress: [], components: Array.from({ length: 9 }, (_, i) => ({ ...web, key: `c${i}` })) }), "components"],
     ["a /tmp mount", () => withComponents(web, { ...worker, volumes: [{ volumeKey: "data", containerPath: "/tmp", readOnly: false }] }), "components.1.volumes.0.containerPath"],
     ["sh as argv[0]", () => withComponents(web, { ...worker, argv: ["sh", "-c", "worker"] }), "components.1.argv.0"],
+    // ADR-0041: the executor does not trust the API to keep a terminal's mark out of a component's environment.
+    [
+      "a terminal's mark in an env value",
+      () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "x HP_TERMINAL_SESSION=term_" }] }, worker),
+      "components.0.environment.0.value",
+    ],
+    ["an env value ending with HP_TASK", () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "xHP_TASK" }] }, worker), "components.0.environment.0.value"],
+    ["a platform assignment in argv", () => withComponents(web, { ...worker, argv: ["worker", "HP_HOME=/x"] }), "components.1.argv.1"],
   ])("A12: %s is refused before Docker", (_name, build, at) => {
     expect(refusal(check(build()))).toEqual({
       reason: "STACK_PLAN_INVALID",

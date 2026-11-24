@@ -299,6 +299,18 @@ describe("app API input schemas", () => {
     expect(SetAppStackSecretInputSchema.shape.value).toBe(AppStackSecretFileContentSchema.shape.content);
   });
 
+  it("a secret value never carries a platform variable assignment: an image may put the file's content in its environment", () => {
+    // ADR-0041: an entry script that reads X_FILE into X would give every process of the component a terminal's mark.
+    const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
+    for (const value of ["Zq9 HP_TERMINAL_SESSION=term_", "Zq9HP_TASK_RUN=srun_", "Zq9 SHP_X=1", "Zq9 HP_TERMINAL", "Zq9 HP_TASK\n"]) {
+      const refused = parse(value);
+      expect(refused.success, value).toBe(false);
+      expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
+      expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "app_secret", version: 1, content: value }).success, value).toBe(false);
+    }
+    for (const value of ["Zq9 hp_x=1", "Zq9 HP_ prefix", "Zq9 HP_=", "Zq9=HP=", "p4ss=w0rd_HP"]) expect(parse(value).success, value).toBe(true);
+  });
+
   it("template and stack names and descriptions refuse an unpaired surrogate, not a paired one", () => {
     for (const text of ["a\ud800", "\udc00a", "a\udc00\ud800b"]) {
       expect(UpdateAppTemplateInputSchema.safeParse({ name: text }).success, text).toBe(false);

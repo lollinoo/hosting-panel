@@ -2991,6 +2991,7 @@ x-hp-ingress:
       required: "Campo obbligatorio.",
       secretHint: "Valore riservato: non verrà mai mostrato, nemmeno a te.",
       secretKept: "Già inserito: lascia vuoto per mantenerlo.",
+      secretReserved: "Il valore non può contenere un testo come «HP_NOME=», né finire con «HP_NOME»: il pannello tiene quel testo per sé.",
       secretSet: "Impostato",
       secretUnset: "Non impostato",
       noDomains: "Questa applicazione non pubblica indirizzi web.",

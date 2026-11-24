@@ -233,6 +233,10 @@ describe("A7: interpolation and injection", () => {
     ["URL credentials in env", env("https://u:pw1234@db.example.invalid"), "ENV_VALUE_SECRET_LIKE", "services.app.environment[0].value"],
     ["metadata endpoint in env", env("http://169.254.169.254/latest"), "ENV_VALUE_METADATA_ENDPOINT", "services.app.environment[0].value"],
     ["docker socket in env", env("unix:///var/run/docker.sock"), "ENV_VALUE_DOCKER_SOCKET", "services.app.environment[0].value"],
+    // ADR-0041: a value never carries the mark a clean-up looks for, nor ends with a name the next entry would complete.
+    ["platform variable assignment in env", env("a HP_HOME=/x b"), "ENV_VALUE_PLATFORM_VARIABLE", "services.app.environment[0].value"],
+    ["platform variable name ending env", env("x HP_TERMINAL"), "ENV_VALUE_PLATFORM_VARIABLE", "services.app.environment[0].value"],
+    ["platform variable assignment in argv", command("--env=HP_TERMINAL_SESSION=term_"), "ARGV_ITEM_INVALID", "services.app.command[1]"],
     ["number in env", env(1), "ENV_VALUE_NOT_STRING", "services.app.environment[0].value"],
     ["4097-char env literal", env("x".repeat(4_097)), "ENV_VALUE_TOO_LONG", "services.app.environment[0].value"],
   ];

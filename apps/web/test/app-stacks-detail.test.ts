@@ -415,6 +415,18 @@ describe("private values", () => {
     expect(shown).toContain(en.apps.wizard.required);
   });
 
+  it("a value carrying a platform variable assignment is a field error that says why, and sends nothing (ADR-0041)", async () => {
+    for (const m of [en, itMsgs]) {
+      const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+      const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } | null };
+      ref.current = { value: "pw HP_TASK_RUN=srun_" };
+      await submit(out);
+      expect(keyedSend).not.toHaveBeenCalled();
+      expect(sets).toContainEqual([2, m.apps.wizard.secretReserved]);
+      expect(ref.current.value).toBe("pw HP_TASK_RUN=srun_"); // kept, so the customer can correct it
+    }
+  });
+
   it("a status refusal says the status in words and the field is still emptied", async () => {
     const { out, sets } = callHooks(AppStackSecrets, props, itMsgs, { 0: "ADMIN_PASSWORD" });
     const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } };

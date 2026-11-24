@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { APP_TEMPLATE_LIMITS } from "../src/app-templates/limits.js";
 import {
+  APP_STACK_PLATFORM_ASSIGNMENT_PATTERN,
   APP_STACK_SHELL_INTERPRETERS,
   AppStackHealthcheckSchema,
   appStackArgvExecutableProblem,
@@ -40,13 +41,37 @@ describe("appStackTextProblem", () => {
     ["\ud800", "control_character"],
     ["\udc00", "control_character"],
     ["emoji \ud83d\ude00 ok", null],
+    // ADR-0041: the clean-up of a terminal looks for its mark as text anywhere in an environment read without separators.
+    ["x HP_TERMINAL_SESSION=term_", "platform_variable"],
+    ["a HP_HOME=/x b", "platform_variable"],
+    ["HP_TASK_RUN=srun_", "platform_variable"],
+    ["SHP_X=1", "platform_variable"], // the clean-up's match has no left boundary: SHP_TERMINAL_SESSION=term_ is marked
+    ["value ends with HP_TERMINAL", "platform_variable"], // the next entry's name would complete it
+    ["xHP_", "platform_variable"],
+    ["hp_x=1", null],
+    ["HP_x=1", null],
+    ["the HP_ prefix", null],
+    ["HP_X y", null],
+    ["HP_=", null],
+    ["HP_=x", null],
+    ["HP_-X=1", null],
+    ["HP_X\u00a0=1", null],
   ] as const)("%j -> %s", (text, problem) => {
     expect(appStackTextProblem(text)).toBe(problem);
   });
 
+  it("the platform assignment pattern is the text rule's, also for what is not plan text (a secret's content)", () => {
+    for (const text of ["x HP_TERMINAL_SESSION=term_", "SHP_X=1", "ends HP_TASK", "ends HP_TASK\n\n"]) {
+      expect(APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.test(text), text).toBe(true);
+    }
+    for (const text of ["hp_x=1", "the HP_ prefix", "HP_=", "HP_X\ny", "HP_X\r"]) expect(APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.test(text), text).toBe(false);
+    expect(APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.flags).toBe(""); // no state between two tests
+  });
+
   it("runs in linear time on 64 KiB adversarial inputs", () => {
     const size = APP_TEMPLATE_LIMITS.sourceBytes;
-    for (const text of ["a".repeat(size), "://a".repeat(size / 4), `://a:${":".repeat(size)}`, `://${"a:".repeat(size / 2)}`, "169.254".repeat(size / 7)]) {
+    const platform = ["HP_".repeat(size / 3), "HP_A".repeat(size / 4), `${"HP_".repeat(size / 3)}x`, `${"HP_".repeat(size / 3)}=`, `${"=".repeat(size / 2)}HP_`];
+    for (const text of ["a".repeat(size), "://a".repeat(size / 4), `://a:${":".repeat(size)}`, `://${"a:".repeat(size / 2)}`, "169.254".repeat(size / 7), ...platform]) {
       const started = performance.now();
       appStackTextProblem(text);
       expect(performance.now() - started).toBeLessThan(200);

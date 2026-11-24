@@ -353,6 +353,50 @@ describe("rendered values", () => {
       { path: "parameters.left", code: "RENDERED_VALUE_FORBIDDEN", reason: "STACK_PARAMETER_INVALID" },
     ]);
   });
+
+  // ADR-0041: the clean-up of a terminal finds its mark as text in an environment it reads without separators.
+  const withEnv = (entries: string, ...parameters: string[]) =>
+    edit(withParameters(parameters.join("")), "        value: cache\n", `        value: cache\n${entries}`);
+
+  it("refuses a customer's text that would put a terminal's mark in an environment value", () => {
+    const source = withEnv('      - name: TITLE\n        value: "${title}"\n', stringParameter("title", "Notes"));
+    expect(planOf({ source, parameters: [{ key: "title", value: "My notes" }] }).components[1]?.environment).toContainEqual({ name: "TITLE", value: "My notes" });
+    for (const value of ["x HP_TERMINAL_SESSION=term_", "a HP_HOME=/x b", "x HP_TASK_RUN"]) {
+      expect(summary(issuesOf({ source, parameters: [{ key: "title", value }] })), value).toEqual([
+        { path: "parameters.title", code: "PARAM_VALUE_FORBIDDEN_CONTENT", reason: "STACK_PARAMETER_INVALID" },
+      ]);
+    }
+    for (const value of ["hp_x=1", "the HP_ prefix", "HP_="]) {
+      expect(planOf({ source, parameters: [{ key: "title", value }] }).components[1]?.environment, value).toContainEqual({ name: "TITLE", value });
+    }
+  });
+
+  it("refuses two customer values that would make the mark across two entries", () => {
+    // SERVER_NAME=fooHP_TERMINAL_ then SESSION=term_x reads as ...fooHP_TERMINAL_SESSION=term_x without separators.
+    const source = withEnv(
+      '      - name: SERVER_NAME\n        value: "${server}"\n      - name: SESSION\n        value: "${session}"\n',
+      stringParameter("server", "web"),
+      stringParameter("session", "short"),
+    );
+    const parameters = [
+      { key: "server", value: "fooHP_TERMINAL_" },
+      { key: "session", value: "term_x" },
+    ];
+    expect(summary(issuesOf({ source, parameters }))).toEqual([
+      { path: "parameters.server", code: "PARAM_VALUE_FORBIDDEN_CONTENT", reason: "STACK_PARAMETER_INVALID" },
+    ]);
+  });
+
+  it("refuses an env value that renders to a platform variable assignment from two harmless values", () => {
+    const source = withEnv('      - name: JOINED\n        value: "${left}${right}"\n', stringParameter("left", "a"), stringParameter("right", "b"));
+    const parameters = [
+      { key: "left", value: "a HP" },
+      { key: "right", value: "_X=1" },
+    ];
+    expect(summary(issuesOf({ source, parameters }))).toEqual([
+      { path: "parameters.left", code: "RENDERED_VALUE_FORBIDDEN", reason: "STACK_PARAMETER_INVALID" },
+    ]);
+  });
 });
 
 describe("limits and ids", () => {

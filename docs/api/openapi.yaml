@@ -13577,6 +13577,10 @@ components:
           minLength: 1
           maxLength: 16384
           writeOnly: true
+          description: >-
+            No control character other than tab and line breaks, no unpaired surrogate, and no text of a platform
+            variable assignment (`HP_` and capitals, digits or `_`, then `=`; or such a name at the end), which an
+            image could put in a component's environment (`ADR-0041`). Refused with `VALIDATION_ERROR`.
 
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"

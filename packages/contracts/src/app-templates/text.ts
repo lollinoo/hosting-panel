@@ -10,11 +10,20 @@ import {
 
 /** Pure, total rules; a result never echoes the text checked. */
 
-export type AppStackTextProblem = "control_character" | "docker_socket" | "metadata_endpoint" | "url_credentials";
+export type AppStackTextProblem = "control_character" | "docker_socket" | "metadata_endpoint" | "url_credentials" | "platform_variable";
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cs}]/u;
 const METADATA_ENDPOINTS = [/169\.254\./, /fd00:ec2::/i, /metadata\.google\.internal/i];
+
+/**
+ * The text of a platform variable assignment: "HP_", capitals, digits or "_", then "="; or such a name at the end (line
+ * breaks after it aside), where the next environment entry's "NAME=" would complete it. A clean-up that finds what a
+ * terminal session or a task run started looks for its mark ("HP_TERMINAL_SESSION=term_\u2026", "HP_TASK_RUN=srun_\u2026") as
+ * text in /proc/<pid>/environ read without its separators, with nothing that bounds it on the left (ADR-0041). The
+ * literal comes first and the rest is a lookbehind, so the test is linear on any input.
+ */
+export const APP_STACK_PLATFORM_ASSIGNMENT_PATTERN = /=(?<=HP_[A-Z0-9_]+=)|$(?<=HP_[A-Z0-9_]*\n*)/;
 
 /** First matching rule in the order of AppStackTextProblem, else null. */
 export function appStackTextProblem(text: string): AppStackTextProblem | null {
@@ -22,6 +31,7 @@ export function appStackTextProblem(text: string): AppStackTextProblem | null {
   if (/docker\.sock/i.test(text)) return "docker_socket";
   if (METADATA_ENDPOINTS.some((pattern) => pattern.test(text))) return "metadata_endpoint";
   if (/:\/\/[^/\s:@]+:[^/\s@]+@/.test(text)) return "url_credentials";
+  if (APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.test(text)) return "platform_variable";
   return null;
 }
 

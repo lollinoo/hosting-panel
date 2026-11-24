@@ -2963,6 +2963,7 @@ x-hp-ingress:
       required: "Required field.",
       secretHint: "Private value: it will never be shown, not even to you.",
       secretKept: "Already entered: leave empty to keep it.",
+      secretReserved: "The value cannot contain text such as «HP_NAME=», nor end with «HP_NAME»: the panel keeps that text for itself.",
       secretSet: "Set",
       secretUnset: "Not set",
       noDomains: "This application publishes no web address.",
