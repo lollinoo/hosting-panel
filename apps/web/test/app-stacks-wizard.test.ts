@@ -623,6 +623,21 @@ describe("AppWizard after the application is created", () => {
     expect(calls().map((c) => c.url)).toEqual([`${AT}/deploy`]);
     expect(sets).toContainEqual([6, en.apps.codes.RESOURCE_LOCKED]);
   });
+
+  it("the install request keeps its key after a lost reply or a 5xx and gets a new one after a refusal", async () => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [`${AT}/deploy`]: ["network", refusal(503, "UPSTREAM_UNAVAILABLE"), refusal(409, "RESOURCE_LOCKED"), accepted(202)] });
+    for (let i = 0; i < 4; i++) {
+      const { tree } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1", 9: ["admin_password", "api_token"] }, { 1: keys });
+      await click(tree, t.retry);
+    }
+    expect(calls().map((c) => c.url)).toEqual(Array(4).fill(`${AT}/deploy`));
+    const used = calls().map((c) => c.headers["Idempotency-Key"]);
+    expect(used[1]).toBe(used[0]);
+    expect(used[2]).toBe(used[0]);
+    expect(used[3]).not.toBe(used[0]);
+    expect(router.push).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("wizard page", () => {
