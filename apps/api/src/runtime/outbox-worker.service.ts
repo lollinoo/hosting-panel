@@ -43,6 +43,7 @@ import {
   updateOperationStepTransactional,
   type ClaimPendingOutboxFilter,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutionResult, DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import {
@@ -74,7 +75,7 @@ import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-appli
 import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 import { AppStackRuntime } from "../app-stacks/app-stack-runtime.js";
 import { AppStackTaskRuntime } from "../app-stacks/app-stack-task-runtime.js";
-import { RECOVERY_UNCONFIRMED_TEXT, RecoveryReadBound } from "./recovery-read-bound.js";
+import { RECOVERY_UNCONFIRMED_TEXT, RecoveryReadBound, closeUnconfirmedOperation } from "./recovery-read-bound.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -1186,12 +1187,24 @@ export class OutboxWorkerService {
           let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
           try {
             obs = await this.dockerExecutor.getObservedState(op.resourceId);
-          } catch {
-            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey.
-            // Not bounded (issue #183): a service row has no state that says "to be checked", so closing the operation
-            // would leave the service looking settled while nobody knows what it runs. It stays for break-glass unlock.
+          } catch (err) {
+            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey for the next pass, until a
+            // read that waiting does not cure has failed for the whole bound (issue #183). Then the operation is closed
+            // as not confirmed and its steps fail, nothing sent. As when the runtime is unavailable above, the service
+            // row keeps what the request wrote (wanted status, revision): the drift reconciler reads what runs, and
+            // with the lock released every action on the service is offered again.
+            const giveUp = this.recoveryReads.failed(op.id, err);
+            if (giveUp === null) continue;
+            const closed = await closeUnconfirmedOperation(db, op.id, giveUp, (tx) =>
+              this.#settleNonTerminalSteps(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT, tx),
+            );
+            if (!closed) continue;
+            this.recoveryReads.forget(op.id);
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT);
+            convergedFailed += 1;
             continue;
           }
+          this.recoveryReads.answered(op.id);
 
           const targetMatched =
             op.kind === "service.stop"
@@ -1434,8 +1447,8 @@ export class OutboxWorkerService {
     operationId: string,
     targetStatus: "succeeded" | "failed",
     message: string,
+    db: HostingPanelDatabase = this.dbClient.db,
   ): Promise<void> {
-    const db = this.dbClient.db;
     const steps = await db
       .select()
       .from(operationSteps)

@@ -810,19 +810,63 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect((await stackOf(stackId)).status).toBe("unknown");
   });
 
-  it("(16) #183: a delete in doubt is never closed this way: the application stays deleting and the page would offer nothing", async () => {
+  it("(16) #183: a delete whose status cannot be read for the whole bound ends delete_failed: only Delete is offered, and it ends well", async () => {
+    // The removal was done; only its answer was lost. An honest wait in between starts the count again.
+    const { stackId } = await running();
+    const del = await enqueue(stackId, "stack.delete");
+    fake.failNext("removeAppStack", "ambiguous");
+    await parked(del);
+    const reads = new RecoveryReadBound(() => clock.now());
+    const counted = { err: coded("INTERNAL_ERROR") as unknown };
+    const down = { err: coded("DOCKER_ENGINE_UNAVAILABLE") as unknown };
+    expect(await recoverBounded(del, flaky(counted), reads)).toBe("pending");
+    await clock.sleep(20 * MINUTE);
+    expect(await recoverBounded(del, flaky(down), reads)).toBe("pending");
+    await clock.sleep(20 * MINUTE);
+    expect(await recoverBounded(del, flaky(counted), reads)).toBe("pending");
+    await clock.sleep(29 * MINUTE);
+    expect(await recoverBounded(del, flaky(counted), reads)).toBe("pending");
+    expect((await opOf(del)).status).toBe("unknown");
+    expect((await stackOf(stackId)).status).toBe("deleting");
+    await clock.sleep(MINUTE);
+
+    expect(await recoverBounded(del, flaky(counted), reads)).toBe("unconfirmed");
+
+    expect(await opOf(del)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+    expect(await deploymentOf(del)).toMatchObject({ status: "failed", problem: "OPERATION_AMBIGUOUS" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "delete_failed", deletedAt: null, resourceQuotaId: QUOTA });
+    const audits = await unconfirmedAudits(del);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.details).toMatchObject({ kind: "stack.delete", minutesWaited: 30, failure: "error_code" });
+    expect(trace()).toEqual(Array.from({ length: 5 }, () => "getAppStackStatus"));
+
+    // The lock is free, and the only action is Delete again: the executor removes what is left (here nothing).
+    await expect(enqueue(stackId, "stack.start")).rejects.toMatchObject({ code: "INVALID_TRANSITION" });
+    const again = await enqueue(stackId, "stack.delete");
+    expect(await apply(again)).toBeUndefined();
+    expect(await opOf(again)).toMatchObject({ status: "succeeded" });
+    const deleted = await stackOf(stackId);
+    expect(deleted.status).toBe("deleted");
+    expect(deleted.deletedAt).not.toBeNull();
+  });
+
+  it("(17) #183: a delete whose status is read again settles from it and drops its count", async () => {
     const { stackId } = await running();
     const del = await enqueue(stackId, "stack.delete");
     fake.failNext("removeAppStack", "ambiguous");
     await parked(del);
     const reads = new RecoveryReadBound(() => clock.now());
     const fault = { err: coded("INTERNAL_ERROR") as unknown };
-    for (let pass = 0; pass < 6; pass += 1) {
-      expect(await recoverBounded(del, flaky(fault), reads)).toBe("pending");
-      await clock.sleep(30 * MINUTE);
-    }
-    expect((await opOf(del)).status).toBe("unknown");
-    expect((await stackOf(stackId)).status).toBe("deleting");
+    expect(await recoverBounded(del, flaky(fault), reads)).toBe("pending");
+    expect(reads.size).toBe(1);
+    await clock.sleep(29 * MINUTE);
+    fault.err = null;
+
+    expect(await recoverBounded(del, flaky(fault), reads)).toBe("settled");
+
+    expect(reads.size).toBe(0);
+    expect(await opOf(del)).toMatchObject({ status: "succeeded" });
+    expect((await stackOf(stackId)).status).toBe("deleted");
     expect(await unconfirmedAudits(del)).toHaveLength(0);
   });
 

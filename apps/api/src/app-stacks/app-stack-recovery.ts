@@ -90,15 +90,19 @@ export async function recoverAppStackOperation(
     observed = await port.getAppStackStatus(scope);
   } catch (err) {
     await parkAppStackOperationUnknown(db, op, deployment.id);
-    // A delete is never given up this way: its stack stays `deleting`, from which the page offers no action, so
-    // closing the operation would leave the customer nothing to check or do. It waits for a readable answer, or for
-    // the administrator (`hp-break-glass unlock`).
-    const giveUp = kind === "stack.delete" ? null : (reads?.failed(op.id, err) ?? null);
+    const giveUp = reads?.failed(op.id, err) ?? null;
     if (giveUp === null) return "pending";
-    // The application is left `unknown` (to be checked; every action is offered again) and its deployment failed
-    // with OPERATION_AMBIGUOUS. Nothing is sent: what the action did is not known, so nothing is undone or repeated.
+    // The deployment fails with OPERATION_AMBIGUOUS. Nothing is sent: what the action did is not known, so nothing is
+    // undone or repeated. The application is left `unknown` (to be checked; every action is offered again); a delete
+    // leaves it `delete_failed`, as when nothing can be read, whose only action is Delete again, and the executor's
+    // removal passes over what the first one already removed.
     const closed = await closeUnconfirmedOperation(db, op.id, giveUp, (tx) =>
-      writeAppStackSettlement(tx, op, deployment.id, { outcome: "failed", problem: "OPERATION_AMBIGUOUS", stackStatus: "unknown", failedStep: null }),
+      writeAppStackSettlement(tx, op, deployment.id, {
+        outcome: "failed",
+        problem: "OPERATION_AMBIGUOUS",
+        stackStatus: kind === "stack.delete" ? "delete_failed" : "unknown",
+        failedStep: null,
+      }),
     );
     return closed ? "unconfirmed" : "pending";
   }
