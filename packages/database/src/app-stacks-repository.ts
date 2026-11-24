@@ -328,6 +328,8 @@ async function enqueueDeployment(
     revisionId: string | null;
     /** The desired revision this request replaced with `revisionId`; null when it wrote none. */
     replacedRevisionId: string | null;
+    /** The stack status the request replaced; null for the first deploy of a create. */
+    replacedStatus: AppStackStatus | null;
     requestedByUserId: string | null;
     idempotencyKey: string;
     requestHash: string;
@@ -355,6 +357,7 @@ async function enqueueDeployment(
       operationId: operation.id,
       revisionId: input.revisionId,
       replacedRevisionId: input.replacedRevisionId,
+      replacedStatus: input.replacedStatus,
       status: "queued",
       startedAt: new Date(),
     })
@@ -462,6 +465,7 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       kind: "stack.deploy",
       revisionId: revision.id,
       replacedRevisionId: null,
+      replacedStatus: null,
       requestedByUserId: input.createdBy,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,
@@ -584,6 +588,7 @@ export async function enqueueAppStackOperationTransactional(
       kind: input.kind,
       revisionId,
       replacedRevisionId: revision ? stack.desiredRevisionId : null,
+      replacedStatus: stack.status,
       requestedByUserId: input.requestedByUserId,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,

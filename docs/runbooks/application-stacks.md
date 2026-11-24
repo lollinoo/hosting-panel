@@ -104,8 +104,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    An upgrade or a rollback that fails before its components are created (download, preparation) leaves the application
    as it was: the same version, settings, components and quota, the upgrade on offer again, and the failed attempt in
    the history. One that fails later leaves the stack `failed`: the page shows the version still installed and says
-   which one was not; **Reinstalla** tries that one again, the way back reinstalls the previous one. A start or a restart
-   refused before anything is touched keeps the status the containers show; the history names the reason.
+   which one was not; **Reinstalla** tries that one again, the way back reinstalls the previous one. A start of a stopped
+   application refused before anything is touched leaves it `stopped`; any other start or restart refused that way
+   takes the status the containers show; the history names the reason.
 
    **Reinstalla** (`stack.deploy`) recreates what differs from the plan; **Avvia** only starts components that exist.
    At API start, a stack left busy without an active operation becomes `failed` (`delete_failed` when it was deleting,

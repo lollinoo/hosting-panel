@@ -286,6 +286,7 @@ describe("row mappers", () => {
       startedAt: FRESH,
       endedAt: null,
       replacedRevisionId: null,
+      replacedStatus: null,
     };
     const dto = appStackDeploymentDto(row, "stack.deploy", 3);
     expect(dto).toEqual({

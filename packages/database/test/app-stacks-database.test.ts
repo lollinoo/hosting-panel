@@ -588,7 +588,7 @@ describe("0025 app_stacks migration", () => {
   });
 });
 
-describe("0032 the revision a deployment's request replaced", () => {
+describe("0032 the revision and the status a deployment's request replaced", () => {
   const M0032 = "0032_app_stack_deployment_replaced.sql";
   let pg: PGlite;
   const COLUMNS = `SELECT table_name, column_name, data_type, is_nullable, column_default
@@ -608,7 +608,7 @@ describe("0032 the revision a deployment's request replaced", () => {
     await pg.close();
   });
 
-  it("adds one nullable column and its composite foreign key, leaves the existing rows alone, and runs again unchanged", async () => {
+  it("adds two nullable columns, a composite foreign key and a status check, leaves the existing rows alone, and runs again unchanged", async () => {
     const colsBefore = await rows<Record<string, unknown>>(pg, COLUMNS);
     const consBefore = await rows<Record<string, unknown>>(pg, CONSTRAINTS);
     await pg.exec(read(M0032));
@@ -617,27 +617,36 @@ describe("0032 the revision a deployment's request replaced", () => {
     const text = (r: Record<string, unknown>) => JSON.stringify(r);
     expect(colsAfter.filter((c) => !colsBefore.map(text).includes(text(c)))).toEqual([
       { table_name: "app_stack_deployments", column_name: "replaced_revision_id", data_type: "text", is_nullable: "YES", column_default: null },
+      { table_name: "app_stack_deployments", column_name: "replaced_status", data_type: "text", is_nullable: "YES", column_default: null },
     ]);
     expect(colsBefore.filter((c) => !colsAfter.map(text).includes(text(c)))).toEqual([]);
     expect(consAfter.filter((c) => !consBefore.map(text).includes(text(c))).map((c) => c.name)).toEqual([
+      "app_stack_deployments_replaced_status_check",
       "fk_app_stack_deployments_replaced_revision",
     ]);
-    expect(await rows(pg, "SELECT id, replaced_revision_id FROM app_stack_deployments")).toEqual([{ id: "sdep_old", replaced_revision_id: null }]);
+    expect(await rows(pg, "SELECT id, replaced_revision_id, replaced_status FROM app_stack_deployments")).toEqual([
+      { id: "sdep_old", replaced_revision_id: null, replaced_status: null },
+    ]);
     await pg.exec(read(M0032));
     expect(await rows(pg, COLUMNS)).toEqual(colsAfter);
     expect(await rows(pg, CONSTRAINTS)).toEqual(consAfter);
   });
 
-  it("refuses a replaced revision of another stack and accepts its own", async () => {
-    await pg.exec("BEGIN");
-    try {
-      await expect(pg.exec(insert("app_stack_deployments", { replaced_revision_id: "'srev_b1'" }))).rejects.toThrow(
-        named("fk_app_stack_deployments_replaced_revision"),
-      );
-    } finally {
-      await pg.exec("ROLLBACK");
+  it("refuses a replaced revision of another stack and a status that does not exist, and accepts its own", async () => {
+    for (const [over, constraint] of [
+      [{ replaced_revision_id: "'srev_b1'" }, "fk_app_stack_deployments_replaced_revision"],
+      [{ replaced_status: "'paused'" }, "app_stack_deployments_replaced_status_check"],
+    ] as const) {
+      await pg.exec("BEGIN");
+      try {
+        await expect(pg.exec(insert("app_stack_deployments", over)), constraint).rejects.toThrow(named(constraint));
+      } finally {
+        await pg.exec("ROLLBACK");
+      }
     }
-    await pg.exec(insert("app_stack_deployments", { replaced_revision_id: "'srev_a1'" }));
-    expect(await rows(pg, "SELECT replaced_revision_id FROM app_stack_deployments WHERE id = 'sdep_p'")).toEqual([{ replaced_revision_id: "srev_a1" }]);
+    await pg.exec(insert("app_stack_deployments", { replaced_revision_id: "'srev_a1'", replaced_status: "'stopped'" }));
+    expect(await rows(pg, "SELECT replaced_revision_id, replaced_status FROM app_stack_deployments WHERE id = 'sdep_p'")).toEqual([
+      { replaced_revision_id: "srev_a1", replaced_status: "stopped" },
+    ]);
   });
 });

@@ -678,6 +678,35 @@ describe("AppStackRuntime (RT3)", () => {
       expect(await deploymentOf(start)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
     });
 
+    it("a start of a stopped application refused at validate leaves it stopped, with or without a reading; the operation fails with its reason", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      fake.calls.length = 0;
+
+      const start = await enqueue(stackId, "stack.start");
+      expectFailure(await run(start), "STACK_SECRET_MISSING");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+      expect(await deploymentOf(start)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await opOf(start.operation!.id)).status).toBe("failed");
+      expect((await stepsOf(start))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+
+      // The executor cannot be read: nothing was touched either, so it stays stopped.
+      fake.failNext("getAppStackStatus", "definite");
+      const again = await enqueue(stackId, "stack.start");
+      expectFailure(await run(again), "STACK_SECRET_MISSING");
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await deploymentOf(again)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
     it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {
       const { stackId } = await running();
       fake.failNext("stopAppStack", "definite");

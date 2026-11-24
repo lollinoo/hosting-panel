@@ -581,6 +581,8 @@ export const appStackDeployments = pgTable(
     endedAt: timestamp("ended_at", { withTimezone: true }),
     // 0032: the desired revision a request that wrote a new one replaced; null when it replaced none.
     replacedRevisionId: text("replaced_revision_id"),
+    // 0032: the stack status the request replaced; null for the first deploy of a create.
+    replacedStatus: text("replaced_status").$type<AppStackStatus>(),
   },
   (t) => [
     unique("uq_app_stack_deployments_operation").on(t.operationId),
