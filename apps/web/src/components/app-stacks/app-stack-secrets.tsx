@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { APP_STACK_PLATFORM_ASSIGNMENT_PATTERN, SetAppStackSecretInputSchema, type AppStackDetailDto } from "@hosting-panel/contracts";
+import { APP_STACK_PROCESS_MARK_PATTERN, SetAppStackSecretInputSchema, type AppStackDetailDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,7 +55,7 @@ export function AppStackSecrets({
     const value = inputRef.current?.value ?? "";
     if (!value) return setFieldError(m.apps.wizard.required);
     // The server refuses such a value with no reason a page can show: say it here (ADR-0041).
-    if (APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.test(value)) return setFieldError(m.apps.wizard.secretReserved);
+    if (APP_STACK_PROCESS_MARK_PATTERN.test(value)) return setFieldError(m.apps.wizard.valueReserved);
     setBusy(true);
     setFieldError(null);
     setError(null);

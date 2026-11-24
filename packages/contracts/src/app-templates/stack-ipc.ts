@@ -7,7 +7,7 @@ import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema, AppStac
 import { ApprovedStackPlanSchema } from "./plan.js";
 import { AppEntityIdSchema, AppForeignIdSchema } from "./stack-ids.js";
 import { MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
-import { APP_STACK_PLATFORM_ASSIGNMENT_PATTERN } from "./text.js";
+import { APP_STACK_PROCESS_MARK_PATTERN } from "./text.js";
 
 /** Chars of one secret file (= setAppStackSecretTransactional bound). */
 export const APP_STACK_SECRET_CONTENT_MAX_CHARS = 16_384;
@@ -62,7 +62,7 @@ export const AppStackSecretFileContentSchema = z
       .max(APP_STACK_SECRET_CONTENT_MAX_CHARS)
       .refine((v) => !SECRET_FORBIDDEN_CHARACTER.test(v), "Secret contains a control character or an unpaired surrogate")
       // An image's entry script may export the file as a variable (X_FILE -> X): the text rule of environment values.
-      .refine((v) => !APP_STACK_PLATFORM_ASSIGNMENT_PATTERN.test(v), "Secret contains the text of a platform variable assignment"),
+      .refine((v) => !APP_STACK_PROCESS_MARK_PATTERN.test(v), "Secret contains the mark of a platform feature"),
   })
   .strict();
 export type AppStackSecretFileContent = z.infer<typeof AppStackSecretFileContentSchema>;

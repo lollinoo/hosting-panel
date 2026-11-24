@@ -415,16 +415,29 @@ describe("private values", () => {
     expect(shown).toContain(en.apps.wizard.required);
   });
 
-  it("a value carrying a platform variable assignment is a field error that says why, and sends nothing (ADR-0041)", async () => {
+  it("a value carrying a platform process mark is a field error that says why, and sends nothing (ADR-0041)", async () => {
     for (const m of [en, itMsgs]) {
       const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
       const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } | null };
       ref.current = { value: "pw HP_TASK_RUN=srun_" };
       await submit(out);
       expect(keyedSend).not.toHaveBeenCalled();
-      expect(sets).toContainEqual([2, m.apps.wizard.secretReserved]);
+      expect(sets).toContainEqual([2, m.apps.wizard.valueReserved]);
       expect(ref.current.value).toBe("pw HP_TASK_RUN=srun_"); // kept, so the customer can correct it
     }
+  });
+
+  it("a configuration pasted as a private value keeps its PHP lines and is sent", async () => {
+    const dotenv = "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\nHP_HOME=/x\n";
+    const { out, sets } = callHooks(AppStackSecrets, props, en, { 0: "ADMIN_PASSWORD" });
+    (byId(out, "app-secret-value")!.props.ref as { current: unknown }).current = { value: dotenv };
+    keyedSend.mockResolvedValue({ ok: true, data: { data: { key: "ADMIN_PASSWORD", isSet: true, version: 3, setAt: NOW } } });
+    await submit(out);
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "secret:ADMIN_PASSWORD", "POST", `${BASE}/secrets`, {
+      parameterKey: "ADMIN_PASSWORD",
+      value: dotenv,
+    });
+    expect(sets).not.toContainEqual([2, en.apps.wizard.valueReserved]);
   });
 
   it("a status refusal says the status in words and the field is still emptied", async () => {

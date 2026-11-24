@@ -10,6 +10,7 @@ import {
   APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_PROCESS_MARKS,
   APP_TEMPLATE_CATEGORY_PATTERN,
   APP_TEMPLATE_ISSUE_REASON,
   APP_TEMPLATE_LIMITS as LIMITS,
@@ -419,6 +420,9 @@ function checkVariable(ctx: Context, name: string, path: TemplatePath): Paramete
   return null;
 }
 
+/** "HP_TERMINAL_SESSION=, HP_TASK_RUN=": the marks a value may not hold, as a message names them. */
+const PROCESS_MARKS_TEXT = APP_STACK_PROCESS_MARKS.map((mark) => `${mark}=`).join(", ");
+
 function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string[] | null {
   const { issues } = ctx;
   if (raw === undefined) return null;
@@ -432,7 +436,7 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string
     const itemPath = [...path, index];
     if (typeof item !== "string") return issues.add("ARGV_ITEM_NOT_STRING", itemPath, "Every command item must be a string: quote it.");
     if (item === "" || item.length > LIMITS.argvItemLength || appStackTextProblem(item) !== null) {
-      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints, URL credentials or a platform variable (HP_<NAME>=).`);
+      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints, URL credentials or a platform mark (${PROCESS_MARKS_TEXT}).`);
     }
     const scan = scanInterpolation(item);
     if (!scan.ok) return issues.add(scan.code, itemPath, scan.message);
@@ -522,8 +526,8 @@ function validateEnvValue(ctx: Context, name: string, value: unknown, entryPath:
   if (valueProblem !== null) issues.add(valueProblem, path, VALUE_PROBLEM_MESSAGES[valueProblem]);
   else if (textProblem === "metadata_endpoint") {
     issues.add("ENV_VALUE_METADATA_ENDPOINT", path, "The value names a cloud metadata endpoint, which is never reachable from a stack.");
-  } else if (textProblem === "platform_variable") {
-    issues.add("ENV_VALUE_PLATFORM_VARIABLE", path, "The value holds a platform variable (HP_<NAME>= anywhere, or HP_<NAME> at its end), which the platform keeps for its own marks.");
+  } else if (textProblem === "process_mark") {
+    issues.add("ENV_VALUE_PROCESS_MARK", path, `The value holds a mark the platform sets on its own programs (${PROCESS_MARKS_TEXT}).`);
   }
   const scan = scanInterpolation(value);
   if (!scan.ok) {

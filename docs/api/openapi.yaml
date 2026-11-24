@@ -13578,9 +13578,9 @@ components:
           maxLength: 16384
           writeOnly: true
           description: >-
-            No control character other than tab and line breaks, no unpaired surrogate, and no text of a platform
-            variable assignment (`HP_` and capitals, digits or `_`, then `=`; or such a name at the end), which an
-            image could put in a component's environment (`ADR-0041`). Refused with `VALIDATION_ERROR`.
+            No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+            process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
+            environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"
