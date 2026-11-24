@@ -52,9 +52,13 @@ export function keyToInput(
 
 const CODES = ["TOTP_INVALID", "ACCOUNT_LOCKED", "ACCOUNT_SETUP_INCOMPLETE", "VALIDATION_ERROR", "DOCKER_ENGINE_UNAVAILABLE", "NOT_FOUND"] as const;
 
+/** Where the shell runs: the container of a site, or of one component of an application (ADR-0041). */
+export type TerminalKind = "site" | "component";
+
 /** The fixed sentence for a refused terminal call; never built from the answer's text. */
-export function terminalErrorText(m: Messages, status: number, body: unknown): string {
-  const e = m.admin.terminal.errors;
+export function terminalErrorText(m: Messages, status: number, body: unknown, kind: TerminalKind = "site"): string {
+  // A component has its own sentence only where the site's one names the site.
+  const e = kind === "component" ? { ...m.admin.terminal.errors, ...m.admin.appStack.terminal.errors } : m.admin.terminal.errors;
   const err = (body as { error?: { code?: unknown; details?: Array<{ reason?: unknown }> } } | null)?.error;
   const code = err?.code;
   if (status === 401 && code !== "TOTP_INVALID") return e.signedOut;
@@ -67,7 +71,8 @@ export function terminalErrorText(m: Messages, status: number, body: unknown): s
   return known ? e[known] : e.generic;
 }
 
-export const endText = (m: Messages, reason: TerminalEndReason | "lost"): string => m.admin.terminal.ended[reason];
+export const endText = (m: Messages, reason: TerminalEndReason | "lost", kind: TerminalKind = "site"): string =>
+  (kind === "component" ? { ...m.admin.terminal.ended, ...m.admin.appStack.terminal.ended } : m.admin.terminal.ended)[reason];
 
 /** Long-polls the session's output until it ends, is refused, is lost or the signal aborts (null). */
 export async function runReadLoop(o: {

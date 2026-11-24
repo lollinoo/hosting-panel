@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { TerminalSessionDtoSchema, type TerminalSessionDto } from "@hosting-panel/contracts";
+import { AppTerminalSessionDtoSchema, TerminalSessionDtoSchema, type TerminalSessionDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,14 +42,28 @@ export function TerminalOutput({ text, label }: { text: TerminalText; label: str
 
 type Phase = "code" | "opening" | "open" | "ended";
 
-/** A plain-text shell on one site: code, opening, open, ended. */
-export function TerminalConsole({ siteId, csrfToken }: { siteId: string; csrfToken: string }) {
+/** One component of a customer's application, as the place of the shell instead of a site (ADR-0041). */
+export interface TerminalComponent {
+  readonly stackId: string;
+  readonly componentKey: string;
+}
+
+type TerminalConsoleProps = { csrfToken: string } & (
+  | { siteId: string; component?: undefined }
+  | { siteId?: undefined; component: TerminalComponent }
+);
+
+/** A plain-text shell on one site, or in one component of an application: code, opening, open, ended. */
+export function TerminalConsole({ siteId, component, csrfToken }: TerminalConsoleProps) {
   const m = useMessages();
   const t = m.admin.terminal;
+  const kind = component ? "component" : "site";
+  // What differs between the two is the address of the open call, its answer and a few sentences.
+  const about = component ? m.admin.appStack.terminal : t;
   const [phase, setPhase] = React.useState<Phase>("code");
   const [code, setCode] = React.useState("");
   const [notice, setNotice] = React.useState<string | null>(null);
-  const [session, setSession] = React.useState<TerminalSessionDto | null>(null);
+  const [session, setSession] = React.useState<Pick<TerminalSessionDto, "sessionId" | "expiresAt"> | null>(null);
   const [text, setText] = React.useState<TerminalText>(emptyText);
   const [line, setLine] = React.useState("");
   const [inputError, setInputError] = React.useState<string | null>(null);
@@ -100,12 +114,14 @@ export function TerminalConsole({ siteId, csrfToken }: { siteId: string; csrfTok
     const before = phase;
     setPhase("opening");
     setNotice(null);
-    const res = await fetch(`/api/admin/sites/${siteId}/terminal`, { method: "POST", headers, body: JSON.stringify({ code }) }).catch(() => null);
+    const address = component ? `/api/admin/app-stacks/${component.stackId}/components/${component.componentKey}/terminal` : `/api/admin/sites/${siteId}/terminal`;
+    const res = await fetch(address, { method: "POST", headers, body: JSON.stringify({ code }) }).catch(() => null);
     const body: unknown = await res?.json().catch(() => null);
     setCode("");
-    const parsed = res?.status === 201 ? TerminalSessionDtoSchema.safeParse((body as { data?: unknown } | null)?.data) : null;
+    const answer = component ? AppTerminalSessionDtoSchema : TerminalSessionDtoSchema;
+    const parsed = res?.status === 201 ? answer.safeParse((body as { data?: unknown } | null)?.data) : null;
     if (!parsed?.success) {
-      setNotice(terminalErrorText(m, res?.status ?? 0, body));
+      setNotice(terminalErrorText(m, res?.status ?? 0, body, kind));
       setPhase(before);
       return;
     }
@@ -129,7 +145,7 @@ export function TerminalConsole({ siteId, csrfToken }: { siteId: string; csrfTok
     // The server may still hold a session the page counts as lost: give it up there too.
     if ("reason" in ended && ended.reason === "lost") void leave();
     live.current = null;
-    end("reason" in ended ? endText(m, ended.reason) : terminalErrorText(m, ended.status, ended.body));
+    end("reason" in ended ? endText(m, ended.reason, kind) : terminalErrorText(m, ended.status, ended.body, kind));
   }
 
   // Writes go one after another so Ctrl-C never overtakes the line before it.
@@ -143,7 +159,7 @@ export function TerminalConsole({ siteId, csrfToken }: { siteId: string; csrfTok
       if (res?.status === 204) return setInputError(null);
       const body: unknown = await res?.json().catch(() => null);
       if (sentLine !== undefined) setLine((cur) => (cur === "" ? sentLine : cur));
-      setInputError(!res || res.status >= 500 ? t.writeFailed : res.status === 400 ? t.tooLong : terminalErrorText(m, res.status, body));
+      setInputError(!res || res.status >= 500 ? t.writeFailed : res.status === 400 ? t.tooLong : terminalErrorText(m, res.status, body, kind));
     });
   }
 
@@ -158,14 +174,14 @@ export function TerminalConsole({ siteId, csrfToken }: { siteId: string; csrfTok
 
   async function close() {
     await leave();
-    end(endText(m, "closed"));
+    end(endText(m, "closed", kind));
   }
 
   const showOutput = text.lines.length > 0 || text.current !== "" || phase === "open";
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">{t.intro}</p>
-      <p className="text-sm text-muted-foreground">{t.limits}</p>
+      <p className="text-sm text-muted-foreground">{about.intro}</p>
+      <p className="text-sm text-muted-foreground">{about.limits}</p>
       {notice && (
         <Alert variant="destructive" role="alert">
           <AlertDescription>{notice}</AlertDescription>

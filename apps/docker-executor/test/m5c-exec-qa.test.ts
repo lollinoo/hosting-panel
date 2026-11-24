@@ -351,7 +351,8 @@ describe("4. the limits hold when asked at the same moment (real adapter, mock d
     const results = await settled([1, 2, 3, 4, 5, 6].map((n) => client.openTerminal(openReq(n))));
     expect(results.filter((r) => r === "ok")).toHaveLength(4);
     expect(results.filter((r) => r === "QUOTA_EXCEEDED")).toHaveLength(2);
-    const live = await client.listTerminals();
+    // the list may also hold sessions of application components (ADR-0041); these are all sites'
+    const live = (await client.listTerminals()).filter((r) => "siteId" in r);
     expect(live).toHaveLength(4);
     // the shell of one of the four exits on its own: its place is free again
     const first = live[0]!;

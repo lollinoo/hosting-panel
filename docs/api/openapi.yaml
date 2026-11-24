@@ -5475,6 +5475,170 @@ paths:
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/app-stacks/{stackId}:
+    get:
+      tags: [App Stacks]
+      operationId: adminGetAppStack
+      summary: Show one customer's application and its components (server administrator only, read-only)
+      description: >-
+        The row of the list, the customer it belongs to and its components in the order of the customer's own
+        page, each with the health that page shows. Never carries a secret, a setting value, a volume or a plan.
+        A deleted application is 404. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminAppStackDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown or deleted application (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/app-stacks/{stackId}/components/{componentKey}/logs:
+    get:
+      tags: [App Stacks]
+      operationId: adminGetAppStackComponentLogs
+      summary: Read the last log lines of one component of a customer's application (server administrator only; audited as admin.app_stack.logs.read)
+      description: >-
+        The same lines the customer reads on their own page, with the same secret values masked: at most 500
+        (200 by default), read from the server on demand. Every read writes one `admin.app_stack.logs.read`
+        audit row (organisation = the customer the application belongs to) with the component and the number
+        of lines asked for; the lines themselves are never stored. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false, or when
+        the server's Docker executor cannot read application logs.
+      parameters:
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackComponentKeyParam"
+        - in: query
+          name: tail
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        "200":
+          description: The log lines, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackComponentLogsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown or deleted application, or unknown component (`NOT_FOUND`); writes no audit row
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Too many log reads at once (`RATE_LIMITED`); try again shortly
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The logs are not available right now (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/app-stacks/{stackId}/components/{componentKey}/terminal:
+    post:
+      tags: [Admin Terminal]
+      operationId: openAdminAppStackTerminal
+      summary: Open a text shell in one component of a customer's application (fresh authenticator code; audited as admin.terminal.open)
+      description: >-
+        The shell is `/bin/sh` in the component's own running container, as the user that container runs as:
+        the request names no user and no folder, so the shell has the capabilities, the mounts and the networks
+        the component has and no more. `TERM=dumb`; there is no terminal emulator, so full-screen programs do
+        not work. Every open needs a six-digit code from the caller's authenticator; a used code is refused
+        until the next one. A missing, wrong or used code, an account with no authenticator or a locked account
+        writes `admin.terminal.denied` (target = the application, organisation = its customer) and never
+        reaches the executor. Limits are shared with the terminals of sites: at most one session per component
+        and four on the server; a session ends by itself after 60 seconds with no read, or 30 minutes after it
+        opened (`expiresAt`), and when the application is stopped, changed or deleted. The open writes
+        `admin.terminal.open` and the end writes one `admin.terminal.close` with the component, the reason and
+        the duration in seconds. What is typed and what comes back is never stored. The session is then used
+        through `/v1/admin/terminal/{sessionId}/write`, `/read` and `/close`. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackComponentKeyParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalOpenInput"
+      responses:
+        "201":
+          description: The session is open
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppTerminalSessionDto"
+        "400":
+          description: >-
+            The code is missing or not six digits (`VALIDATION_ERROR`, "Enter the six-digit code from
+            your authenticator app."); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          description: >-
+            Not signed in, or the code is wrong or already used (`TOTP_INVALID`, "The code is wrong or
+            was already used. Wait for the next code and try again."); a wrong or used code writes the
+            denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Not a server administrator (`PERMISSION_DENIED`), or the account has no authenticator
+            (`ACCOUNT_SETUP_INCOMPLETE`); both write a denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown or deleted application, or unknown component (`NOT_FOUND`); no code is spent
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Refused (`RESOURCE_LOCKED`, `details[0].reason`): `site_changing` (the application is being
+            installed, started, stopped, updated or deleted, or has an operation running), `container_down`
+            (the application is a draft or stopped, or the component's container is gone), `site_busy` (a
+            session is already open in this component) or `server_full` (four sessions are open on the
+            server). The first two are answered before the code is checked, so they spend no code
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          description: Too many wrong codes (`ACCOUNT_LOCKED`, "Too many wrong codes. Wait 15 minutes and try again.")
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The runtime is disabled, the executor did not answer or it cannot open a terminal in a
+            component (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/app-templates:
     get:
       tags: [App Stacks]
@@ -13963,6 +14127,43 @@ components:
           type: boolean
           description: More than 200 applications exist
 
+    AdminAppStackDto:
+      type: object
+      required: [id, name, organizationId, organizationName, templateId, templateName, versionNumber, status, primaryHostname, components]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        name:
+          type: string
+        organizationId:
+          type: string
+        organizationName:
+          type: string
+        templateId:
+          $ref: "#/components/schemas/AppEntityId"
+        templateName:
+          type: string
+        versionNumber:
+          type: integer
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/AppStackStatus"
+        primaryHostname:
+          type: string
+          nullable: true
+          description: The first active web address by hostname, else the first one
+        components:
+          type: array
+          description: In the order of the customer's own page
+          items:
+            type: object
+            required: [key, health]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppStackKey"
+              health:
+                $ref: "#/components/schemas/AppStackComponentHealth"
+
     CustomerAppTemplateSummaryDto:
       type: object
       required: [id, name, description, category, versionId, versionNumber, componentCount, cpuMilli, memoryBytes, volumeCount, hasIngress]
@@ -14237,6 +14438,10 @@ components:
           minLength: 1
           maxLength: 16384
           writeOnly: true
+          description: >-
+            No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+            process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
+            environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"
@@ -16143,6 +16348,28 @@ components:
           type: string
         containerName:
           type: string
+        openedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: 30 minutes after `openedAt`; the session ends then
+
+    AppTerminalSessionDto:
+      type: object
+      additionalProperties: false
+      required: [sessionId, stackId, componentKey, containerName, openedAt, expiresAt]
+      properties:
+        sessionId:
+          type: string
+        stackId:
+          $ref: "#/components/schemas/AppEntityId"
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        containerName:
+          type: string
+          description: The name the panel derives for the component's container; never a Docker id
         openedAt:
           type: string
           format: date-time

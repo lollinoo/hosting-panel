@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TerminalSessionIdSchema } from "../admin-terminal.js";
 import type { ErrorCode } from "../errors.js";
 import { APP_STACK_IMAGE_LOOKUP_MAX_LENGTH, APP_STACK_IMAGE_LOOKUP_PATTERN, APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
 import {
@@ -13,6 +14,7 @@ import { ApprovedStackPlanSchema } from "./plan.js";
 import { AppEntityIdSchema, AppForeignIdSchema } from "./stack-ids.js";
 import { MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 import { AppStackHostRouteSchema } from "./stack-routing.js";
+import { APP_STACK_PROCESS_MARK_PATTERN } from "./text.js";
 
 /** Chars of one secret file (= setAppStackSecretTransactional bound). */
 export const APP_STACK_SECRET_CONTENT_MAX_CHARS = 16_384;
@@ -65,7 +67,9 @@ export const AppStackSecretFileContentSchema = z
       .string()
       .min(1)
       .max(APP_STACK_SECRET_CONTENT_MAX_CHARS)
-      .refine((v) => !SECRET_FORBIDDEN_CHARACTER.test(v), "Secret contains a control character or an unpaired surrogate"),
+      .refine((v) => !SECRET_FORBIDDEN_CHARACTER.test(v), "Secret contains a control character or an unpaired surrogate")
+      // An image's entry script may export the file as a variable (X_FILE -> X): the text rule of environment values.
+      .refine((v) => !APP_STACK_PROCESS_MARK_PATTERN.test(v), "Secret contains the mark of a platform feature"),
   })
   .strict();
 export type AppStackSecretFileContent = z.infer<typeof AppStackSecretFileContentSchema>;
@@ -134,6 +138,12 @@ export const AppStackLogsIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
   tail: z.number().int().min(1).max(APP_STACK_LOG_TAIL_MAX),
 }).strict();
 export type AppStackLogsIpcRequest = z.infer<typeof AppStackLogsIpcRequestSchema>;
+/** Opens a terminal in one component (ADR-0041): no container name, no user and no command; the executor derives and checks them. */
+export const AppStackTerminalOpenIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
+  sessionId: TerminalSessionIdSchema,
+  componentKey: AppStackKeySchema,
+}).strict();
+export type AppStackTerminalOpenIpcRequest = z.infer<typeof AppStackTerminalOpenIpcRequestSchema>;
 export const AppStackRouteWireSchema = z
   .object({
     componentKey: AppStackKeySchema,

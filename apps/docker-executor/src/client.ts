@@ -29,6 +29,7 @@ import {
   type AppStackPullIpcRequest,
   type AppStackPullIpcResult,
   type AppStackRefIpcRequest,
+  type AppStackTerminalOpenIpcRequest,
   type AppStackRemoveIpcRequest,
   type AppStackRemoveIpcResult,
   type AppStackRoutesIpcRequest,
@@ -102,6 +103,7 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  AppStackTerminalPort,
   StackExecutorPort,
   TerminalEnded,
   TerminalOpenRequest,
@@ -261,7 +263,7 @@ export interface SignedDockerExecutorIpcClientOptions {
 
 const handledIpcSockets = new WeakSet<object>();
 
-export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort {
+export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort {
   public readonly isRuntimeAvailable: boolean;
   private readonly signingKey: IpcSigningKey;
   private readonly transport: IpcTransportMode;
@@ -582,6 +584,12 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
 
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/open", req, TERMINAL_OPEN_TIMEOUT_MS);
+    return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
+  }
+
+  /** A terminal in one component of an application (ADR-0041); the session is then written, read and closed as a site's. */
+  public async openAppStackTerminal(req: AppStackTerminalOpenIpcRequest): Promise<TerminalOpenResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/terminal/open", req, TERMINAL_OPEN_TIMEOUT_MS);
     return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
   }
 

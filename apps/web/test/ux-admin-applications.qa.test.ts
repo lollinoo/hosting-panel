@@ -186,40 +186,49 @@ describe("a WordPress row keeps every action", () => {
   });
 });
 
-describe("stack rows never add a control", () => {
+describe("stack rows add one link, to the application's page (ADR-0041), and no other control", () => {
   const controls = (m: Messages) => [m.admin.sites.support.open, m.admin.sites.changeOwner, m.admin.sites.domains, m.admin.terminal.linkLabel, m.admin.sites.delete, m.admin.sites.retry, m.admin.sites.upgrade];
   const many = (n: number) => Array.from({ length: n }, (_, i) => stack(`s${i}`, { status: APP_STACK_STATUSES[i % APP_STACK_STATUSES.length]! }));
 
-  it.each([0, 1, 5, 40])("%i stacks leave the number of controls of the WordPress rows unchanged", (n) => {
+  const hrefs = (out: string) => [...out.matchAll(/<a [^>]*href="([^"]*)"/g)].map((x) => x[1]);
+
+  it.each([0, 1, 5, 40])("%i stacks leave the controls of the WordPress rows unchanged and add one link each", (n) => {
     const sites = [site("a"), site("b", { owner: null, status: "degraded" })];
     const base = table(en, sites);
     const out = table(en, sites, many(n));
     for (const label of controls(en)) expect(count(out, `>${label}<`)).toBe(count(base, `>${label}<`));
     expect(count(out, "<button")).toBe(count(base, "<button"));
-    expect(count(out, "<a ")).toBe(count(base, "<a "));
+    expect(count(out, "<a ")).toBe(count(base, "<a ") + n);
+    expect(count(out, `>${en.admin.appStack.linkLabel}<`)).toBe(n);
   });
 
-  it.each(APP_STACK_STATUSES.map((s) => [s] as const))("a stack in %s has neither button nor link", (status) => {
+  it.each(APP_STACK_STATUSES.map((s) => [s] as const))("a stack in %s has no button and one link, to its own page", (status) => {
     const row = rowOf(table(en, [site("a")], [stack("s1", { status })]), "notes-s1");
     expect(row).not.toContain("<button");
-    expect(row).not.toContain("<a ");
-    expect(row).not.toContain("href=");
-    expect(cells(row)[7]).toBe("");
+    expect(hrefs(row)).toEqual(["/admin/apps/s1"]);
+    expect(count(row, "href=")).toBe(1);
+    expect(cells(row)[7]).toBe(en.admin.appStack.linkLabel);
   });
 
-  it("no address of any stack leaks into a link or an action", () => {
+  it.each(locales)("the link is named after the application for a screen reader (%s)", (_l, m) => {
+    const row = rowOf(table(m, [], [stack("s1")]), "notes-s1");
+    expect(row).toContain(`aria-label="${format(m.admin.appStack.linkAria, { name: "notes-s1" })}"`);
+  });
+
+  it("a stack row links to no site page, no customer page and no terminal", () => {
     const out = table(en, [site("a")], many(3));
     for (const id of ["s0", "s1", "s2"]) {
       expect(out).not.toContain(`/admin/sites/${id}`);
       expect(out).not.toContain(`/sites/${id}`);
-      expect(out).not.toContain(`/apps/${id}`);
+      expect(out).not.toContain(`"/apps/${id}`);
+      expect(rowOf(out, `notes-${id}`)).not.toContain("/terminal");
     }
   });
 
-  it("stacks alone (no WordPress site) show no action at all", () => {
+  it("stacks alone (no WordPress site) show only the links to their own pages", () => {
     const out = table(en, [], many(3));
     expect(count(out, "<button")).toBe(0);
-    expect(count(out, "<a ")).toBe(0);
+    expect(hrefs(out)).toEqual(["/admin/apps/s0", "/admin/apps/s1", "/admin/apps/s2"]);
     for (const label of controls(en)) expect(out).not.toContain(`>${label}<`);
   });
 

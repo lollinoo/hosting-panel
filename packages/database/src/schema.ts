@@ -1476,13 +1476,16 @@ export const siteWordpressState = pgTable(
   ],
 );
 
-// No foreign keys: the row and its audit outlive the site and the user.
+// No foreign keys: the row and its audit outlive the site, the application and the user.
+// A session is on a site or on one component of an application, exactly one (CHECK of migration 0030).
 export const adminTerminalSessions = pgTable(
   "admin_terminal_sessions",
   {
     id: text("id").primaryKey(),
     userId: text("user_id").notNull(),
-    siteId: text("site_id").notNull(),
+    siteId: text("site_id"),
+    stackId: text("stack_id"),
+    componentKey: text("component_key"),
     organizationId: text("organization_id").notNull(),
     containerName: text("container_name").notNull(),
     openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),

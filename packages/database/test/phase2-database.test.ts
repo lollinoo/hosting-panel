@@ -80,6 +80,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0027_app_stack_backups.sql",
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
+      "0030_app_terminal_sessions.sql",
       "0032_app_stack_deployment_replaced.sql",
     ]);
     await seedPhase1Dataset(client.db);
@@ -121,6 +122,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0027_app_stack_backups.sql",
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
+      "0030_app_terminal_sessions.sql",
       "0032_app_stack_deployment_replaced.sql",
     ]);
 
@@ -158,6 +160,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0027_app_stack_backups.sql",
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
+      "0030_app_terminal_sessions.sql",
       "0032_app_stack_deployment_replaced.sql",
     ]);
 

@@ -14,6 +14,7 @@ import { AppStackLinksApplier } from "./app-stacks/app-stack-links-applier.js";
 import { AppStackLinksService } from "./app-stacks/app-stack-links.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
+import { AdminAppStacksService } from "./app-stacks/admin-app-stacks.service.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
 import {
   APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
@@ -272,6 +273,7 @@ export class AppModule {
         ComposeImportService,
         AppStacksService,
         AppStackBackupsService,
+        AdminAppStacksService,
         AppStackDomainsService,
         AppStackLinksApplier,
         AppStackLinksService,
