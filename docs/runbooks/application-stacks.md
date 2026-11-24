@@ -485,7 +485,8 @@ names only the key of a task, and the command is read from the template version 
    template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
    the images are local), `infra/linux/accept-app-stack-backups.mjs` (backup and restore of an application,
    `ADR-0038`), `infra/linux/accept-app-stack-databases.mjs` (the three built-in databases and their private
-   links) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
+   links, and the move of an application from version 1 of a database template to the newest) and
+   `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
    prefix is `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the
    «Lavoro periodico con archivio» template on the machine: its `preflight` step fails and names the image when it is
    missing). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
@@ -789,6 +790,16 @@ approval.
    the panel, disabled until the server administrator publishes them: «Database MariaDB» (`atpl_mariadb`), «Database
    PostgreSQL» (`atpl_postgresql`) and «Archivio Valkey» (`atpl_valkey`). A database has one component, one port and no
    web address: nothing outside the server reaches it, and no other application does until it is linked to it.
+   «Database MariaDB» has a second version (`atv_mariadb_2`) that keeps the database's temporary files on its data volume
+   instead of the 64 MB `/tmp`: a database installed before it stays on version 1 until its customer accepts the
+   upgrade (a short stop, the data stays), and the real-Docker check of procedure 9 proves the move.
+   «Archivio Valkey» has a second version (`atv_valkey_2`): the same 256 MB ceiling under a 512 MB limit instead of
+   384 MB, and a description that says a full store refuses new writes; its upgrade asks the customer 128 MiB more of
+   the memory maximum and is refused, the store untouched, when the customer is already at it.
+   «Database PostgreSQL» has a second version (`atv_postgresql_2`) that names the data directory (`PGDATA`,
+   `/var/lib/postgresql/18/docker`, the one version 1 already used), so an image of another major version would find the
+   data instead of starting an empty database beside them: PostgreSQL is then expected to refuse to start (not tested,
+   no image of another major version is allowed today); its upgrade keeps the data.
 2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
    presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
    applications of the same customer; an application has at most 4 databases and a database at most 8 applications.
