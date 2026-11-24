@@ -215,7 +215,8 @@ export function OperationTimeline({
             {format(t.errorTitle, { code: operation.errorCode || "INTERNAL_ERROR" })}
           </AlertTitle>
           <AlertDescription className="text-xs">
-            {operation.errorMessage || t.errorFallback}
+            {/* Closed because its outcome could not be read (issue #183): said in the page's language. */}
+            {operation.errorCode === "OPERATION_AMBIGUOUS" ? t.unconfirmed : operation.errorMessage || t.errorFallback}
           </AlertDescription>
         </Alert>
       )}

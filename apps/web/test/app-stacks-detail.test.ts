@@ -68,6 +68,7 @@ import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
 import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
+import { OperationTimeline } from "@/components/shared/operation-timeline";
 import { AppStackTasks, appStackTaskScheduleOf, appStackTaskScheduleText } from "@/components/app-stacks/app-stack-tasks";
 
 const NOW = "2026-11-22T10:00:00.000Z";
@@ -475,6 +476,18 @@ describe("sections", () => {
     expect(h).not.toContain("text-destructive");
     const failed = html(AppStackHistory({ deployments: [{ ...unknown[1]!, status: "failed" }], m, locale }), m);
     expect(failed).toMatch(new RegExp(`class="text-destructive">${m.apps.history.problemGeneric}<`));
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("history: an operation the panel closed because its outcome could not be read says to check before trying again (issue #183, %s)", (locale, m) => {
+    const closed: AppStackDeploymentDto = { ...DEPLOYMENTS[1]!, id: "sdep_5", status: "failed", problem: "OPERATION_AMBIGUOUS" };
+    const h = html(AppStackHistory({ deployments: [closed], m, locale }), m);
+    expect(h).toContain(m.apps.history.unconfirmed);
+    // Not the answer to a request ("reload the page shortly"): reloading changes nothing once the operation is closed.
+    expect(h).not.toContain(m.apps.codes.OPERATION_AMBIGUOUS);
+    expect(h).not.toContain(m.apps.history.problemGeneric);
   });
 });
 
@@ -1464,5 +1477,43 @@ describe("scheduled tasks", () => {
     expect(h).toContain(en.apps.progress.taskFailed);
     expect(h).not.toContain(en.apps.progress.failed);
     expect(h).not.toContain(en.apps.progress.title.deploy);
+  });
+
+  it.each([
+    ["stack.start", "failed"],
+    ["stack.backup", "backupFailed"],
+    ["stack.task", "taskFailed"],
+  ] as const)("an operation closed because its outcome could not be read says so, not that it failed (issue #183, %s)", (kind, usual) => {
+    for (const m of [en, itMsgs]) {
+      const operation = { id: "op_9", kind, status: "failed", errorCode: "OPERATION_AMBIGUOUS", steps: [] };
+      const h = html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, m, { 0: operation, 1: "done" }).out, m);
+      expect(h).toContain(m.apps.history.unconfirmed);
+      expect(h).not.toContain(m.apps.progress[usual]);
+      // Any other failure keeps its own words.
+      const other = { ...operation, errorCode: "INTERNAL_ERROR" };
+      expect(html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, m, { 0: other, 1: "done" }).out, m)).toContain(
+        m.apps.progress[usual],
+      );
+    }
+  });
+
+  it("the administrator's timeline says the same in the page's language, not the server's English text (issue #183)", () => {
+    for (const m of [en, itMsgs]) {
+      const operation = {
+        id: "op_9",
+        kind: "host.reconcile",
+        status: "failed",
+        errorCode: "OPERATION_AMBIGUOUS",
+        errorMessage: "server text",
+        resourceId: null,
+        steps: [],
+      };
+      const h = html(callHooks(OperationTimeline, { pollUrl: "/x", operationId: "op_9" }, m, { 0: operation }).out, m);
+      expect(h).toContain(m.admin.operation.unconfirmed);
+      expect(h).not.toContain("server text");
+      // Any other failure still shows the server's message.
+      const other = { ...operation, errorCode: "INTERNAL_ERROR" };
+      expect(html(callHooks(OperationTimeline, { pollUrl: "/x", operationId: "op_9" }, m, { 0: other }).out, m)).toContain("server text");
+    }
   });
 });
