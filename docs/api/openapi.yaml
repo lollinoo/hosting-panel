@@ -5518,9 +5518,10 @@ paths:
         The same lines the customer reads on their own page, with the same secret values masked: at most 500
         (200 by default), read from the server on demand. Every read writes one `admin.app_stack.logs.read`
         audit row (organisation = the customer the application belongs to) with the component and the number
-        of lines asked for; the lines themselves are never stored. Returns 422 NOT_SUPPORTED (reason
-        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false, or when
-        the server's Docker executor cannot read application logs.
+        of lines asked for; the lines themselves are never stored. A read that cannot be masked answers 503, as
+        on the customer's page (`ADR-0041` §4). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false, or when the server's Docker executor
+        cannot read application logs.
       parameters:
         - $ref: "#/components/parameters/AppStackIdParam"
         - $ref: "#/components/parameters/AppStackComponentKeyParam"
@@ -6254,9 +6255,11 @@ paths:
       operationId: getAppStackComponentLogs
       summary: Read the last log lines of one component of an application (app.read)
       description: >-
-        At most 500 lines (200 by default), read from the server on demand; secret values are masked. Returns 422
-        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
-        false, or when the server's Docker executor cannot read application logs.
+        At most 500 lines (200 by default), read from the server on demand; secret values are masked. A read that
+        cannot be masked answers 503: a secret file of the component is missing (after a host reboot, until
+        **Riavvia** writes it again), or a value stored before the 6-character minimum is shorter (`ADR-0041` §4).
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false, or when the server's Docker executor cannot read application logs.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6345,8 +6348,11 @@ paths:
         exactly like an unknown key, so the answer does not reveal that it exists. A secret the application reads from
         a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
         (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`) and nothing is stored. A
-        secret delivered as a file keeps the body's limit. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        secret delivered as a file keeps the body's limit. A value shorter than 6 characters, the shortest the log
+        reader masks, is refused (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_short`)
+        and is not echoed; a shorter value stored before still starts the application, but the log read of a
+        component that uses it answers 503. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -14587,11 +14593,11 @@ components:
           $ref: "#/components/schemas/AppTemplateParameterKey"
         value:
           type: string
-          minLength: 1
+          minLength: 6
           maxLength: 16384
           writeOnly: true
           description: >-
-            No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+            At least 6 characters (`value_too_short`). No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
             process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
             environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
