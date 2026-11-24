@@ -37,7 +37,7 @@ import {
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { Logger } from "@nestjs/common";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1423,7 +1423,20 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     expect((await newAudits()).filter((a) => a.action === "admin.site.backups.restore.finished")).toHaveLength(1);
   });
 
-  it("Recovery: stopped at start_site (ambiguous deploy) → the tail runs again, never a second restore or deploy", async () => {
+  // The answer lost on the way, or one the client cannot read after the deploy was sent (#182).
+  it.each([
+    ["a lost answer", () => Object.assign(new Error("lost answer"), { code: "OPERATION_AMBIGUOUS" })],
+    [
+      "an unreadable answer",
+      () =>
+        new ExecutorIpcClientError(
+          "Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON",
+          "OPERATION_AMBIGUOUS",
+          502,
+          true,
+        ),
+    ],
+  ])("Recovery: stopped at start_site (ambiguous deploy, %s) → the tail runs again, never a second restore or deploy", async (_, lost) => {
     sim.backupState.setSiteState(svcA, { filesVolume: false, container: false });
     let deployAttempts = 0;
     sim.onDeploy = async () => {
@@ -1432,7 +1445,7 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
       if (deployAttempts === 1) {
         // The container got created but the answer was lost.
         sim.backupState.setSiteState(svcA, { filesVolume: true, container: true });
-        throw Object.assign(new Error("lost answer"), { code: "OPERATION_AMBIGUOUS" });
+        throw lost();
       }
     };
     const backupId = await seedBackup(siteA, svcA);
