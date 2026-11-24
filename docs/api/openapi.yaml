@@ -6426,7 +6426,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: The two are already connected (`ALREADY_EXISTS`, `details[0].reason: link_exists`), or one of them is being changed or deleted (`RESOURCE_LOCKED`)
+          description: "The two are already connected (`ALREADY_EXISTS`, `details[0].reason: link_exists`), or one of them is being changed or deleted (`RESOURCE_LOCKED`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
