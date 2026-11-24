@@ -22,7 +22,7 @@ import {
   type AppStackTaskSkipReason,
   type ErrorCode,
 } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { AppStackRepositoryError } from "./app-stacks-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { ACTIVE_OPERATION_LOCK_STATUSES, enqueueOperationTransactional } from "./operations-repository.js";
@@ -113,12 +113,34 @@ export type EnqueueAppStackTaskRunResult =
 
 /**
  * One transaction: replay, the application's row and lock, the operation, the run row and (for a schedule) the served
- * time. Keeps the last runs of the task and drops the older ones.
+ * time. Keeps the last runs of the task and drops the older ones. A time of a schedule that already has a run (it ran
+ * while the clock was ahead, and its served time was reset since) is served again without a second run: `stale`. That is
+ * read before the application is checked for being busy, and the unique index of the time is the backstop of a race.
  */
 export async function enqueueAppStackTaskRunTransactional(
   db: HostingPanelDatabase,
   input: EnqueueAppStackTaskRunInput,
 ): Promise<EnqueueAppStackTaskRunResult> {
+  try {
+    return await enqueueInOneTransaction(db, input);
+  } catch (err) {
+    const request = input.request;
+    if (request.trigger !== "schedule" || !isUniqueViolationOf(err, "uq_app_stack_task_runs_slot")) throw err;
+    // Another writer made the run between the check and the insert. The transaction is rolled back: the operation it queued is gone too.
+    await serveAppStackTaskSlot(db, { stackId: input.stackId, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot });
+    return { outcome: "stale" };
+  }
+}
+
+/** A time of a schedule written as a queued run would have left it: served, and the note of an earlier refusal gone. */
+async function serveAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope): Promise<void> {
+  await db
+    .update(appStackTaskSchedules)
+    .set({ servedSlotAt: input.slot, skippedSlotAt: null, skipReason: null })
+    .where(ofSlot(input));
+}
+
+async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueAppStackTaskRunInput): Promise<EnqueueAppStackTaskRunResult> {
   const request = input.request;
   return db.transaction(async (tx) => {
     if (request.trigger === "manual") {
@@ -151,6 +173,16 @@ export async function enqueueAppStackTaskRunTransactional(
         .where(ofSlot({ stackId: stack.id, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot }))
         .for("update");
       if (!owed) return { outcome: "stale" };
+      // A time that already has a run is served, whatever the application is doing now: a run that still goes on is that
+      // very run holding it, and the time must not read as busy, nor be written as skipped when its window ends.
+      const [ran] = await tx
+        .select({ id: appStackTaskRuns.id })
+        .from(appStackTaskRuns)
+        .where(and(eq(appStackTaskRuns.stackId, stack.id), eq(appStackTaskRuns.taskKey, input.taskKey), eq(appStackTaskRuns.slotAt, request.slot)));
+      if (ran) {
+        await serveAppStackTaskSlot(tx, { stackId: stack.id, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot });
+        return { outcome: "stale" };
+      }
     }
 
     const lockKey = appStackTaskQueueKey(stack.id);
@@ -208,11 +240,15 @@ export async function enqueueAppStackTaskRunTransactional(
         .where(and(eq(appStackTaskSchedules.stackId, stack.id), eq(appStackTaskSchedules.taskKey, input.taskKey)));
     }
     // The last runs of the task stay; a run that has not ended is the newest one (the locks allow one at a time).
+    // A run requested later than `now` is set aside, neither dropped nor counted. That is a run of a clock that ran
+    // ahead, seen once the clock is right: while the clock still runs ahead its own runs are ordinary ones here and
+    // the oldest beyond `runsKept` leave, so a time whose run is gone can run once more (ADR-0042 A7).
+    const asOf = sql`${now.toISOString()}::timestamptz`;
     await tx.execute(sql`
       DELETE FROM app_stack_task_runs
-      WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND ended_at IS NOT NULL AND id IN (
+      WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND ended_at IS NOT NULL AND requested_at <= ${asOf} AND id IN (
         SELECT id FROM app_stack_task_runs
-        WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey}
+        WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND requested_at <= ${asOf}
         ORDER BY requested_at DESC, id DESC
         OFFSET ${APP_STACK_TASK_LIMITS.runsKept}
       )`);
@@ -256,14 +292,16 @@ export type BeginAppStackTaskRunResult =
   /** The run is not a queued run of this operation any more, or its application is gone. */
   | { readonly outcome: "gone" };
 
-const isActiveLockTaken = (err: unknown): boolean => {
+/** A unique index refused the write (the driver's error may be nested in `cause`). */
+const isUniqueViolationOf = (err: unknown, index: string): boolean => {
   for (let current: unknown = err, depth = 0; current && typeof current === "object" && depth < 4; depth += 1) {
     const e = current as { code?: unknown; constraint?: unknown; message?: unknown; cause?: unknown };
-    if (e.code === "23505" && (e.constraint === "uq_operations_active_lock" || String(e.message).includes("uq_operations_active_lock"))) return true;
+    if (e.code === "23505" && (e.constraint === index || String(e.message).includes(index))) return true;
     current = e.cause;
   }
   return false;
 };
+const isActiveLockTaken = (err: unknown): boolean => isUniqueViolationOf(err, "uq_operations_active_lock");
 
 /**
  * A queued run begins: in one transaction its operation trades the lock it waited under for the application's lock and
@@ -468,6 +506,32 @@ export function listAppStackTaskSchedulesOfLiveStacks(db: DatabaseExecutor): Pro
     .orderBy(asc(appStackTaskSchedules.stackId), asc(appStackTaskSchedules.taskKey));
 }
 
+/**
+ * A schedule whose served time, change time or skip note is later than `now` (plus the tolerance of one pass: the clock
+ * was read before this runs, and a schedule saved since is a moment ahead of it) was written by a clock that ran ahead
+ * (the clock is the API's, and it has been set right): such a time would hide every time owed until real time passes it.
+ * The schedule starts clean at `now`, like a changed one: the times before it are not owed. A skip note that is later
+ * than `now` goes with it; an earlier one stays. Returns how many schedules were reset.
+ */
+export async function repairAppStackTaskSchedulesAheadOfClock(db: DatabaseExecutor, now: Date): Promise<number> {
+  const limit = new Date(now.getTime() + APP_STACK_TASK_LIMITS.clockAheadToleranceMs);
+  const noteAhead = sql`${appStackTaskSchedules.skippedSlotAt} > ${now.toISOString()}::timestamptz`;
+  const repaired = await db
+    .update(appStackTaskSchedules)
+    .set({
+      servedSlotAt: null,
+      changedAt: now,
+      // The right side of a SET reads the row as it was: both columns of the note are decided by the same old note.
+      skippedSlotAt: sql`CASE WHEN ${noteAhead} THEN NULL ELSE ${appStackTaskSchedules.skippedSlotAt} END`,
+      skipReason: sql`CASE WHEN ${noteAhead} THEN NULL ELSE ${appStackTaskSchedules.skipReason} END`,
+    })
+    .where(
+      or(gt(appStackTaskSchedules.servedSlotAt, limit), gt(appStackTaskSchedules.changedAt, limit), gt(appStackTaskSchedules.skippedSlotAt, limit)),
+    )
+    .returning({ taskKey: appStackTaskSchedules.taskKey });
+  return repaired.length;
+}
+
 /** A time that could not be queued now: the reason is kept and the time stays owed (it is tried again). */
 export async function noteAppStackTaskSlotRefused(
   db: DatabaseExecutor,
@@ -484,9 +548,23 @@ export async function noteAppStackTaskSlotRefused(
 /**
  * Closes a time without a run: it is not owed any more. `skipped` writes it as skipped, with the reason already noted
  * for that time or `missed` when there is none; without it the time passes with no note (the installed version does not
- * have the task).
+ * have the task). A time that already has a run (it ran while the clock was ahead) is never written as skipped: it is
+ * served, with no note, in the same transaction, and the answer is false, as for a time that is not owed any more.
  */
 export async function closeAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope & { readonly skipped: boolean }): Promise<boolean> {
+  if (!input.skipped) return writeClosedAppStackTaskSlot(db, input);
+  return db.transaction(async (tx) => {
+    const [ran] = await tx
+      .select({ id: appStackTaskRuns.id })
+      .from(appStackTaskRuns)
+      .where(and(eq(appStackTaskRuns.stackId, input.stackId), eq(appStackTaskRuns.taskKey, input.taskKey), eq(appStackTaskRuns.slotAt, input.slot)));
+    if (!ran) return writeClosedAppStackTaskSlot(tx, input);
+    await serveAppStackTaskSlot(tx, input);
+    return false;
+  });
+}
+
+async function writeClosedAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope & { readonly skipped: boolean }): Promise<boolean> {
   const slot = sql`${input.slot.toISOString()}::timestamptz`;
   const updated = await db
     .update(appStackTaskSchedules)

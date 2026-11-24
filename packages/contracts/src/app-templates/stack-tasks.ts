@@ -41,6 +41,8 @@ export const APP_STACK_TASK_LIMITS = Object.freeze({
   runsKept: 20,
   /** How long after its time a scheduled run is still tried while the application is busy or not running. */
   retryWindowMs: 30 * 60_000,
+  /** How far ahead of the clock of a pass a stored time of a schedule may lie before it is taken for a clock that ran ahead (one pass). */
+  clockAheadToleranceMs: 60_000,
 });
 
 /** Minted by the API as `srun_<24 hex>`; strict, because the executor passes it to the clean-up script. */

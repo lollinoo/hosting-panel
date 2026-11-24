@@ -13,6 +13,7 @@ import {
 } from "@hosting-panel/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  and,
   appStackTaskRuns,
   appStackTaskScheduleOf,
   beginAppStackTaskRunTransactional,
@@ -39,6 +40,7 @@ import {
   outboxEvents,
   platformInstallations,
   reopenAppStackTaskSlot,
+  repairAppStackTaskSchedulesAheadOfClock,
   repairOrphanedAppStackTaskRunsTransactional,
   setAppStackTaskScheduleTransactional,
   sql,
@@ -106,7 +108,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
     });
   }
 
-  function scheduled(stackId: string, taskKey: string, slot: Date, changedAt: Date): Promise<EnqueueAppStackTaskRunResult> {
+  function scheduled(stackId: string, taskKey: string, slot: Date, changedAt: Date, now?: Date): Promise<EnqueueAppStackTaskRunResult> {
     return enqueueAppStackTaskRunTransactional(db(), {
       organizationId: orgA,
       stackId,
@@ -115,6 +117,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
       componentKey: "app",
       appliedRevisionId: `srev_${stackId}`,
       request: { trigger: "schedule", slot, changedAt },
+      ...(now === undefined ? {} : { now }),
     });
   }
 
@@ -882,6 +885,315 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T12:00:00Z"), row!.changedAt)).toMatchObject({ outcome: "queued" });
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T13:00:00Z"), at("2026-11-23T10:00:00.124Z"))).toEqual({ outcome: "stale" });
       await settle("stk_tk_micro");
+    });
+  });
+
+  describe("a schedule written while the clock ran ahead", () => {
+    const STACK = "stk_tk_ahead";
+    // Later than the times the other cases of this file store: the repair looks at every schedule of the database.
+    const NOW = at("2030-01-10T10:20:00.000Z");
+    const AHEAD = at("2030-01-12T09:00:00.000Z");
+    const rowOf = async (taskKey: string) => (await scheduleOf(STACK, taskKey))!;
+    /** A schedule set at `changedAt` whose latest served time is `served`. */
+    async function written(taskKey: string, changedAt: Date, served: Date | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: changedAt,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    beforeAll(async () => {
+      await stack(STACK);
+      await written("both", AHEAD, AHEAD);
+      await written("changed", AHEAD, at("2030-01-09T10:00:00.000Z"));
+      await written("served", at("2030-01-09T10:20:00.000Z"), AHEAD);
+      await written("past", at("2030-01-07T10:20:00.000Z"), at("2030-01-10T10:00:00.000Z"));
+      await written("now", NOW, NOW);
+    });
+
+    it("resets only the schedules whose stored time is later than the clock", async () => {
+      const [past, now] = [await rowOf("past"), await rowOf("now")];
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), NOW)).toBe(3);
+      for (const key of ["both", "changed", "served"]) {
+        expect(await rowOf(key), key).toMatchObject({ servedSlotAt: null, changedAt: NOW, skippedSlotAt: null, skipReason: null });
+      }
+      // A time in the past, or exactly now, is trusted.
+      expect(await rowOf("past")).toEqual(past);
+      expect(await rowOf("now")).toEqual(now);
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), NOW)).toBe(0);
+    });
+  });
+
+  describe("a time ahead of the clock by less than a minute", () => {
+    const STACK = "stk_tk_tolerance";
+    // Later than the times of the cases above, so that the repair reads only this describe's rows as ahead.
+    const NOW = at("2032-01-10T10:20:00.000Z");
+    const after = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+    const rowOf = async (taskKey: string) => (await scheduleOf(STACK, taskKey))!;
+    async function written(taskKey: string, changedAt: Date, served: Date | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: changedAt,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    it("is left alone, because the clock read before the repair may be a moment behind a schedule saved since", async () => {
+      await stack(STACK);
+      await written("changed30", after(30), null);
+      await written("served30", at("2032-01-09T10:20:00.000Z"), after(30));
+      await written("edge", after(60), after(60));
+      await written("changed61", after(61), null);
+      await written("served61", at("2032-01-09T10:20:00.000Z"), after(61));
+      const kept = [await rowOf("changed30"), await rowOf("served30"), await rowOf("edge")];
+
+      await repairAppStackTaskSchedulesAheadOfClock(db(), NOW);
+      expect([await rowOf("changed30"), await rowOf("served30"), await rowOf("edge")]).toEqual(kept);
+      // A minute and a millisecond ahead is a clock that ran ahead.
+      expect(await rowOf("changed61")).toMatchObject({ servedSlotAt: null, changedAt: NOW });
+      expect(await rowOf("served61")).toMatchObject({ servedSlotAt: null, changedAt: NOW });
+    });
+  });
+
+  describe("a time whose run is still running", () => {
+    const STACK = "stk_tk_ranbusy";
+    const REAL = at("2033-01-10T10:20:00.000Z");
+    const SLOT = at("2033-01-12T09:00:00.000Z");
+    const NEXT = at("2033-01-12T10:00:00.000Z");
+    const CHANGED_AHEAD = at("2033-01-12T08:30:00.000Z");
+
+    it("is served and not written as refused as busy: the application is held by that very run", async () => {
+      await stack(STACK);
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey: "cleanup",
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: CHANGED_AHEAD,
+      });
+      // The clock ran ahead: the time was queued, and its run goes on while the clock is set right and real time reaches the time.
+      const first = await scheduled(STACK, "cleanup", SLOT, CHANGED_AHEAD, new Date(SLOT.getTime() + 60_000));
+      if (first.outcome !== "queued") throw new Error(first.outcome);
+      expect(await startAppStackTaskRun(db(), { runId: first.run.id, startedAt: new Date(SLOT.getTime() + 61_000) })).toBe(true);
+      await repairAppStackTaskSchedulesAheadOfClock(db(), REAL);
+      const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
+      expect(changedAt).toEqual(REAL);
+
+      expect(await scheduled(STACK, "cleanup", SLOT, changedAt)).toEqual({ outcome: "stale" });
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: SLOT, skippedSlotAt: null, skipReason: null });
+      expect(await runsOf(STACK)).toHaveLength(1);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(1);
+      // The next time has no run: while that run goes on the application is busy, as before.
+      expect(await scheduled(STACK, "cleanup", NEXT, changedAt)).toMatchObject({ outcome: "refused", reason: "busy" });
+      await settle(STACK);
+    });
+  });
+
+  describe("a skip note ahead of the clock", () => {
+    const STACK = "stk_tk_notes";
+    const NOW = at("2032-01-10T10:20:00.000Z");
+    const PAST = at("2032-01-09T10:20:00.000Z");
+    /** A schedule set at `changedAt` and served at `served`, with the note of a refusal (`note`: its time and reason). */
+    async function written(taskKey: string, served: Date | null, note: { slot: Date; reason: "busy" | "missed" } | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: PAST,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served, skippedSlotAt: note?.slot ?? null, skipReason: note?.reason ?? null })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    it("goes with the repair, and a note that is not ahead stays on a schedule that is repaired", async () => {
+      await stack(STACK);
+      // The note of a time the clock which ran ahead refused, on a schedule that is otherwise in the past.
+      await written("noteahead", at("2032-01-10T10:00:00.000Z"), { slot: at("2032-01-12T09:00:00.000Z"), reason: "busy" });
+      // A repaired schedule keeps the note of yesterday.
+      await written("yesterday", at("2032-01-12T09:00:00.000Z"), { slot: at("2032-01-09T09:00:00.000Z"), reason: "missed" });
+      // A note ahead by less than a minute is not taken for a clock that ran ahead.
+      await written("small", null, { slot: new Date(NOW.getTime() + 30_000), reason: "busy" });
+      const small = (await scheduleOf(STACK, "small"))!;
+
+      await repairAppStackTaskSchedulesAheadOfClock(db(), NOW);
+      expect(await scheduleOf(STACK, "noteahead")).toMatchObject({ servedSlotAt: null, changedAt: NOW, skippedSlotAt: null, skipReason: null });
+      expect(await scheduleOf(STACK, "yesterday")).toMatchObject({
+        servedSlotAt: null,
+        changedAt: NOW,
+        skippedSlotAt: at("2032-01-09T09:00:00.000Z"),
+        skipReason: "missed",
+      });
+      expect(await scheduleOf(STACK, "small")).toEqual(small);
+    });
+  });
+
+  describe("a time that already has a run", () => {
+    const STACK = "stk_tk_ran";
+    const scope = { organizationId: orgA, stackId: STACK, taskKey: "cleanup" };
+    const T0 = at("2026-11-22T12:00:00.000Z");
+    const S1 = at("2026-11-23T03:00:00.000Z");
+    const S2 = at("2026-11-24T03:00:00.000Z");
+    const slot = (value: Date) => ({ stackId: STACK, taskKey: "cleanup", changedAt: T0, slot: value });
+
+    beforeAll(async () => {
+      await stack(STACK);
+      await setAppStackTaskScheduleTransactional(db(), { ...scope, schedule: { frequency: "daily", hourUtc: 3 }, changedBy: USER, now: T0 });
+    });
+
+    it("is served and not run again, with the note of an earlier refusal gone", async () => {
+      const first = await scheduled(STACK, "cleanup", S1, T0);
+      if (first.outcome !== "queued") throw new Error(first.outcome);
+      await settle(STACK);
+      // The served time was forgotten (it lay ahead of the clock) and the time was refused once before it came back.
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+      expect(await noteAppStackTaskSlotRefused(db(), { ...slot(S1), reason: "busy" })).toBe(true);
+
+      expect(await scheduled(STACK, "cleanup", S1, T0)).toEqual({ outcome: "stale" });
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null });
+      expect((await runsOf(STACK)).map((run) => run.id)).toEqual([first.run.id]);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(1);
+      // Served: the same time is not owed any more.
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S1), skipped: true })).toBe(false);
+    });
+
+    it("is served, not closed as skipped, when its window has passed", async () => {
+      // The time of the first test: its run is still there, and its served time was forgotten again.
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S1), skipped: true })).toBe(false);
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null });
+      // A time with no run is written as missed, as before.
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S2), skipped: true })).toBe(true);
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S2, skippedSlotAt: S2, skipReason: "missed" });
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+    });
+
+    it("is told from another refusal of the database by the name of its index", async () => {
+      const [first] = await runsOf(STACK);
+      const refused = await enqueueAppStackTaskRunTransactional(db(), {
+        ...scope,
+        runId: first!.id,
+        componentKey: "app",
+        appliedRevisionId: `srev_${STACK}`,
+        request: { trigger: "schedule", slot: S2, changedAt: T0 },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(stateOf(refused)).toBe("23505");
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1 });
+      expect(await runsOf(STACK)).toHaveLength(1);
+    });
+  });
+
+  describe("the runs a clock that ran ahead wrote", () => {
+    // Dates later than the ones of the cases above: the repair of the schedules looks at every schedule of the database.
+    const REAL = at("2031-01-10T10:20:00.000Z");
+    const HOUR_MS = 3_600_000;
+    /** The hour `index` after the first time that the clock which ran ahead served. */
+    const hourOf = (index: number) => new Date(Date.parse("2031-01-12T09:00:00.000Z") + index * HOUR_MS);
+    const CHANGED_AHEAD = at("2031-01-12T08:30:00.000Z");
+    const aheadScope = (stackId: string) => ({ organizationId: orgA, stackId, taskKey: "cleanup" });
+
+    /** Ends a run as the runtime does (`finishAppStackTaskRun`) and its operation as the worker does: no row is left open. */
+    async function ended(stackId: string, runId: string, endedAt: Date): Promise<void> {
+      expect(await startAppStackTaskRun(db(), { runId, startedAt: endedAt })).toBe(true);
+      expect(
+        await finishAppStackTaskRun(db(), { runId, status: "succeeded", problem: null, exitCode: 0, startedAt: null, endedAt, output: "", outputTruncated: false }),
+      ).toBe(true);
+      await settle(stackId);
+    }
+
+    /**
+     * `count` hourly runs of one task made one after the other by the clock that ran ahead, each stamped a minute after
+     * its hour and ended before the next is queued. The clean-up that follows each one reads that clock, so a task keeps
+     * the last `runsKept` of them.
+     */
+    async function ranAhead(stackId: string, count: number): Promise<void> {
+      await stack(stackId);
+      await setAppStackTaskScheduleTransactional(db(), { ...aheadScope(stackId), schedule: { frequency: "hourly" }, changedBy: USER, now: CHANGED_AHEAD });
+      for (let index = 0; index < count; index += 1) {
+        const stamped = new Date(hourOf(index).getTime() + 60_000);
+        const result = await scheduled(stackId, "cleanup", hourOf(index), CHANGED_AHEAD, stamped);
+        if (result.outcome !== "queued") throw new Error(result.outcome);
+        await ended(stackId, result.run.id, new Date(stamped.getTime() + 60_000));
+      }
+    }
+    const slotsOf = async (stackId: string) =>
+      (await runsOf(stackId)).map((run) => run.slotAt?.getTime() ?? null).sort((a, b) => (a ?? 0) - (b ?? 0));
+
+    it("does not run again the times whose runs a task keeps: the last runsKept times served by the wrong clock", async () => {
+      const STACK = "stk_tk_aheadruns";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
+      // The clock is set right.
+      expect(await repairAppStackTaskSchedulesAheadOfClock(db(), REAL)).toBeGreaterThanOrEqual(1);
+      const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
+      expect(changedAt).toEqual(REAL);
+
+      // Real time reaches each of those times in turn: its run is found, the time is served, nothing is queued, no note.
+      for (let index = 0; index < APP_STACK_TASK_LIMITS.runsKept; index += 1) {
+        expect(await scheduled(STACK, "cleanup", hourOf(index), changedAt, hourOf(index)), `time ${String(index)}`).toEqual({ outcome: "stale" });
+        expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: hourOf(index), skippedSlotAt: null, skipReason: null });
+      }
+      expect(await runsOf(STACK)).toHaveLength(APP_STACK_TASK_LIMITS.runsKept);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(APP_STACK_TASK_LIMITS.runsKept);
+    });
+
+    it("runs once more a time of the wrong clock whose run is no longer kept: the limit ADR-0042 A7 states, not an accident", async () => {
+      const STACK = "stk_tk_aheadlimit";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept + 3);
+      // The clean-up that followed each run, under the wrong clock, dropped the three oldest: a task keeps its last runsKept runs.
+      expect(await slotsOf(STACK)).toEqual(Array.from({ length: APP_STACK_TASK_LIMITS.runsKept }, (_, index) => hourOf(index + 3).getTime()));
+      await repairAppStackTaskSchedulesAheadOfClock(db(), REAL);
+      const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
+
+      // Real time reaches the oldest of the three: nothing remembers it, so it runs once.
+      const again = await scheduled(STACK, "cleanup", hourOf(0), changedAt, new Date(hourOf(0).getTime() + 60_000));
+      if (again.outcome !== "queued") throw new Error(again.outcome);
+      expect(again.run.slotAt).toEqual(hourOf(0));
+      await ended(STACK, again.run.id, new Date(hourOf(0).getTime() + 120_000));
+      expect((await runsOf(STACK)).filter((run) => run.slotAt?.getTime() === hourOf(0).getTime())).toHaveLength(1);
+      // The oldest time whose run is kept is still found by it.
+      expect(await scheduled(STACK, "cleanup", hourOf(3), changedAt, hourOf(3))).toEqual({ outcome: "stale" });
+    });
+
+    it("keeps the runs made at the real time: a run stamped ahead is not counted among the last runs", async () => {
+      const STACK = "stk_tk_aheadkept";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
+      const first = await finished(STACK, "cleanup", new Date(REAL.getTime() + HOUR_MS));
+      const second = await finished(STACK, "cleanup", new Date(REAL.getTime() + 2 * HOUR_MS));
+      expect((await runsOf(STACK)).map((run) => run.id)).toEqual(expect.arrayContaining([first, second]));
+      expect(await runsOf(STACK)).toHaveLength(APP_STACK_TASK_LIMITS.runsKept + 2);
+    });
+
+    it("lets a run stamped ahead leave like any other once real time has passed it", async () => {
+      const STACK = "stk_tk_aheadpassed";
+      await ranAhead(STACK, APP_STACK_TASK_LIMITS.runsKept);
+      const [oldest] = (await runsOf(STACK)).sort((a, b) => a.requestedAt.getTime() - b.requestedAt.getTime());
+      // Two days later every stamp is in the past: the 21st run pushes out the oldest, and only that one.
+      await finished(STACK, "cleanup", new Date(hourOf(0).getTime() + 48 * HOUR_MS));
+      const left = await runsOf(STACK);
+      expect(left).toHaveLength(APP_STACK_TASK_LIMITS.runsKept);
+      expect(left.map((run) => run.id)).not.toContain(oldest!.id);
     });
   });
 

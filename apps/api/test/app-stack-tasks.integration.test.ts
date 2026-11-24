@@ -23,7 +23,7 @@ import {
   sql,
 } from "@hosting-panel/database";
 import type { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { AppStackTaskSchedulerService } from "../src/app-stacks/app-stack-task-scheduler.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import { DOCKER_EXECUTOR_TOKEN } from "../src/tokens.js";
@@ -477,6 +477,104 @@ describe("tasks of an application (ADR-0042)", () => {
     await worker.processPendingOnce();
     expect(await runRows(stackId)).toHaveLength(3);
     expect(taskCalls(stackId)).toHaveLength(3);
+  });
+
+  describe("after the clock of the server ran ahead", () => {
+    // The passes below count what they queue: no other schedule is left, before or after.
+    const noSchedules = (): Promise<unknown> => h.dbClient.db.delete(appStackTaskSchedules);
+    afterEach(noSchedules);
+    const alone = async (): Promise<string> => {
+      await noSchedules();
+      const stackId = await running();
+      expect((await setSchedule(stackId, "save", { frequency: "hourly" })).status).toBe(200);
+      return stackId;
+    };
+    const scheduleRow = async (stackId: string) =>
+      (await h.dbClient.db.select().from(appStackTaskSchedules).where(eq(appStackTaskSchedules.stackId, stackId)))[0]!;
+    const NONE = { queued: 0, refused: 0, skipped: 0 };
+
+    it("owes a schedule its next time again when the time it stored lies ahead of the clock", async () => {
+      const stackId = await alone();
+      const now = new Date();
+      const nextHour = new Date((Math.floor(now.getTime() / HOUR) + 1) * HOUR);
+      // The clock was two days ahead when the schedule was set and a time was served.
+      const ahead = new Date(now.getTime() + 48 * HOUR);
+      await h.dbClient.db
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: ahead, changedAt: ahead })
+        .where(eq(appStackTaskSchedules.stackId, stackId));
+
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduler.tick(nextHour)).toEqual({ ...NONE, queued: 1 });
+      await worker.processPendingOnce();
+      expect(await scheduler.tick(new Date(nextHour.getTime() + 60_000))).toEqual(NONE);
+      expect(await scheduler.tick(new Date(nextHour.getTime() + 31 * 60_000))).toEqual(NONE);
+      expect((await runRows(stackId)).map((r) => [r.trigger, r.status, r.slotAt?.getTime()])).toEqual([["schedule", "succeeded", nextHour.getTime()]]);
+      expect(taskCalls(stackId)).toHaveLength(1);
+      // The time was never written as skipped, and the stored times are the clock's again.
+      expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: nextHour, changedAt: now, skippedSlotAt: null });
+    });
+
+    it("does not run again, nor write as skipped, a time that ran while the clock was ahead", async () => {
+      const stackId = await alone();
+      const now = new Date();
+      const slot = new Date((Math.floor(now.getTime() / HOUR) + 3) * HOUR);
+      const at = (minutes: number) => new Date(slot.getTime() + minutes * 60_000);
+
+      // The clock is three hours ahead: the time is queued and the run ends.
+      expect(await scheduler.tick(at(5))).toEqual({ ...NONE, queued: 1 });
+      await worker.processPendingOnce();
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot });
+      // The clock is set right: the served time lies ahead and is not trusted.
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: null, changedAt: now });
+      // Real time reaches the time. Its run exists: the time is served, no second run, no note, not even after its window.
+      expect(await scheduler.tick(at(1))).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot, skippedSlotAt: null, skipReason: null });
+      expect(await scheduler.tick(at(31))).toEqual(NONE);
+      expect((await runRows(stackId)).map((r) => [r.status, r.slotAt?.getTime()])).toEqual([["succeeded", slot.getTime()]]);
+      expect(taskCalls(stackId)).toHaveLength(1);
+      expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
+    });
+
+    it("does not write as missed a time that ran, when the first pass after the clock is set right comes late", async () => {
+      const stackId = await alone();
+      const now = new Date();
+      const slot = new Date((Math.floor(now.getTime() / HOUR) + 3) * HOUR);
+      const at = (minutes: number) => new Date(slot.getTime() + minutes * 60_000);
+
+      // The clock is three hours ahead: the time is queued and the run ends.
+      expect(await scheduler.tick(at(5))).toEqual({ ...NONE, queued: 1 });
+      await worker.processPendingOnce();
+      // The clock is set right; the first pass that sees the time owed again comes after its window of 30 minutes.
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduler.tick(at(31))).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot, skippedSlotAt: null, skipReason: null });
+      expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
+      expect((await runRows(stackId)).map((r) => [r.status, r.slotAt?.getTime()])).toEqual([["succeeded", slot.getTime()]]);
+      expect(taskCalls(stackId)).toHaveLength(1);
+    });
+
+    it("does not move back a schedule saved a moment after the pass read the clock, nor run an hour that began before it", async () => {
+      const stackId = await alone();
+      const hour = new Date((Math.floor(Date.now() / HOUR) + 2) * HOUR);
+      const now = new Date(hour.getTime() - 20_000);
+      const saved = new Date(hour.getTime() + 10_000);
+      // The schedule is saved 30 seconds after the clock the pass read; the hour began between the two.
+      await h.dbClient.db
+        .update(appStackTaskSchedules)
+        .set({ changedAt: saved, servedSlotAt: null })
+        .where(eq(appStackTaskSchedules.stackId, stackId));
+
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ changedAt: saved });
+      expect(await scheduler.tick(new Date(hour.getTime() + 60_000))).toEqual(NONE);
+      expect(await scheduler.tick(new Date(hour.getTime() + 31 * 60_000))).toEqual(NONE);
+      expect(await runRows(stackId)).toHaveLength(0);
+      // The next hour is owed, as for any schedule.
+      expect(await scheduler.tick(new Date(hour.getTime() + HOUR + 60_000))).toEqual({ ...NONE, queued: 1 });
+    });
   });
 
   it("never starts again a run whose answer was lost: it asks the executor how it went", async () => {
