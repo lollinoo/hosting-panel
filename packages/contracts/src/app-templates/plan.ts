@@ -6,9 +6,14 @@ import {
   APP_STACK_HASH_PATTERN,
   APP_STACK_ID_PATTERN,
   APP_STACK_PLAN_MAX_BYTES,
+  APP_STACK_DEFAULT_RUN_PROFILE,
   APP_STACK_PLAN_SCHEMA_VERSION,
+  APP_STACK_PLAN_SCHEMA_VERSION_2,
   APP_STACK_RUN_AS_USER_PATTERN,
+  APP_STACK_RUN_PROFILES,
+  APP_STACK_SECRET_ENV_LIMITS,
   APP_TEMPLATE_LIMITS,
+  type AppStackRunProfile,
   AppStackEnvNameSchema,
   AppStackKeySchema,
   AppStackPortSchema,
@@ -24,6 +29,7 @@ import {
   appStackContainerPathProblem,
   appStackEnvValueNameProblem,
   appStackSecretEnvNameProblem,
+  appStackSecretEnvironmentNameProblem,
   appStackTextProblem,
 } from "./text.js";
 
@@ -59,7 +65,82 @@ export const AppStackPlanComponentSchema = z
     healthcheck: AppStackHealthcheckSchema.nullable(),
   })
   .strict();
-export type AppStackPlanComponent = z.infer<typeof AppStackPlanComponentSchema>;
+
+const SecretVersion = z.number().int().min(1).max(APP_TEMPLATE_LIMITS.secretVersionMax);
+const SecretEnvLiteralPiece = z.object({ literal: z.string().min(1).max(APP_TEMPLATE_LIMITS.envValueLength) }).strict();
+/** One piece of an environment secret (v2): template text, or the stored value of a stack secret at a pinned version. */
+export const AppStackPlanSecretEnvPieceSchema = z.union([
+  SecretEnvLiteralPiece,
+  z.object({ parameterKey: AppTemplateParameterKeySchema, version: SecretVersion }).strict(),
+]);
+/** A variable whose value only the executor assembles, at container creation. The plan carries no secret value. */
+export const AppStackPlanSecretEnvEntrySchema = z
+  .object({ name: AppStackEnvNameSchema, pieces: z.array(AppStackPlanSecretEnvPieceSchema).min(1).max(APP_STACK_SECRET_ENV_LIMITS.pieces) })
+  .strict();
+export type AppStackPlanSecretEnvEntry = z.infer<typeof AppStackPlanSecretEnvEntrySchema>;
+
+/** A component of a version 2 plan: the v1 component, the name of its run profile and its environment secrets. */
+export const AppStackPlanComponentV2Schema = AppStackPlanComponentSchema.extend({
+  profile: z.enum(APP_STACK_RUN_PROFILES),
+  secretEnvironment: z.array(AppStackPlanSecretEnvEntrySchema).max(APP_TEMPLATE_LIMITS.environment),
+}).strict();
+export type AppStackPlanComponentV1 = z.infer<typeof AppStackPlanComponentSchema>;
+export type AppStackPlanComponentV2 = z.infer<typeof AppStackPlanComponentV2Schema>;
+export type AppStackPlanComponent = AppStackPlanComponentV1 | AppStackPlanComponentV2;
+
+/** "strict" for every component of a version 1 plan. */
+export function appStackComponentProfile(component: AppStackPlanComponent): AppStackRunProfile {
+  return "profile" in component ? component.profile : APP_STACK_DEFAULT_RUN_PROFILE;
+}
+
+/** [] for every component of a version 1 plan. */
+export function appStackComponentSecretEnvironment(component: AppStackPlanComponent): readonly AppStackPlanSecretEnvEntry[] {
+  return "secretEnvironment" in component ? component.secretEnvironment : [];
+}
+
+export interface AppStackSecretRef {
+  readonly parameterKey: string;
+  readonly version: number;
+}
+
+function distinctSecretRefs(refs: readonly AppStackSecretRef[]): AppStackSecretRef[] {
+  const seen = new Set<string>();
+  return refs
+    .filter(({ parameterKey, version }) => {
+      const id = `${parameterKey}:${String(version)}`;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .sort((a, b) => (a.parameterKey < b.parameterKey ? -1 : a.parameterKey > b.parameterKey ? 1 : a.version - b.version));
+}
+
+/** Every (parameterKey, version) the component needs to run, as a file or in its environment: distinct, by key. */
+export function appStackComponentSecretRefs(component: AppStackPlanComponent): AppStackSecretRef[] {
+  return distinctSecretRefs([
+    ...component.secretFiles.map(({ parameterKey, version }) => ({ parameterKey, version })),
+    ...appStackComponentEnvironmentSecretRefs(component),
+  ]);
+}
+
+/** Only the references of the component's environment secrets: what the executor needs at creation. */
+export function appStackComponentEnvironmentSecretRefs(component: AppStackPlanComponent): AppStackSecretRef[] {
+  return distinctSecretRefs(
+    appStackComponentSecretEnvironment(component).flatMap((entry) =>
+      entry.pieces.flatMap((piece) => ("parameterKey" in piece ? [{ parameterKey: piece.parameterKey, version: piece.version }] : [])),
+    ),
+  );
+}
+
+/** The environment-secret references of the whole plan: non-empty exactly when a create call must carry contents. */
+export function appStackPlanEnvironmentSecretRefs(plan: { readonly components: readonly AppStackPlanComponent[] }): AppStackSecretRef[] {
+  return distinctSecretRefs(plan.components.flatMap(appStackComponentEnvironmentSecretRefs));
+}
+
+/** Every reference of the whole plan, files and environment. */
+export function appStackPlanSecretRefs(plan: { readonly components: readonly AppStackPlanComponent[] }): AppStackSecretRef[] {
+  return distinctSecretRefs(plan.components.flatMap(appStackComponentSecretRefs));
+}
 
 export const AppStackPlanVolumeSchema = z.object({ key: AppStackKeySchema }).strict();
 export const AppStackPlanIngressSchema = z.object({ componentKey: AppStackKeySchema, port: AppStackPortSchema }).strict();
@@ -71,6 +152,7 @@ export function appStackEngineNameProblem(stackId: string, componentKey: string)
 
 type Path = (string | number)[];
 type PlanShape = {
+  readonly schemaVersion: number;
   readonly components: readonly AppStackPlanComponent[];
   readonly volumes: readonly { readonly key: string }[];
   readonly ingress: readonly { readonly componentKey: string; readonly port: number }[];
@@ -92,6 +174,14 @@ function appStackPlanRefine(plan: PlanShape, ctx: z.RefinementCtx): void {
   const volumeKeys = new Set(plan.volumes.map((volume) => volume.key));
   const mounted = new Set<string>();
   const parameterKeys = new Set<string>();
+  /** Version 2 only: one version per secret in the whole plan, so one content entry serves files and environment. */
+  const pinned = new Map<string, number>();
+  const pinVersion = (ref: { readonly parameterKey: string; readonly version: number }, path: Path) => {
+    if (plan.schemaVersion !== APP_STACK_PLAN_SCHEMA_VERSION_2) return;
+    const known = pinned.get(ref.parameterKey);
+    if (known === undefined) pinned.set(ref.parameterKey, ref.version);
+    else if (known !== ref.version) refuse(path, "A secret has one version in a plan");
+  };
   let exposeTotal = 0;
 
   plan.components.forEach((component, c) => {
@@ -103,7 +193,8 @@ function appStackPlanRefine(plan: PlanShape, ctx: z.RefinementCtx): void {
     ascending(component.dependsOn, lower, (d) => at("dependsOn", d), "Dependencies must be sorted and unique");
     earlier.add(component.key);
 
-    if (component.environment.length + component.secretFiles.length > APP_TEMPLATE_LIMITS.environment) {
+    const secretEnvironment = appStackComponentSecretEnvironment(component);
+    if (component.environment.length + component.secretFiles.length + secretEnvironment.length > APP_TEMPLATE_LIMITS.environment) {
       refuse(at("environment"), "Too many environment entries");
     }
     const valueNames = new Set(component.environment.map((entry) => entry.name));
@@ -119,6 +210,31 @@ function appStackPlanRefine(plan: PlanShape, ctx: z.RefinementCtx): void {
       }
     });
     ascending(component.secretFiles, (a, b) => a.envName < b.envName, (f) => at("secretFiles", f, "envName"), "Secret files must be sorted by unique name");
+    component.secretFiles.forEach((file, f) => pinVersion(file, at("secretFiles", f, "version")));
+
+    secretEnvironment.forEach((entry, s) => {
+      if (appStackSecretEnvironmentNameProblem(entry.name) !== null || valueNames.has(entry.name)) {
+        refuse(at("secretEnvironment", s, "name"), "Invalid environment secret name");
+      }
+      let references = 0;
+      let literalLength = 0;
+      entry.pieces.forEach((piece, p) => {
+        if ("parameterKey" in piece) {
+          references += 1;
+          parameterKeys.add(piece.parameterKey);
+          pinVersion(piece, at("secretEnvironment", s, "pieces", p, "version"));
+          return;
+        }
+        literalLength += piece.literal.length;
+        if (appStackTextProblem(piece.literal) !== null) refuse(at("secretEnvironment", s, "pieces", p, "literal"), "Forbidden environment value");
+        const previous = entry.pieces[p - 1];
+        if (previous !== undefined && "literal" in previous) refuse(at("secretEnvironment", s, "pieces", p), "Adjacent literal pieces must be one piece");
+      });
+      if (references === 0) refuse(at("secretEnvironment", s, "pieces"), "An environment secret needs a secret reference");
+      if (references > APP_STACK_SECRET_ENV_LIMITS.referencesPerValue) refuse(at("secretEnvironment", s, "pieces"), "Too many secret references");
+      if (literalLength > APP_TEMPLATE_LIMITS.envValueLength) refuse(at("secretEnvironment", s, "pieces"), "The environment value is too long");
+    });
+    ascending(secretEnvironment, (a, b) => a.name < b.name, (s) => at("secretEnvironment", s, "name"), "Environment secrets must be sorted by unique name");
 
     component.argv?.forEach((item, a) => {
       if (appStackTextProblem(item) !== null || (a === 0 ? appStackArgvExecutableProblem(item) : appStackArgvItemProblem(item)) !== null) {
@@ -165,23 +281,47 @@ function appStackPlanRefine(plan: PlanShape, ctx: z.RefinementCtx): void {
   }
 }
 
-export const ApprovedStackPlanSchema = z
+const PlanIds = {
+  stackId: AppStackIdSchema,
+  organizationId: AppForeignIdSchema,
+  hostAllocationId: AppForeignIdSchema,
+  templateVersionId: AppStackIdSchema,
+  /** = app_stack_revisions.id of the row that stores this plan. */
+  revisionId: AppStackIdSchema,
+  planHash: z.string().regex(APP_STACK_HASH_PATTERN),
+};
+const PlanTail = {
+  volumes: z.array(AppStackPlanVolumeSchema).max(APP_TEMPLATE_LIMITS.volumes),
+  ingress: z.array(AppStackPlanIngressSchema).max(APP_TEMPLATE_LIMITS.ingress),
+};
+
+/** The plan of an `HCP-STACK/v1` template: unchanged since ADR-0035, so stored plans and their hashes never move. */
+export const ApprovedStackPlanV1Schema = z
   .object({
     schemaVersion: z.literal(APP_STACK_PLAN_SCHEMA_VERSION),
-    stackId: AppStackIdSchema,
-    organizationId: AppForeignIdSchema,
-    hostAllocationId: AppForeignIdSchema,
-    templateVersionId: AppStackIdSchema,
-    /** = app_stack_revisions.id of the row that stores this plan. */
-    revisionId: AppStackIdSchema,
-    planHash: z.string().regex(APP_STACK_HASH_PATTERN),
+    ...PlanIds,
     /** Deterministic topological order. */
     components: z.array(AppStackPlanComponentSchema).min(1).max(APP_TEMPLATE_LIMITS.services),
-    volumes: z.array(AppStackPlanVolumeSchema).max(APP_TEMPLATE_LIMITS.volumes),
-    ingress: z.array(AppStackPlanIngressSchema).max(APP_TEMPLATE_LIMITS.ingress),
+    ...PlanTail,
   })
-  .strict()
+  .strict();
+/** The plan of an `HCP-STACK/v2` template (ADR-0036). */
+export const ApprovedStackPlanV2Schema = z
+  .object({
+    schemaVersion: z.literal(APP_STACK_PLAN_SCHEMA_VERSION_2),
+    ...PlanIds,
+    /** Deterministic topological order. */
+    components: z.array(AppStackPlanComponentV2Schema).min(1).max(APP_TEMPLATE_LIMITS.services),
+    ...PlanTail,
+  })
+  .strict();
+
+/** A key of one version in a plan of the other is an unknown key: a v1 plan can never carry a profile. */
+export const ApprovedStackPlanSchema = z
+  .discriminatedUnion("schemaVersion", [ApprovedStackPlanV1Schema, ApprovedStackPlanV2Schema])
   .superRefine(appStackPlanRefine);
+export type ApprovedStackPlanV1 = z.infer<typeof ApprovedStackPlanV1Schema>;
+export type ApprovedStackPlanV2 = z.infer<typeof ApprovedStackPlanV2Schema>;
 export type ApprovedStackPlan = z.infer<typeof ApprovedStackPlanSchema>;
 
 export type AppStackPlanHashSource = Pick<ApprovedStackPlan, "schemaVersion" | "templateVersionId" | "components" | "volumes" | "ingress">;
@@ -196,7 +336,7 @@ export function appStackPlanHashInput(plan: AppStackPlanHashSource): AppStackPla
 export function appStackComponentHashInput(
   plan: Pick<ApprovedStackPlan, "schemaVersion" | "components" | "ingress">,
   componentKey: string,
-): { readonly schemaVersion: 1; readonly component: AppStackPlanComponent; readonly edge: boolean } | null {
+): { readonly schemaVersion: ApprovedStackPlan["schemaVersion"]; readonly component: AppStackPlanComponent; readonly edge: boolean } | null {
   const component = plan.components.find((candidate) => candidate.key === componentKey);
   if (component === undefined) return null;
   return { schemaVersion: plan.schemaVersion, component, edge: plan.ingress.some((route) => route.componentKey === componentKey) };
@@ -215,12 +355,25 @@ export function sumAppStackPlanResources(plan: Pick<ApprovedStackPlan, "componen
   };
 }
 
-/** Preview = the plan body without ids, hash and secret versions. Same ordering rules as the plan. */
+/** Preview = the plan body without ids, hash and secret versions. Same ordering rules as the plan. `profile` and
+ *  `secretEnvironment` are present only for a version 2 body. */
+export const AppStackPreviewSecretEnvEntrySchema = z
+  .object({
+    name: AppStackEnvNameSchema,
+    pieces: z
+      .array(z.union([SecretEnvLiteralPiece, z.object({ parameterKey: AppTemplateParameterKeySchema }).strict()]))
+      .min(1)
+      .max(APP_STACK_SECRET_ENV_LIMITS.pieces),
+  })
+  .strict();
 export const AppStackPreviewComponentSchema = AppStackPlanComponentSchema.extend({
   secretFiles: z
     .array(z.object({ envName: AppStackEnvNameSchema, parameterKey: AppTemplateParameterKeySchema }).strict())
     .max(APP_TEMPLATE_LIMITS.environment),
+  profile: z.enum(APP_STACK_RUN_PROFILES).optional(),
+  secretEnvironment: z.array(AppStackPreviewSecretEnvEntrySchema).max(APP_TEMPLATE_LIMITS.environment).optional(),
 }).strict();
+export type AppStackPreviewComponent = z.infer<typeof AppStackPreviewComponentSchema>;
 export const AppStackPreviewSchema = z
   .object({
     components: z.array(AppStackPreviewComponentSchema).min(1).max(APP_TEMPLATE_LIMITS.services),
@@ -230,12 +383,24 @@ export const AppStackPreviewSchema = z
   .strict();
 export type AppStackPreview = z.infer<typeof AppStackPreviewSchema>;
 
-export function toAppStackPreview(body: Pick<ApprovedStackPlan, "components" | "volumes" | "ingress">): AppStackPreview {
+export function toAppStackPreview(body: {
+  readonly components: readonly AppStackPlanComponent[];
+  readonly volumes: ApprovedStackPlan["volumes"];
+  readonly ingress: ApprovedStackPlan["ingress"];
+}): AppStackPreview {
   return {
-    components: body.components.map((component) => ({
-      ...component,
-      secretFiles: component.secretFiles.map(({ envName, parameterKey }) => ({ envName, parameterKey })),
-    })),
+    components: body.components.map((component): AppStackPreviewComponent => {
+      const secretFiles = component.secretFiles.map(({ envName, parameterKey }) => ({ envName, parameterKey }));
+      if (!("secretEnvironment" in component)) return { ...component, secretFiles };
+      return {
+        ...component,
+        secretFiles,
+        secretEnvironment: component.secretEnvironment.map(({ name, pieces }) => ({
+          name,
+          pieces: pieces.map((piece) => ("parameterKey" in piece ? { parameterKey: piece.parameterKey } : piece)),
+        })),
+      };
+    }),
     volumes: body.volumes,
     ingress: body.ingress,
   };

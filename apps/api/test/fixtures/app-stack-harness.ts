@@ -40,6 +40,8 @@ export const APP_TEST_ALLOWLIST: readonly AppImageAllowlistEntry[] = JSON.parse(
 ) as AppImageAllowlistEntry[];
 
 const KEY = Buffer.alloc(32, 7);
+/** The master key of the harness: a test reads a stored secret back with it. */
+export const APP_TEST_MASTER_KEY: Buffer = KEY;
 const PW = "correct horse battery";
 const SETUP = { installationName: "Test", hostHostname: "panel.test", hostIpv4: "10.0.0.1" };
 const TABLES = {

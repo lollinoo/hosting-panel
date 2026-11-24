@@ -1,6 +1,8 @@
 /**
  * Compiler of an application template: the re-validated source, the customer's values and the stack's secret versions
  * become the deterministic, secret-free ApprovedStackPlan; the preview is the same body compiled with the defaults.
+ * A v1 source gives a version 1 plan, byte for byte as before; a v2 source gives a version 2 plan, whose components
+ * also carry the run profile and the environment secrets as pieces (text and references, never a value).
  * Pure, synchronous and never throws; a message never echoes a value.
  */
 import {
@@ -9,18 +11,22 @@ import {
   APP_STACK_ID_PATTERN,
   APP_STACK_PLAN_MAX_BYTES,
   APP_STACK_PLAN_SCHEMA_VERSION,
+  APP_STACK_PLAN_SCHEMA_VERSION_2,
   APP_TEMPLATE_ISSUE_REASON,
   APP_TEMPLATE_LIMITS,
   ApprovedStackPlanSchema,
   appStackArgvItemProblem,
   appStackTextProblem,
+  appTemplateServiceProfile,
   appTemplateValueText,
   findAppImageAllowlistEntry,
   resolveAppTemplateParameters,
   sortAppTemplateIssues,
   toAppStackPreview,
   type AppImageAllowlistEntry,
-  type AppStackPlanComponent,
+  type AppStackPlanComponentV1,
+  type AppStackPlanComponentV2,
+  type AppStackPlanSecretEnvEntry,
   type AppStackPreview,
   type AppTemplateIssue,
   type AppTemplateIssueCode,
@@ -61,7 +67,11 @@ export type AppTemplatePreviewResult =
   | { readonly ok: true; readonly spec: AppTemplateSpec; readonly preview: AppStackPreview }
   | { readonly ok: false; readonly errors: AppTemplateIssue[] };
 
-type PlanBody = Pick<ApprovedStackPlan, "components" | "volumes" | "ingress">;
+type PlanTail = Pick<ApprovedStackPlan, "volumes" | "ingress">;
+type PlanBody =
+  | (PlanTail & { readonly schemaVersion: typeof APP_STACK_PLAN_SCHEMA_VERSION; readonly components: AppStackPlanComponentV1[] })
+  | (PlanTail & { readonly schemaVersion: typeof APP_STACK_PLAN_SCHEMA_VERSION_2; readonly components: AppStackPlanComponentV2[] });
+type SecretEnvPiece = AppStackPlanSecretEnvEntry["pieces"][number];
 type Refusal = { readonly ok: false; readonly issues: AppTemplateIssue[] };
 type PlanResult = { readonly ok: true; readonly plan: ApprovedStackPlan } | Refusal;
 
@@ -92,6 +102,31 @@ function piecesOf(raw: string): readonly InterpolationPiece[] {
   return scan.pieces;
 }
 
+const secretKeysOf = (spec: AppTemplateSpec): Set<string> =>
+  new Set(spec.parameters.flatMap((parameter) => (parameter.type === "secret" ? [parameter.key] : [])));
+
+/**
+ * The secret parameters a template delivers in a container's environment (v2): an entry `secret: <key>` whose name does
+ * not end in `_FILE`, and every `${key}` inside a value. Always empty for a v1 template. The API holds these secrets to
+ * the environment size limit when they are set.
+ */
+export function appTemplateEnvironmentSecretKeys(spec: AppTemplateSpec): Set<string> {
+  const secrets = secretKeysOf(spec);
+  const keys = new Set<string>();
+  for (const service of spec.services) {
+    for (const entry of service.environment) {
+      if ("secretParameter" in entry) {
+        if (!entry.name.endsWith("_FILE")) keys.add(entry.secretParameter);
+        continue;
+      }
+      const scan = scanInterpolation(entry.value);
+      if (!scan.ok) continue;
+      for (const piece of scan.pieces) if (isVariable(piece) && secrets.has(piece.variable)) keys.add(piece.variable);
+    }
+  }
+  return keys;
+}
+
 /** Steps 4–7: secrets, components in start order, volumes, ingress. */
 function compileBody(
   spec: AppTemplateSpec,
@@ -118,7 +153,9 @@ function compileBody(
   const order = orderAppTemplateServices(spec.services);
   if (!order.ok) return internal();
   const services = new Map(spec.services.map((service) => [service.key, service]));
-  const components: AppStackPlanComponent[] = [];
+  const secretKeys = secretKeysOf(spec);
+  const isSecretPiece = (piece: InterpolationPiece): boolean => isVariable(piece) && secretKeys.has(piece.variable);
+  const components: AppStackPlanComponentV2[] = [];
   for (const key of order.order) {
     const service = services.get(key);
     if (service === undefined) return internal();
@@ -135,15 +172,47 @@ function compileBody(
         return item;
       }) ?? null;
 
-    const environment: AppStackPlanComponent["environment"][number][] = [];
-    const secretFiles: AppStackPlanComponent["secretFiles"][number][] = [];
+    const environment: AppStackPlanComponentV1["environment"][number][] = [];
+    const secretFiles: AppStackPlanComponentV1["secretFiles"][number][] = [];
+    // Only a v2 template can fill this: the validator refuses both of its forms in a v1 source.
+    const secretEnvironment: AppStackPlanSecretEnvEntry[] = [];
     for (const entry of service.environment) {
       if ("secretParameter" in entry) {
+        // An optional secret nobody set: the variable is left out, as its file always was.
         const version = versions.get(entry.secretParameter);
-        if (version !== undefined) secretFiles.push({ envName: entry.name, parameterKey: entry.secretParameter, version });
+        if (version === undefined) continue;
+        if (entry.name.endsWith("_FILE")) secretFiles.push({ envName: entry.name, parameterKey: entry.secretParameter, version });
+        else secretEnvironment.push({ name: entry.name, pieces: [{ parameterKey: entry.secretParameter, version }] });
         continue;
       }
       const pieces = piecesOf(entry.value);
+      if (pieces.some(isSecretPiece)) {
+        const path = parameterPath(pieces.filter(isVariable).find((piece) => !isSecretPiece(piece))?.variable);
+        const out: SecretEnvPiece[] = [];
+        let literal = "";
+        let unset = false;
+        const flush = (): void => {
+          if (literal === "") return;
+          if (appStackTextProblem(literal) !== null) issues.push(issue("RENDERED_VALUE_FORBIDDEN", path));
+          out.push({ literal });
+          literal = "";
+        };
+        for (const piece of pieces) {
+          if (!isVariable(piece)) literal += piece.literal;
+          else if (!isSecretPiece(piece)) literal += textOf(piece.variable);
+          else {
+            const version = versions.get(piece.variable);
+            if (version === undefined) unset = true;
+            else {
+              flush();
+              out.push({ parameterKey: piece.variable, version });
+            }
+          }
+        }
+        flush();
+        if (!unset) secretEnvironment.push({ name: entry.name, pieces: out });
+        continue;
+      }
       const value = expandPieces(pieces, textOf);
       if (appStackTextProblem(value) !== null) issues.push(issue("RENDERED_VALUE_FORBIDDEN", parameterPath(pieces.find(isVariable)?.variable)));
       environment.push({ name: entry.name, value });
@@ -161,6 +230,8 @@ function compileBody(
       dependsOn: [...service.dependsOn].sort(compare),
       volumes: [...service.volumes].sort((a, b) => compare(a.containerPath, b.containerPath)),
       healthcheck: service.healthcheck,
+      profile: appTemplateServiceProfile(service),
+      secretEnvironment: secretEnvironment.sort((a, b) => compare(a.name, b.name)),
     });
   }
   if (issues.length > 0) return refuse(issues);
@@ -168,13 +239,18 @@ function compileBody(
   const ingress = spec.ingress
     .map(({ service, port }) => ({ componentKey: service, port }))
     .sort((a, b) => compare(a.componentKey, b.componentKey) || a.port - b.port);
-  return { ok: true, body: { components, volumes: spec.volumes, ingress } };
+  const tail = { volumes: spec.volumes, ingress };
+  if (spec.schemaVersion === APP_STACK_PLAN_SCHEMA_VERSION_2) {
+    return { ok: true, body: { schemaVersion: APP_STACK_PLAN_SCHEMA_VERSION_2, components, ...tail } };
+  }
+  // A version 1 component has exactly its eleven keys: the two v2 keys never reach a v1 plan or its hash.
+  const v1 = components.map(({ profile: _profile, secretEnvironment: _secretEnvironment, ...component }): AppStackPlanComponentV1 => component);
+  return { ok: true, body: { schemaVersion: APP_STACK_PLAN_SCHEMA_VERSION, components: v1, ...tail } };
 }
 
 /** Steps 8–10 after the hash: the plan in schema key order, its byte cap and the final schema guard. */
-function finishPlan(ids: AppStackPlanIds, planHash: string, { components, volumes, ingress }: PlanBody): PlanResult {
+function finishPlan(ids: AppStackPlanIds, planHash: string, { schemaVersion, components, volumes, ingress }: PlanBody): PlanResult {
   const { stackId, organizationId, hostAllocationId, templateVersionId, revisionId } = ids;
-  const schemaVersion = APP_STACK_PLAN_SCHEMA_VERSION;
   const plan = { schemaVersion, stackId, organizationId, hostAllocationId, templateVersionId, revisionId, planHash, components, volumes, ingress };
   if (new TextEncoder().encode(JSON.stringify(plan)).length > APP_STACK_PLAN_MAX_BYTES) return refuse([issue("PLAN_TOO_LARGE", "")]);
   const parsed = ApprovedStackPlanSchema.safeParse(plan);
@@ -216,8 +292,8 @@ export function compileAppStackPlan(input: AppStackCompileInput, options: AppTem
     );
     if (!compiled.ok) return compiled;
 
-    const { components, volumes, ingress } = compiled.body;
-    const planHash = computeAppStackPlanHash({ schemaVersion: APP_STACK_PLAN_SCHEMA_VERSION, templateVersionId, components, volumes, ingress });
+    const { schemaVersion, components, volumes, ingress } = compiled.body;
+    const planHash = computeAppStackPlanHash({ schemaVersion, templateVersionId, components, volumes, ingress });
     return finishPlan(input.ids, planHash, compiled.body);
   } catch {
     return internal();

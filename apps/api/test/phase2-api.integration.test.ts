@@ -374,8 +374,8 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
-      applicationTemplatesAvailable: false,
-      applicationStacksAvailable: false,
+      applicationTemplatesAvailable: true,
+      applicationStacksAvailable: true,
       stackPublicPortsAvailable: false,
       gitBuildsAvailable: false,
     });
@@ -398,8 +398,8 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
-      applicationTemplatesAvailable: false,
-      applicationStacksAvailable: false,
+      applicationTemplatesAvailable: true,
+      applicationStacksAvailable: true,
       stackPublicPortsAvailable: false,
       gitBuildsAvailable: false,
     });
@@ -410,6 +410,29 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     );
     expect(capRes.status).toBe(200);
     expect(capRes.body.data).toEqual(orgRes.body.data.capabilities);
+
+    // The application catalog is open on this backend (ADR-0036 §2.10): the built-ins wait as drafts for the
+    // administrator, and the customer is offered none of them yet
+    const adminTemplatesRes = await requestJson<{ data: { id: string; builtIn: boolean; enabled: boolean }[] }>(
+      "/v1/admin/app-templates",
+      { token: tokens["usr_infra"] },
+    );
+    expect(adminTemplatesRes.status).toBe(200);
+    expect(adminTemplatesRes.body.data.map((t) => [t.id, t.builtIn, t.enabled]).sort()).toEqual([
+      ["atpl_http_cache", true, false],
+      ["atpl_wordpress_mariadb", true, false],
+      ["atpl_worker_storage", true, false],
+    ]);
+    const catalogueRes = await requestJson<{ data: { templates: unknown[] } }>(
+      `/v1/organizations/${DEMO_IDS.organizations.acme}/app-templates`,
+      { token: tokens["usr_elena"] },
+    );
+    expect(catalogueRes.status).toBe(200);
+    expect(catalogueRes.body.data.templates).toEqual([]);
+    const stacksRes = await requestJson(`/v1/organizations/${DEMO_IDS.organizations.acme}/app-stacks`, {
+      token: tokens["usr_elena"],
+    });
+    expect(stacksRes.status).toBe(200);
 
     // Shared hosting transition remains strictly gated (409 SHARED_MODE_GATED)
     const sharedModeRes = await requestJson<ApiErrorEnvelope>(

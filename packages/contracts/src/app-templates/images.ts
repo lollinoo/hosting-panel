@@ -51,14 +51,41 @@ export function appStackImageProblem(
   return entry.runAsUser === runAsUser ? null : "user_mismatch";
 }
 
-/** One entry per refused component, in plan order; the executor refuses a non-empty result before any pull.
+/** `HCP-STACK/v2`: any repository, still digest-pinned. A row of the allowlist keeps forcing its user; a repository
+ *  without a row runs as the image's own user (null), so a plan can never name a user of its choice. */
+export function appStackFreeImageProblem(
+  image: string,
+  runAsUser: string | null,
+  allowlist: readonly AppImageAllowlistEntry[] = APP_IMAGE_ALLOWLIST,
+): AppStackImageProblem | null {
+  if (!APP_STACK_PLAN_IMAGE_PATTERN.test(image)) return "not_digest_pinned";
+  const entry = findAppImageAllowlistEntry(image.slice(0, image.lastIndexOf("@")), allowlist);
+  return (entry?.runAsUser ?? null) === runAsUser ? null : "user_mismatch";
+}
+
+/** One entry per refused component, in plan order; the executor refuses a non-empty result before any pull. A version 2
+ *  plan follows the free-image rule, every other plan the allowlist.
  *  `plan` is structural (an ApprovedStackPlan is assignable) so this file needs no import of plan.ts. */
 export function appStackPlanImageProblems(
-  plan: { readonly components: readonly { readonly key: string; readonly image: string; readonly runAsUser: string | null }[] },
+  plan: {
+    readonly schemaVersion?: number;
+    readonly components: readonly { readonly key: string; readonly image: string; readonly runAsUser: string | null }[];
+  },
   allowlist: readonly AppImageAllowlistEntry[] = APP_IMAGE_ALLOWLIST,
 ): Array<{ readonly componentKey: string; readonly problem: AppStackImageProblem }> {
+  const problemOf = plan.schemaVersion === 2 ? appStackFreeImageProblem : appStackImageProblem;
   return plan.components.flatMap((component) => {
-    const problem = appStackImageProblem(component.image, component.runAsUser, allowlist);
+    const problem = problemOf(component.image, component.runAsUser, allowlist);
     return problem === null ? [] : [{ componentKey: component.key, problem }];
   });
+}
+
+/** What the importer asks the executor to resolve: "[registry/]repository[:tag]", no digest, no credentials, no
+ *  scheme. Lowercase repository as registries require; the tag is optional ("latest" is what a registry assumes). */
+export const APP_STACK_IMAGE_LOOKUP_PATTERN =
+  /^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
+export const APP_STACK_IMAGE_LOOKUP_MAX_LENGTH = 255;
+
+export function appStackImageLookupProblem(image: string): "invalid" | null {
+  return image.length >= 1 && image.length <= APP_STACK_IMAGE_LOOKUP_MAX_LENGTH && APP_STACK_IMAGE_LOOKUP_PATTERN.test(image) ? null : "invalid";
 }

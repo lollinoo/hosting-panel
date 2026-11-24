@@ -45,11 +45,15 @@ export interface DomainRow {
   target: number;
 }
 
-export function buildDomainEntries(rows: readonly DomainRow[], ingress: CustomerAppTemplateDto["ingress"]): { hostname: string; componentKey: string; port: number }[] {
+/** The addresses of a new application start with compression on (ADR-0037 R4); «Opzioni» turns it off afterwards. */
+export function buildDomainEntries(
+  rows: readonly DomainRow[],
+  ingress: CustomerAppTemplateDto["ingress"],
+): { hostname: string; componentKey: string; port: number; compression: true }[] {
   return rows.flatMap((r) => {
     const hostname = r.hostname.trim().toLowerCase();
     const to = ingress[r.target];
-    return hostname && to ? [{ hostname, componentKey: to.componentKey, port: to.port }] : [];
+    return hostname && to ? [{ hostname, componentKey: to.componentKey, port: to.port, compression: true as const }] : [];
   });
 }
 

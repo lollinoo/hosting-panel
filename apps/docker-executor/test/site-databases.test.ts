@@ -138,6 +138,8 @@ async function startFakeExecDocker(opts?: {
   server.on("upgrade", (req, socket, head) => {
     openSockets.add(socket);
     socket.once("close", () => openSockets.delete(socket));
+    // The HTTP server drops its own error handler on upgrade.
+    socket.on("error", () => undefined);
     const parsedLen = Number(req.headers["content-length"] ?? 0);
     const contentLength = Number.isFinite(parsedLen) && parsedLen > 0 ? parsedLen : 0;
     const reqChunks: Buffer[] = [];

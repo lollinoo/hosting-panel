@@ -74,10 +74,10 @@ const SEED = `
   INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
     VALUES ('atv','tpl',1,'x',1,'{}','${"d".repeat(64)}');
   INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status,
-    applied_routes_hash, deleted_at, updated_at) VALUES
-    ('stk_run','o','a','tpl','atv','run','running','${"c".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
-    ('stk_del','o','a','tpl','atv','del','deleting','${"c".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
-    ('stk_gone','o','a','tpl','atv','gone','deleted',NULL,'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z');
+    applied_routes_hash, applied_addresses_hash, deleted_at, updated_at) VALUES
+    ('stk_run','o','a','tpl','atv','run','running','${"c".repeat(64)}','${"f".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
+    ('stk_del','o','a','tpl','atv','del','deleting','${"c".repeat(64)}','${"f".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
+    ('stk_gone','o','a','tpl','atv','gone','deleted',NULL,NULL,'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z');
   INSERT INTO app_stack_revisions (id, stack_id, organization_id, revision_number, template_version_id, plan, plan_hash,
     component_count, cpu_milli, memory_bytes) VALUES ('rev_run','stk_run','o',1,'atv','{}','${"e".repeat(64)}',1,500,1);
   INSERT INTO app_stack_secrets (id, stack_id, organization_id, parameter_key, version, ciphertext_base64, iv_base64,
@@ -117,7 +117,7 @@ const LEDGER = `
   UNION ALL SELECT 'bt', id, last_test_outcome, last_test_problem, concat_ws('|', last_test_at, last_test_available_bytes, last_test_total_bytes) FROM backup_targets
   UNION ALL SELECT 'bp', id, nightly_run_started_at::text, last_nightly_run_on::text, NULL FROM backup_policies
   UNION ALL SELECT 'bs', id, nightly_run_started_at::text, last_panel_backup_status, NULL FROM backup_settings
-  UNION ALL SELECT 'as', id, status, NULL, applied_routes_hash FROM app_stacks
+  UNION ALL SELECT 'as', id, status, applied_addresses_hash, applied_routes_hash FROM app_stacks
   UNION ALL SELECT 'ad', id, status, problem, ended_at::text FROM app_stack_deployments
   UNION ALL SELECT 'ac', component_key, health, NULL, health_observed_at::text FROM app_stack_components
   UNION ALL SELECT 'av', volume_key, status, NULL, NULL FROM app_stack_volumes
@@ -204,8 +204,9 @@ describe.each([
   });
 
   it("tells the truth about application stacks: nothing runs on the new host (HCP-SPEC-005)", async () => {
-    expect(byId("as", "stk_run")).toMatchObject({ status: "failed", x: null });
-    expect(byId("as", "stk_del")).toMatchObject({ status: "delete_failed", x: null });
+    // Nothing is published on the new server: neither the routes hash nor the fingerprint of its addresses (ADR-0037).
+    expect(byId("as", "stk_run")).toMatchObject({ status: "failed", problem: null, x: null });
+    expect(byId("as", "stk_del")).toMatchObject({ status: "delete_failed", problem: null, x: null });
     expect(byId("as", "stk_gone")).toEqual(before.find((r) => r.t === "as" && r.id === "stk_gone"));
     expect(byId("ad", "dep_run")).toMatchObject({ status: "failed", problem: "OPERATION_INTERRUPTED" });
     expect(byId("ad", "dep_run")?.x).not.toBeNull();

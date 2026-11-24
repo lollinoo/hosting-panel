@@ -20,10 +20,12 @@ import {
   platformInstallations,
   removeAppStackDomainTransactional,
   sql,
+  updateAppStackDomainRoutingTransactional,
   tlsCertificates,
   tlsCertificateVersions,
   TlsCoverageError,
   updateAppStackDomainState,
+  type AppStackDomainRouting,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "../src/index.js";
@@ -264,5 +266,103 @@ describe("@hosting-panel/database — app stack domains repository", () => {
     const all = await listAppStackHostnames(db());
     expect(all).toContainEqual({ hostname: "host-a.list.example", organizationId: orgA, status: "pending", certStatus: "none" });
     expect(all).toContainEqual({ hostname: "host-b.list.example", organizationId: orgB, status: "pending", certStatus: "none" });
+  });
+
+  // ---- routing options (0026, ADR-0037) ----
+  const VERIFIER = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+  const OTHER_VERIFIER = "$apr1$abcdefgh$0123456789./ABCDEFGHIJ";
+  const NONE: AppStackDomainRouting = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
+  const RULE = { pathPrefix: "/api", componentKey: "web", port: 8080, stripPrefix: true };
+  const route = (stackId: string, domainId: string, routing: Partial<AppStackDomainRouting>, org = orgA) =>
+    updateAppStackDomainRoutingTransactional(db(), { organizationId: org, stackId, domainId, routing: { ...NONE, ...routing } });
+  const options = (row: { redirectToDomainId: string | null; compression: boolean; accessUsername: string | null; accessPasswordHash: string | null; pathRoutes: unknown }) => ({
+    redirectToDomainId: row.redirectToDomainId,
+    compression: row.compression,
+    accessUsername: row.accessUsername,
+    accessPasswordHash: row.accessPasswordHash,
+    pathRoutes: row.pathRoutes,
+  });
+
+  it("a new address has no option, and an update replaces every option and returns the row before and after", async () => {
+    const id = await stack();
+    const [row] = await add(id, ["opt.example"]);
+    expect(options(row!)).toEqual({ redirectToDomainId: null, compression: false, accessUsername: null, accessPasswordHash: null, pathRoutes: [] });
+    const first = await route(id, row!.id, { compression: true, protection: { username: "team", passwordHash: VERIFIER }, pathRoutes: [RULE] });
+    expect(options(first.before)).toEqual(options(row!));
+    expect(options(first.after)).toEqual({ redirectToDomainId: null, compression: true, accessUsername: "team", accessPasswordHash: VERIFIER, pathRoutes: [RULE] });
+    expect(first.after.updatedAt.getTime()).toBeGreaterThanOrEqual(row!.updatedAt.getTime());
+    // The other columns of the row are not touched.
+    expect(first.after).toMatchObject({ hostname: "opt.example", status: "pending", dnsStatus: "unchecked", certStatus: "none" });
+    const cleared = await route(id, row!.id, {});
+    expect(options(cleared.after)).toEqual(options(row!));
+  });
+
+  it("a new address is created with compression on only when its entry says so", async () => {
+    const id = await stack();
+    const made = await addAppStackDomainsTransactional(db(), {
+      organizationId: orgA,
+      stackId: id,
+      entries: [
+        { hostname: "gz-on.example", componentKey: "web", internalPort: 8080, compression: true },
+        { hostname: "gz-off.example", componentKey: "web", internalPort: 8080, compression: false },
+        { hostname: "gz-none.example", componentKey: "web", internalPort: 8080 },
+      ],
+    });
+    expect(Object.fromEntries(made.map((row) => [row.hostname, row.compression]))).toEqual({
+      "gz-on.example": true,
+      "gz-off.example": false,
+      "gz-none.example": false,
+    });
+    for (const row of made) expect({ ...options(row), compression: false }).toEqual({ redirectToDomainId: null, compression: false, accessUsername: null, accessPasswordHash: null, pathRoutes: [] });
+  });
+
+  it("keeps the stored verifier when none is sent, replaces it when one is, and refuses to keep one that was never set", async () => {
+    const id = await stack();
+    const [row] = await add(id, ["pw.example"]);
+    await expect(route(id, row!.id, { protection: { username: "team" } })).rejects.toMatchObject({ code: "PASSWORD_REQUIRED" });
+    await route(id, row!.id, { protection: { username: "team", passwordHash: VERIFIER } });
+    const renamed = await route(id, row!.id, { protection: { username: "staff" } });
+    expect(options(renamed.after)).toMatchObject({ accessUsername: "staff", accessPasswordHash: VERIFIER });
+    const changed = await route(id, row!.id, { protection: { username: "staff", passwordHash: OTHER_VERIFIER } });
+    expect(changed.after.accessPasswordHash).toBe(OTHER_VERIFIER);
+    await route(id, row!.id, {});
+    await expect(route(id, row!.id, { protection: { username: "staff" } })).rejects.toMatchObject({ code: "PASSWORD_REQUIRED" });
+  });
+
+  it("redirects only to another address of the same stack, never in a chain, and removing the target clears the redirect", async () => {
+    const id = await stack();
+    const [a, b, c] = await add(id, ["a.redir.example", "b.redir.example", "c.redir.example"]);
+    const other = await stack();
+    const [foreign] = await add(other, ["foreign.redir.example"]);
+    const otherOrg = await stack(orgB);
+    const [tenant] = await add(otherOrg, ["tenant.redir.example"], orgB);
+    for (const target of [a!.id, foreign!.id, tenant!.id, "sdom_missing"]) {
+      await expect(route(id, a!.id, { redirectToDomainId: target })).rejects.toMatchObject({ code: "REDIRECT_TARGET" });
+    }
+    const redirected = await route(id, a!.id, { redirectToDomainId: b!.id, compression: true });
+    expect(options(redirected.after)).toMatchObject({ redirectToDomainId: b!.id, compression: true });
+    // b is a destination: it cannot start redirecting; c cannot redirect to a, which redirects.
+    await expect(route(id, b!.id, { redirectToDomainId: c!.id })).rejects.toMatchObject({ code: "REDIRECT_CHAIN" });
+    await expect(route(id, c!.id, { redirectToDomainId: a!.id })).rejects.toMatchObject({ code: "REDIRECT_CHAIN" });
+    await expect(route(id, c!.id, { redirectToDomainId: b!.id })).resolves.toMatchObject({ after: { redirectToDomainId: b!.id } });
+    await expect(removeAppStackDomainTransactional(db(), { organizationId: orgA, stackId: id, domainId: b!.id })).resolves.toBe(true);
+    const left = await listAppStackDomains(db(), { organizationId: orgA, stackId: id });
+    expect(left.map((r) => [r.hostname, r.redirectToDomainId, r.compression])).toEqual([
+      ["a.redir.example", null, true],
+      ["c.redir.example", null, false],
+    ]);
+  });
+
+  it("refuses an address of another organization, of a deleted stack or of another stack with NOT_FOUND", async () => {
+    const id = await stack();
+    const [row] = await add(id, ["nf.opt.example"]);
+    const other = await stack();
+    await expect(route(id, row!.id, { compression: true }, orgB)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(route(other, row!.id, { compression: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(route(id, "sdom_missing", { compression: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await db().update(appStacks).set({ status: "deleted", deletedAt: new Date() }).where(eq(appStacks.id, id));
+    await expect(route(id, row!.id, { compression: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const [stored] = await listAppStackDomains(db(), { organizationId: orgA, stackId: id });
+    expect(stored!.compression).toBe(false);
   });
 });

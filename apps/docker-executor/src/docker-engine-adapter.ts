@@ -54,7 +54,10 @@ import {
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
   type AppStackCreateIpcResult,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackTerminalOpenIpcRequest,
@@ -1504,8 +1507,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     return this.appStackEngine.prepareAppStack(req);
   }
 
-  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.appStackEngine.createAppStackComponents(req);
+  }
+
+  public resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    return this.appStackEngine.resolveAppStackImage(req);
   }
 
   public startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {

@@ -2,7 +2,8 @@
 
 Operator procedures for application stacks (`ADR-0035`). Design record:
 `docs/architecture/adr/0035-application-stacks.md`. Acceptance evidence and what is still pending:
-`docs/security/hcp-spec-005-acceptance-report.md`.
+`docs/security/hcp-spec-005-acceptance-report.md`. The routing options of a stack's addresses (`ADR-0037`,
+`docs/architecture/adr/0037-application-routing-options.md`) are procedure 10.
 
 `<stackId>` is the id in the address of the application page (`/apps/<stackId>`, it starts with `stk_`);
 `<componentKey>` and `<volumeKey>` are the names the template gives a component and a volume. The database commands
@@ -14,18 +15,19 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## Scope and limits (read first)
 
-- **The four capability flags are `false` on every server in this release** (`applicationTemplatesAvailable`,
-  `applicationStacksAvailable`, `stackPublicPortsAvailable`, `gitBuildsAvailable`). They are fixed in code
-  (`apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or option turns them on. While they are
-  `false`, every admin template route and every stack route answers `NOT_SUPPORTED` (reason
-  `STACK_UNSUPPORTED_FEATURE`): nobody can create, start, stop or delete a stack from the panel. The procedures below
-  apply once the owner turns the flags on.
+- **Two of the four capability flags are on.** `applicationTemplatesAvailable` and `applicationStacksAvailable` are
+  `true` on a server (runtime backend `linux-systemd`) and `false` on the other backends; `stackPublicPortsAvailable`
+  and `gitBuildsAvailable` are `false` everywhere (`ADR-0036` §2.10). They follow the runtime backend in code
+  (`packages/contracts/src/resources.ts`, `apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or
+  option changes them. Where a flag is `false`, the routes behind it answer `NOT_SUPPORTED` (reason
+  `STACK_UNSUPPORTED_FEATURE`). Release `0.9.0` has all four `false`: there nobody can create, start, stop or delete
+  a stack from the panel, and the procedures below do not apply.
 - **First release scope:** images only (no build, no Git), Dedicated allocations only, HTTP ingress only, Let's Encrypt
   (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
   `app.create`, `app.update`, `app.control`, `app.delete`). The server administrator's console has the template catalog
   (**Modelli**, kind «Applicazione multi-servizio») and the list of every stack in **Applicazioni**. A row opens the
-  stack's page, where the administrator reads a component's logs and opens a terminal in it (procedures 10 and 11,
+  stack's page, where the administrator reads a component's logs and opens a terminal in it (procedures 11 and 12,
   `ADR-0041`). The administrator cannot start, stop, change or delete a customer's stack from that page; collaborators
   and support access have no stack permission.
 - **Never run `docker rm`, `docker volume rm`, `docker network rm` or any `prune` on a stack's objects by hand**, except
@@ -35,8 +37,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   not see the retained volumes of deleted stacks; after a forced downgrade the stack containers keep running without
   management; the panel console (`hp-web`, tcp 3000) is reachable from every Docker bridge, stack networks included, and
   is protected by its session only; a new image digest needs a new template version; after a host reboot the components
-  that use secrets stay broken until someone restarts them (procedure 8); volumes have no size limit; a server reboot,
-  the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build machine.
+  that read a secret file stay broken until someone restarts them (procedure 8); volumes have no size limit; a server
+  reboot, the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build
+  machine.
 
 ## 1. See a stack's real state
 
@@ -139,7 +142,27 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migration `0025` is additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026` and `0030` are additive.
+6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
+   knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
+   with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
+   written in it. Stacks of the first format do not block, and neither does a template of the extended format that no
+   stack uses (the built-in WordPress template is such a row on every panel). See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and (exists (select 1 from app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'))"
+   ```
+   To go back without forcing, delete those stacks only (step 2); `--allow-feature-loss` works as in step 3, and the
+   older release then fails to read those stacks until the panel is upgraded again.
+7. **Routing options (`ADR-0037`).** The same command also exits with **code 8** when the target release does not
+   list the feature `app-routing-options` and an address redirects, is protected by a password or has a path rule.
+   Compression alone does not count. See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, hostname, redirect_to_domain_id is not null as redirects, access_username is not null as protected, jsonb_array_length(path_routes) as paths from app_stack_domains where redirect_to_domain_id is not null or access_username is not null or path_routes <> '[]'::jsonb"
+   ```
+   To go back without forcing: switch those options off on each address (procedure 10). With `--allow-feature-loss`
+   an older release that still manages the stacks writes the route files without the options at its next route
+   refresh: **a protected address becomes public**, a redirecting address serves the application and the path rules
+   stop. The rows keep the options; after upgrading again they apply at the next route refresh.
 
 ## 5. Restore the panel on a new server
 
@@ -172,7 +195,7 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    Installed stacks keep running; a deploy or upgrade that needs a new revision of that template is refused
    (`STACK_TEMPLATE_UNPUBLISHED`).
 3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. A server
-   administrator reads the same masked lines without the customer (procedure 10). For more:
+   administrator reads the same masked lines without the customer (procedure 11). For more:
    `sudo docker logs --tail 500 hp_app_<stackId>_<componentKey>`; that output is **not** masked and may hold a secret
    value: never paste it into a ticket.
 4. What the panel never does for a stack: the drift reconciler never restarts or recreates a stack container; a stack
@@ -180,7 +203,19 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## 7. Turn the feature off again
 
-1. In this release the flags are already `false`: nothing is offered, and nothing needs turning off.
+1. **There is no runtime switch.** On a server (runtime backend `linux-systemd`) this release turns
+   `applicationTemplatesAvailable` and `applicationStacksAvailable` on in code (`appFeaturesFor`,
+   `packages/contracts/src/resources.ts`); no environment variable, option or setting turns them off. What an operator
+   can do instead:
+   - **Stop new installations.** In **Modelli**, switch off **Offerto ai clienti** on each application template and
+     archive the ones that are not built-in (procedure 6, step 2). The catalog then offers nothing to install;
+     installed stacks keep running.
+   - **Go back to an earlier release**, where both flags are `false` on every backend:
+     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases before this one, from `0.9.0`,
+     list `app-stacks` but not `app-format-v2` in `RELEASE.json`, so the gate exits with **code 8** while a stack that
+     is not deleted uses the extended format (procedure 4, step 6); stacks of the first format do not block. An older
+     release does not list `app-stacks` and refuses while any stack that is not deleted exists (procedure 4, step 1).
+   - **Change the code:** a release whose `appFeaturesFor` gives `false` for `linux-systemd`.
 2. If a release with the flags on is followed by one with them off (or by a downgrade), do this first: disable or
    archive the templates so nobody installs one, and ask the customers to stop or delete their stacks. Once the flags
    are off, nobody can do it from the panel (every stack route answers `NOT_SUPPORTED`).
@@ -191,13 +226,20 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. A stack's secret files live under `/run/hosting-panel/secrets`, a tmpfs that is empty after every boot. Docker
    starts the stack containers again (`unless-stopped`) before the executor runs, so a component that reads a secret
-   file finds none and fails or runs without it. Nothing repairs this by itself. Components without secrets are not
-   affected.
-2. The stacks that have secrets:
+   file finds none and fails or runs without it. Nothing repairs this by itself. A secret given in the environment
+   (extended format, `ADR-0036` §2.5) is kept by Docker in the container, so a component whose secrets are all in its
+   environment keeps working. Components without secrets are not affected.
+2. The component logs stay masked. The executor takes the values of the environment secrets from the container
+   itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the values of
+   the secret files it finds. One case needs the files: a value in which the template's text does not separate two
+   secrets in one way only (two secrets side by side, or that text also inside a secret). Until **Riavvia** writes the
+   files again, the executor refuses that component's logs, and the panel says they are not available right now; it
+   never shows them unmasked.
+3. The stacks that have secrets:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and exists (select 1 from app_stack_secrets x where x.stack_id = s.id)"
    ```
-3. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
+4. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
    writes the secret files again, then restarts every component. **Avvia** does not rewrite the files of a component
    that is already running.
 
@@ -205,23 +247,46 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
-   templates) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own prefix is
-   `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the «Lavoro periodico
-   con archivio» template on the machine: its `preflight` step fails and names the image when it is missing). They
-   import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
+   templates of the first format), `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
+   template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
+   the images are local) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
+   prefix is `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the
+   «Lavoro periodico con archivio» template on the machine: its `preflight` step fails and names the image when it is
+   missing). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
    next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
    ```
+   The WordPress script has a second run, for a template that comes from **Importa da Compose**: it imports the
+   WordPress and MariaDB Compose file of the importer's tests and makes the same checks on the draft (three generated
+   values: the database account too). The file names the versions the built-in template pins and the import is given
+   the digests recorded with them, so nothing new is downloaded. With `HP_ACCEPT_REGISTRY_CASES=1` it also asks the
+   public registry for the two tags through the product, a read that needs the network; without it that step is
+   skipped:
+   ```bash
+   node infra/linux/accept-app-stack-wordpress.mjs --imported
+   ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
-   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the two template scripts: their
+   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
    never prune, and clean up at the end, also on Ctrl-C.
+   One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
+   is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
+   it (in Docker that label has another value, which the script's gate translates in both directions). The engine
+   script and the HTTP cache script do not yet: when such a check falls inside their run, the server's proxy joins
+   the run's edge network, the removal steps fail with "A stack network is still used by another container" and
+   `nothing-left` reports a network. The server's proxy keeps serving and is not restarted. Repair: find the
+   network the run left (its name contains `swarmtest_<hex>`), detach the server's proxy from it, remove it:
+   ```bash
+   sudo docker network ls --filter name=swarmtest_
+   sudo docker network disconnect <network> hp_ingress_proxy
+   sudo docker network rm <network>
+   ```
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
-   for the HTTP-cache script), it prints `SKIP … nothing was created` and exits 1. Without a build the HTTP-cache
+   for the template scripts), it prints `SKIP … nothing was created` and exits 1. Without a build a template
    script prints `FAIL preflight: run corepack pnpm run build first`.
 4. The last line is `RESULT <n>/<m> passed`, followed by `, <k> skipped (not counted in n/m)` when steps were skipped,
    and the time. The exit code is 0 only when every counted step passed.
@@ -232,8 +297,93 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker network ls --filter name=swarmtest_
    sudo docker volume ls --filter name=swarmtest_
    ```
+6. The routing options (`ADR-0037`) have their own check, `infra/linux/accept-app-routing-options.mjs`:
+   ```bash
+   node infra/linux/accept-app-routing-options.mjs
+   ```
+   It deploys no stack. It writes a route file with the production writer, starts a throw-away proxy from
+   `traefik:v3.7` on `127.0.0.1:16880` and `127.0.0.1:16843` and two small web containers, and asks the proxy what a
+   visitor would get (redirect, password, compression, path rules): once as a server without Let's Encrypt, once
+   with it. Unlike the scripts above it uses the `docker` command line behind a name check, not a gate socket. It
+   creates only objects named `hp_swarmtest_rt_<hex>…` or `hp_app_stk_swarmtest_<hex>_…`, puts no label on them (a
+   live panel never adopts them) and removes them at the end, also on Ctrl-C. It needs `traefik:v3.7` and the web
+   image of the built-in «HTTP + cache» template already on the machine (`SKIP … nothing was created` otherwise) and
+   both ports free. In the second pass the certificate authority is a closed local port on purpose, so no
+   certificate request leaves the machine: the `INFO` line counts the proxy's error lines about it, and they are
+   expected. A `FAIL` of `foreign-containers-untouched` names a container that was on the machine before the run
+   and whose networks changed, or that is gone: look at it before anything else.
 
-## 10. Administrator: the page and the logs of a customer's application
+## 10. Routing options of an address
+
+Each web address of a stack has four options (`ADR-0037`): a redirect to another address of the same stack, password
+protection (the browser asks a user name and a password), compression, and up to four path rules that send a
+sub-path such as `/api` to another component and port of the same stack. A customer owner or a hosting administrator
+of the organisation (`app.update`) changes them on the application page, **Opzioni** next to the address. The server
+administrator's console has no such action, and nobody writes proxy configuration.
+
+1. **When a change applies.** Saving stores the options and, when the routes of the stack follow its addresses (first
+   case below), queues the route refresh in the same transaction, so no other action can be queued in between; adding
+   or removing an address does the same. The panel's periodic check of the applications (every minute by default)
+   queues it again when that refresh failed and the addresses changed since it was queued.
+   The refresh is a short action on the stack that rewrites `app_<stackId>.yml` for the revision that runs, also
+   when a newer version was asked for and not installed (an upgrade that failed before it changed anything): the
+   proxy reads the file again by itself and no container is restarted. An option change waits neither the five
+   minutes of a health-only change nor the ten minutes after a failed action; after a failed refresh the periodic
+   check waits those ten minutes only for the addresses that refresh was queued with (after a restart of the API, which
+   remembers no queued refresh, only when the saved addresses are those the last successful publication was made from). A change either reaches every route
+   file of the stack that may be in place or is refused, so the panel never shows an option the live file lacks:
+   - running or partly running, with no action in progress and the last action not a stop, or with only the panel's
+     own route refresh queued or running (it reads the addresses when it runs; the check after it catches a change it
+     missed): saved, and the page says «Opzioni salvate: valgono tra qualche istante» (the API answers `applies: shortly`);
+   - not installed yet, or stopped (a stop withdraws the routes): saved, and the page says the options apply when the
+     application is started (`applies: at_start`); the next start publishes them;
+   - any other state (an action the customer asked for in progress, failed, outcome to be verified, or a stop the
+     customer asked for that did not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
+     nothing would rewrite. Let the action finish, or start or restart the application, then save again. After a stop
+     that did not finish the application reads running or degraded, so the reason is `stop_unfinished` and the page
+     says to press Stop again or Restart.
+
+   Removing an address frees the name for anyone, another customer included, while a live file could still serve
+   it, so it is stricter: it is accepted only when the refresh it queues withdraws the name now (first case above), or
+   when nothing is published and no action is open (never installed, or stopped). While the panel's own refresh is
+   queued or running (it may have read the address already) or a first install runs, it is refused with the same
+   `409 RESOURCE_LOCKED`; remove it once that action is over. Adding an address is always possible: it
+   reads «In attesa» until a published file holds it.
+
+   When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
+   what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
+   next to every address that shows an option, never the option as active. The next successful start, restart or
+   refresh publishes what is saved.
+   `routesPending` is exact: every successful publication stores, with the routes hash, a fingerprint of the addresses
+   and options it was made from (`app_stacks.applied_addresses_hash`), whatever the health of the targets, and the
+   field is true exactly while the saved ones differ from it. The same comparison decides whether a change queues the
+   refresh in its own request, so a path to a part that has no address of its own, a new address, or the first
+   address of an application queues it like any other change. A stop, a recovery or an older release that writes the
+   routes hash alone leaves the fingerprint unknown, which reads as pending while routes are published; with nothing
+   published (stopped, never installed) nothing is pending.
+2. **See the options of a stack** (read-only; the query leaves the verifier column out on purpose):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, hostname, redirect_to_domain_id, compression, access_username, path_routes from app_stack_domains where stack_id = '<stackId>' order by hostname"
+   ```
+3. **The password.** The panel keeps only a verifier of it (it starts with `$apr1$`), in the database row and in the
+   route file; nobody can read the password back. A forgotten password is replaced from **Opzioni** with a new one of
+   at least 12 characters. Never paste `app_<stackId>.yml` or the column `access_password_hash` into a ticket: a
+   verifier can be attacked offline. The application never receives the user name or the password.
+4. **The password travels in clear over HTTP** until the address has a usable certificate, and always on a server
+   without Let's Encrypt; the options dialog says so on such an address. Once the certificate is usable, HTTP only
+   sends the visitor to HTTPS and asks nothing.
+5. **A redirect** is permanent and keeps path and query. The redirecting address is published only while its
+   destination is. Removing the destination clears the redirect, and the address serves the application again. A
+   redirecting address has no password and no path rule of its own: set them on the destination.
+6. **A path rule whose target is not ready** (its component is not healthy) is not published: requests under that
+   path reach the address's main component until the target reads healthy again. A path must point at an entry
+   point of both the version that runs and the one asked for, and an upgrade or a rollback to a version without that
+   entry point is refused (`path_target_removed`): remove the path first. The dialog offers only those entry points
+   (`pathTargets` of the application's detail) and marks a target the application no longer offers as «Non più
+   disponibile».
+7. **Downgrade:** procedure 4, step 7. **The real-Docker check:** procedure 9, step 6.
+
+## 11. Administrator: the page and the logs of a customer's application
 
 Only a server administrator, and only where `applicationStacksAvailable` is `true` (`ADR-0041`). No support visit is
 needed, and a support visit gives none of this.
@@ -253,12 +403,12 @@ needed, and a support visit gives none of this.
    on this server; `404` the application is unknown or deleted, or it has no component of that name; `503` the
    executor is not running.
 
-## 11. Administrator: a terminal in a component
+## 12. Administrator: a terminal in a component
 
 A text shell (`/bin/sh`) inside the container of one component, for a server administrator (`ADR-0041`). It is the
 terminal of the sites (`ADR-0027`) with a different place and a different user.
 
-1. **Open it.** On the application's page (procedure 10), **Terminale** on the component's row. The account needs
+1. **Open it.** On the application's page (procedure 11), **Terminale** on the component's row. The account needs
    two-step authentication, and every open asks for a **new** six-digit code: a code already used, also for signing
    in, is refused until the next one. Wrong codes count like the ones of a sign-in: the fifth locks the account for 15
    minutes.
@@ -267,9 +417,10 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
    The panel never opens a shell on the host and never starts a helper container for this. The tools are the ones in
    the image, often very few; full-screen programs (editors, pagers, `top`) do not work. **Ctrl-C** stops a command,
    **Ctrl-D** ends the shell, **Chiudi** ends the session.
-3. **What it can reach.** The secret files of the application in `/run/secrets` are readable from the shell and are
-   **not** masked: never paste what a session prints into a ticket. The shell can change the application's data in
-   its volumes; the panel records that a session took place, never what it did.
+3. **What it can reach.** The secret files of the application in `/run/secrets`, and the secrets a template of the
+   extended format gives in the component's environment (the shell inherits it: `env` prints them), are readable from
+   the shell and are **not** masked: never paste what a session prints into a ticket. The shell can change the
+   application's data in its volumes; the panel records that a session took place, never what it did.
 4. **Limits, shared with the sites.** Four sessions on the server, counting sites and applications together; one per
    component (two components of one application may each have one). A session ends by itself 60 seconds after the
    page stops reading (tab closed or asleep) or 30 minutes after it was opened.

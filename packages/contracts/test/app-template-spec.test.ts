@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  type AppTemplateParameter,
-  type AppTemplateService,
-  type AppTemplateSpec,
+  type AppTemplateParameterV1 as AppTemplateParameter,
+  type AppTemplateServiceV1 as AppTemplateService,
+  type AppTemplateSpecV1 as AppTemplateSpec,
   APP_TEMPLATE_PARAMETER_TYPES,
   AppTemplateParameterSchema,
   AppTemplateSpecSchema,
@@ -12,7 +12,7 @@ import {
 const FIXTURE: unknown = JSON.parse(
   readFileSync(new URL("./fixtures/app-stack-notes-demo/spec.json", import.meta.url), "utf8"),
 );
-const SPEC = AppTemplateSpecSchema.parse(FIXTURE);
+const SPEC = AppTemplateSpecSchema.parse(FIXTURE) as AppTemplateSpec;
 
 /** A deep copy of the fixture spec changed by `change`. */
 const variant = (change: (spec: AppTemplateSpec, app: AppTemplateService, cache: AppTemplateService) => void): AppTemplateSpec => {
