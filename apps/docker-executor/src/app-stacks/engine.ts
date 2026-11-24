@@ -306,7 +306,7 @@ const byKey = (a: { readonly key: string }, b: { readonly key: string }) => (a.k
 /** app_start_index descending (non-numeric = 0), ties by key descending. An upgrade keeps the label of a component it
  *  does not replace, so after one the labels alone can put a component before what uses it: `order`, the keys of the
  *  applied plan's components in plan order, replaces them. By descending position in it; a container whose key it does
- *  not list (left over from an older version) goes first, those among themselves by the label as above. */
+ *  not list (one the applied plan does not name) goes first, those among themselves by the label as above. */
 function reverseStartOrder(containers: readonly OwnContainer[], order?: readonly string[]): OwnContainer[] {
   const index = (c: OwnContainer) => {
     const raw = c.labels[APP_STACK_LABELS.startIndex] ?? "";
