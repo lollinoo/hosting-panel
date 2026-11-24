@@ -157,15 +157,23 @@ next messages go unsigned.
   every webhook and Telegram message ends as `unreachable`.
 - **A receiver on this server or on a private network cannot be used.** The panel refuses an address that resolves to
   one of this server's own addresses or to a private one, at save and at every send. This server's own addresses are
-  those of its network interfaces and the public addresses the panel records for it: the IPv4 the installer was given
-  with `--ipv4` (by hand for a server behind address translation, where no interface has it) or detected, and an IPv6
-  stored for the server, which the installer does not write today (issue #184). The recorded address is the one the
-  last run of the installer recorded, read at every check: after the server's public address changes, run the
-  installer again with `--ipv4 <new address>`, and it counts at the next send (issue #184 tracks that a rerun without
-  the flag does not keep it). If the recorded addresses cannot be read, or one of them is not an address (the
-  installer takes `203.0.113.05`, with a leading zero), nothing is sent and the attempt is `unreachable`: run the
-  installer again with `--ipv4` and the address written without leading zeros. Put the receiver on another machine
-  with a public address.
+  those of its network interfaces and the public addresses the panel records for it. Every run of the installer
+  hands them to the panel, and they are read at every check, so a change counts at the next send:
+  - **IPv4**: once the panel has recorded an IPv4, only `--ipv4` changes it; an IPv4 the installer kept or detected is
+    recorded only on a first install. To correct a wrong recorded IPv4, or after the server's public IPv4 changes, run
+    the installer again with `--ipv4 <address>`. Without the flag the installer keeps the IPv4 its last run used
+    (`HP_PANEL_IPV4` in `/etc/hosting-panel/executor.env`), else takes the source address of the default route; its
+    `Panel IPv4:` line says which. When the panel has another IPv4 recorded than the one the run uses, the installer
+    prints a `WARNING:` line with both and changes nothing: run it again with `--ipv4 <address>` to record the right one.
+  - **IPv6**: never detected. `--ipv6 <address>` records it (written without brackets, zone or prefix length),
+    `--ipv6 none` removes it, and a run without the flag leaves the recorded one as it is. A loopback, link-local,
+    unspecified or IPv4-mapped IPv6 is refused.
+  - **Behind address translation** (NAT) no interface has the public address: give it once with
+    `--ipv4 <public address>`, and `--ipv6 <public address>` if the server has one; later reruns keep them.
+
+  If the recorded addresses cannot be read, or one of them is not an address (an older installer took `203.0.113.05`,
+  with a leading zero), nothing is sent and the attempt is `unreachable`: run the installer again with `--ipv4` and
+  the address written without leading zeros. Put the receiver on another machine with a public address.
 
 ## 5. A channel went quiet
 

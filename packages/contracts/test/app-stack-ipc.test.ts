@@ -333,6 +333,11 @@ describe("application stack IPC wire", () => {
     expect(AppStackLogsIpcResultSchema.safeParse(Array.from({ length: APP_STACK_LOG_TAIL_MAX + 1 }, () => logsResult[0])).success).toBe(false);
   });
 
+  it("names the component and the tail only: the executor learns which secret files a container holds from the container", () => {
+    expect(Object.keys(AppStackLogsIpcRequestSchema.shape).sort()).toEqual(["componentKey", "organizationId", "stackId", "tail"]);
+    expect(AppStackLogsIpcRequestSchema.parse(logs)).toEqual(logs);
+  });
+
   it("lists twelve executor reasons, each mapped to an error code by a total frozen map", () => {
     expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(12);
     expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(12);

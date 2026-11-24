@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { OperationKind } from "../operations.js";
+import type { PermissionKey } from "../permissions.js";
+import { appStackBackupEnqueueRefusal } from "./stack-backups.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_STATUSES, type AppStackStatus } from "./stack-status.js";
 
@@ -13,6 +15,12 @@ export const APP_STACK_OPERATION_KINDS = [
   "stack.delete",
 ] as const satisfies readonly OperationKind[];
 export type AppStackOperationKind = (typeof APP_STACK_OPERATION_KINDS)[number];
+/**
+ * What the detail's `allowedActions` may hold: the seven kinds above, then the backup and the restore the customer
+ * starts from the backups section (ADR-0038). Never `stack.prune`: that is the platform's own work.
+ */
+export const APP_STACK_ALLOWED_ACTION_KINDS = [...APP_STACK_OPERATION_KINDS, "stack.backup", "stack.restore"] as const satisfies readonly OperationKind[];
+export type AppStackAllowedAction = (typeof APP_STACK_ALLOWED_ACTION_KINDS)[number];
 /** Kinds that carry a revision to deploy (a new one for upgrade/rollback, the desired one for deploy). */
 export const APP_STACK_REVISION_KINDS = ["stack.deploy", "stack.upgrade", "stack.rollback"] as const satisfies readonly AppStackOperationKind[];
 
@@ -135,4 +143,41 @@ export const APP_STACK_ENQUEUE_TRANSITIONS: Readonly<
 /** The status the request transaction writes, or null when the kind is not allowed from `current`. */
 export function appStackEnqueueTarget(kind: AppStackOperationKind, current: AppStackStatus): AppStackStatus | null {
   return APP_STACK_ENQUEUE_TRANSITIONS[kind][current] ?? null;
+}
+
+/** The permission the route of each kind asks of the caller; a deploy that carries settings also asks `app.update`. */
+export const APP_STACK_KIND_PERMISSIONS: Readonly<Record<AppStackAllowedAction, PermissionKey>> = Object.freeze({
+  "stack.deploy": "app.control",
+  "stack.start": "app.control",
+  "stack.stop": "app.control",
+  "stack.restart": "app.control",
+  "stack.upgrade": "app.update",
+  "stack.rollback": "app.update",
+  "stack.delete": "app.delete",
+  "stack.backup": "app.control",
+  "stack.restore": "app.control",
+});
+
+/**
+ * Why the request transaction refuses `kind` now, or null when it accepts it: an active operation holding the stack's
+ * lock refuses every kind (`locked`, retryable), then the table decides from the stored status (`status`). The status
+ * the page shows (health included) never enters: only an operation changes the stored one.
+ */
+export function appStackEnqueueRefusal(kind: AppStackOperationKind, stored: AppStackStatus, locked: boolean): "locked" | "status" | null {
+  if (locked) return "locked";
+  return appStackEnqueueTarget(kind, stored) === null ? "status" : null;
+}
+
+/**
+ * The kinds whose lock, status and permission checks pass now for a caller who holds the permissions `may` grants, in
+ * APP_STACK_ALLOWED_ACTION_KINDS order: each kind through the refusal its own enqueue throws with.
+ */
+export function appStackAllowedActions(
+  stored: AppStackStatus,
+  locked: boolean,
+  may: (permission: PermissionKey) => boolean,
+): AppStackAllowedAction[] {
+  const refusal = (kind: AppStackAllowedAction) =>
+    kind === "stack.backup" || kind === "stack.restore" ? appStackBackupEnqueueRefusal(stored, locked) : appStackEnqueueRefusal(kind, stored, locked);
+  return APP_STACK_ALLOWED_ACTION_KINDS.filter((kind) => refusal(kind) === null && may(APP_STACK_KIND_PERMISSIONS[kind]));
 }

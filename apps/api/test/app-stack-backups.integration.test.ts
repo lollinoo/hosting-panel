@@ -3,15 +3,18 @@ import {
   APP_BUILT_IN_TEMPLATES,
   APP_IMAGE_ALLOWLIST,
   APP_STACK_BACKUP_ACTIONS_PER_HOUR,
+  APP_STACK_STATUSES,
   AppStackBackupsDtoSchema,
   MANUAL_BACKUPS_KEPT,
   PLATFORM_OPS_ORG_ID,
   isTerminalOperationStatus,
+  type AppStackStatus,
 } from "@hosting-panel/contracts";
 import {
   and,
   appStackBackupCopies,
   appStackBackups,
+  appStackComponents,
   appStacks,
   auditEvents,
   backupTargets,
@@ -20,9 +23,12 @@ import {
   hostingAdminScopes,
   operations,
   operationSteps,
+  organizations,
   outboxEvents,
   platformInstallations,
   resourceQuotas,
+  rolePermissions,
+  roles,
   setPolicyTargets,
   users,
 } from "@hosting-panel/database";
@@ -463,6 +469,89 @@ describe("application backups HTTP API (ADR-0038)", () => {
     expect(own.activeOperationId).not.toBeNull();
     expect(own.platformWork).toBeNull();
     await settle(stackId);
+  });
+
+  it("issue #106: the detail offers a backup and a restore exactly when the routes accept them: every stored status, the lock, the caller", async () => {
+    const offered = async (stackId: string, who: HarnessCustomer = h.a): Promise<Json> => {
+      const res = await h.call(who.token, "GET", `${base(h.a)}/${stackId}`);
+      expect(res.status, res.raw).toBe(200);
+      return res.body.data as Json;
+    };
+    const backupKinds = (detail: Json) => (detail.allowedActions as string[]).filter((k) => k === "stack.backup" || k === "stack.restore");
+    const store = (stackId: string, status: AppStackStatus) => db().update(appStacks).set({ status }).where(eq(appStacks.id, stackId));
+    // One application per kind: the hourly limit counts the accepted actions of each application.
+    const forBackup = await stopped("offerta-copia");
+    const forRestore = await stopped("offerta-ripristino");
+    const source = await saved(forRestore);
+    const target = { "stack.backup": forBackup, "stack.restore": forRestore } as const;
+    const ask = (kind: keyof typeof target, who: HarnessCustomer = h.a) =>
+      kind === "stack.backup" ? backup(forBackup, who.token) : restore(forRestore, source, "offerta-ripristino", who.token);
+
+    for (const kind of ["stack.backup", "stack.restore"] as const) {
+      const stackId = target[kind];
+      // A deleted application is not found by the detail nor by the routes.
+      for (const status of APP_STACK_STATUSES.filter((s) => s !== "deleted")) {
+        await store(stackId, status);
+        const listed = (await offered(stackId)).allowedActions.includes(kind);
+        const res = await ask(kind);
+        expect(res.status === 202, `${kind} from a stored ${status}: ${res.raw}`).toBe(listed);
+        if (!listed) {
+          expectRefusal(res, 409, "RESOURCE_LOCKED", { field: "status", reason: status });
+          continue;
+        }
+        // Its operation now holds the application: neither is offered, and the route refuses, until it ends.
+        expect(backupKinds(await offered(stackId))).toEqual([]);
+        expectRefusal(await ask(kind), 409, "RESOURCE_LOCKED");
+        await settle(stackId);
+      }
+      await store(stackId, "stopped");
+    }
+
+    // A stale reading shows unknown while the stored status stays running: both are offered, and the route accepts.
+    await store(forBackup, "running");
+    await db()
+      .update(appStackComponents)
+      .set({ healthObservedAt: new Date(Date.now() - 10 * 60_000) })
+      .where(eq(appStackComponents.stackId, forBackup));
+    const stale = await offered(forBackup);
+    expect([stale.status, stale.outcomeUnknown, backupKinds(stale)]).toEqual(["unknown", false, ["stack.backup", "stack.restore"]]);
+    expect((await ask("stack.backup")).status).toBe(202);
+    await settle(forBackup);
+
+    // The platform's clean-up holds the lock with a status that accepts: nothing is offered, both are refused.
+    await ensurePlatformOpsOrg(db());
+    expect(await enqueueAppStackPrune(db(), forRestore)).toBe(true);
+    expect(backupKinds(await offered(forRestore))).toEqual([]);
+    expectRefusal(await backup(forRestore), 409, "RESOURCE_LOCKED");
+    expectRefusal(await ask("stack.restore"), 409, "RESOURCE_LOCKED");
+    expect(await settle(forRestore)).toBe("stopped");
+    expect(backupKinds(await offered(forRestore))).toEqual(["stack.backup", "stack.restore"]);
+
+    // The caller's: a reader and an editor (app.update, not app.control) are offered neither, and the routes refuse them.
+    await db().insert(roles).values([
+      { id: "role_app_reader_bk106", name: "app_reader_bk106" as never, description: "Read only", isPreset: false },
+      { id: "role_app_editor_bk106", name: "app_editor_bk106" as never, description: "Read and change", isPreset: false },
+    ]);
+    await db().insert(rolePermissions).values([
+      { roleId: "role_app_reader_bk106", permissionKey: "app.read" },
+      { roleId: "role_app_editor_bk106", permissionKey: "app.read" },
+      { roleId: "role_app_editor_bk106", permissionKey: "app.update" },
+    ]);
+    for (const role of ["role_app_reader_bk106", "role_app_editor_bk106"]) {
+      const who = await h.addMember(h.a.orgId, role as "role_customer_collaborator");
+      expect(backupKinds(await offered(forRestore, who)), role).toEqual([]);
+      expect((await ask("stack.backup", who)).status, role).toBe(403);
+      expect((await ask("stack.restore", who)).status, role).toBe(403);
+    }
+    // A suspended organisation still reads its application and is offered neither: every change is refused.
+    await db().update(organizations).set({ status: "suspended" }).where(eq(organizations.id, h.a.orgId));
+    try {
+      expect(backupKinds(await offered(forRestore))).toEqual([]);
+      expect((await ask("stack.backup")).body.error?.code).toBe("ORGANIZATION_SUSPENDED");
+      expect((await ask("stack.restore")).body.error?.code).toBe("ORGANIZATION_SUSPENDED");
+    } finally {
+      await db().update(organizations).set({ status: "active" }).where(eq(organizations.id, h.a.orgId));
+    }
   });
 
   it("the nightly run keeps the three newest manual backups, and removes those of a deleted application after the retention period", async () => {

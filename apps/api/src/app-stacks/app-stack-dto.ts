@@ -2,6 +2,7 @@ import {
   effectiveComponentHealth,
   sumAppStackPlanResources,
   type AppStackAcceptedEnvelope,
+  type AppStackAllowedAction,
   type AppStackBackupDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
@@ -77,6 +78,8 @@ export function appStackDetailDto(input: {
   parameters: readonly AppStackParameterRow[];
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
+  /** appStackAllowedActions for the caller, with the lock read for this detail. */
+  allowedActions: AppStackAllowedAction[];
   installed: { revisionNumber: number; templateVersionNumber: number } | null;
   platformWork: AppStackPlatformWork | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
@@ -114,6 +117,9 @@ export function appStackDetailDto(input: {
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,
     platformWork: input.platformWork,
+    allowedActions: input.allowedActions,
+    // Only an operation whose outcome is in doubt stores `unknown`; a stale reading leaves the stored status as it was.
+    outcomeUnknown: stack.status === "unknown",
     revisionNumber: desired?.revision.revisionNumber ?? null,
     components: components.map((c) => ({
       key: c.key,

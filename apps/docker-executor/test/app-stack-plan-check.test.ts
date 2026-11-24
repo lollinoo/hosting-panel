@@ -84,7 +84,7 @@ describe("stack names", () => {
 });
 
 describe("stack labels", () => {
-  it("labels each component with its hash, revision, start index and health", () => {
+  it("labels each component with its hash, revision, start index, health and body version", () => {
     expect(appStackComponentLabels(plan, "web")).toEqual({
       "io.hostingpanel.managed": "true",
       "io.hostingpanel.role": "app_component",
@@ -95,6 +95,7 @@ describe("stack labels", () => {
       "io.hostingpanel.app_revision_id": plan.revisionId,
       "io.hostingpanel.app_start_index": "0",
       "io.hostingpanel.app_health": "http:8080:3:/healthz",
+      "io.hostingpanel.app_body_version": "1",
     });
     expect(appStackComponentLabels(plan, "worker")).toMatchObject({
       "io.hostingpanel.app_component": "worker",

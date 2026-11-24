@@ -10,6 +10,8 @@ import {
   appStackArgvExecutableProblem,
   appStackArgvItemProblem,
   appStackContainerPathProblem,
+  appStackImageLookupProblem,
+  appStackImageRegistryProblem,
   appStackTextProblem,
   type TemplatePath,
 } from "@hosting-panel/contracts";
@@ -35,11 +37,18 @@ export function convertImage(report: ImportReport, raw: unknown, path: TemplateP
   if (raw === undefined || raw === null) return report.refused("IMAGE_MISSING", path, "Every service needs an 'image': a template never builds one.");
   const invalid = (): null =>
     report.refused("IMAGE_INVALID", path, "The image is not a reference of the form [registry/]repository[:tag][@sha256:digest]; a variable is not supported there.");
+  const privateRegistry = (): null =>
+    report.refused(
+      "IMAGE_REGISTRY_REFUSED",
+      path,
+      "The image names a registry on this server or a private network: the platform never downloads from one. Name an image of a public registry.",
+    );
   if (typeof raw !== "string") return invalid();
   const pinned = raw.includes("@");
-  if (!pinned && !isImageLookup(raw)) return invalid();
+  if (!pinned && !isImageLookup(raw)) return appStackImageLookupProblem(raw) === "registry_not_public" ? privateRegistry() : invalid();
   const parsed = parseImageReference(raw);
   if (!parsed.ok || (pinned && parsed.value.digest === null)) return invalid();
+  if (appStackImageRegistryProblem(raw) !== null) return privateRegistry();
   const { tag } = parsed.value;
   const digest = pinned ? parsed.value.digest : digests.get(raw);
   if (typeof digest !== "string" || !APP_STACK_DIGEST_PATTERN.test(digest)) {

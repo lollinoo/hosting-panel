@@ -1,4 +1,13 @@
-import { auditEvents, createDatabaseClient, eq, hosts, userSessions, users, type DatabaseClient } from "@hosting-panel/database";
+import {
+  auditEvents,
+  createDatabaseClient,
+  eq,
+  hosts,
+  platformInstallations,
+  userSessions,
+  users,
+  type DatabaseClient,
+} from "@hosting-panel/database";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   runCli,
@@ -47,6 +56,190 @@ describe("accounts CLI", () => {
     expect(await count()).toBe(1);
     await setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.20" });
     expect(await count()).toBe(1);
+  });
+
+  describe("an IPv4 the installer remembered or detected", () => {
+    const host = async () => (await db().select().from(hosts))[0];
+    const audits = async () => (await db().select().from(auditEvents)).length;
+    const changes = async () =>
+      (await db().select().from(auditEvents).where(eq(auditEvents.action, "host.address.change"))).map((e) => e.details);
+    const GIVEN = { ...SETUP, hostIpv4: "203.0.113.10", hostIpv4Kind: "given" as const };
+
+    it("is recorded when there is no host row yet", async () => {
+      await setupInstallation(db(), { ...SETUP, hostIpv4: "198.51.100.7", hostIpv4Kind: "default" });
+      expect((await host())!.ipv4Address).toBe("198.51.100.7");
+      expect(await changes()).toEqual([]);
+    });
+
+    it("never replaces the recorded one, and writes no audit row for it", async () => {
+      await setupInstallation(db(), GIVEN);
+      const before = await host();
+      const count = await audits();
+      await setupInstallation(db(), { ...SETUP, hostIpv4: "198.51.100.7", hostIpv4Kind: "default" });
+      expect(await host()).toEqual(before);
+      expect(await audits()).toBe(count);
+      // An IPv6 given on the same run still counts; the IPv4 in its audit row is the kept one.
+      await setupInstallation(db(), { ...SETUP, hostIpv4: "198.51.100.7", hostIpv4Kind: "default", hostIpv6: "2001:db8::1" });
+      expect((await host())!.ipv4Address).toBe("203.0.113.10");
+      expect(await changes()).toEqual([{ from: "203.0.113.10", to: "203.0.113.10", ipv6From: null, ipv6To: "2001:db8::1" }]);
+    });
+
+    it("a given one replaces the recorded one with one audit row", async () => {
+      await setupInstallation(db(), GIVEN);
+      await setupInstallation(db(), { ...GIVEN, hostIpv4: "203.0.113.20" });
+      expect((await host())!.ipv4Address).toBe("203.0.113.20");
+      expect(await changes()).toEqual([{ from: "203.0.113.10", to: "203.0.113.20" }]);
+    });
+
+    it("of either kind, a refused value writes nothing", async () => {
+      for (const hostIpv4Kind of ["given", "default"] as const) {
+        await expect(setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.05", hostIpv4Kind }), hostIpv4Kind).rejects.toThrow(
+          /^Invalid --ipv4: /,
+        );
+      }
+      expect(await db().select().from(platformInstallations)).toEqual([]);
+      expect(await host()).toBeUndefined();
+      await setupInstallation(db(), GIVEN);
+      const before = await host();
+      const count = await audits();
+      for (const hostIpv4Kind of ["given", "default"] as const) {
+        await expect(setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.05", hostIpv4Kind }), hostIpv4Kind).rejects.toThrow(
+          /^Invalid --ipv4: /,
+        );
+      }
+      expect(await host()).toEqual(before);
+      expect(await audits()).toBe(count);
+    });
+
+    it("runCli setup takes it as --ipv4-default, never together with --ipv4", async () => {
+      // runCli closes its client; this one stays open so the row can be read afterwards.
+      const open: DatabaseClient = { mode: dbClient.mode, db: dbClient.db, migrate: () => dbClient.migrate(), close: () => Promise.resolve() };
+      const setup = (...address: string[]) => runCli(["setup", "--name", "Test", "--hostname", "host.test", ...address], open);
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        await setup("--ipv4-default", "198.51.100.7");
+        expect((await host())!.ipv4Address).toBe("198.51.100.7");
+        await setup("--ipv4", "203.0.113.10");
+        await setup("--ipv4-default", "198.51.100.7");
+        expect((await host())!.ipv4Address).toBe("203.0.113.10");
+        await expect(setup("--ipv4", "203.0.113.10", "--ipv4-default", "198.51.100.7")).rejects.toThrow(
+          "Give --ipv4 or --ipv4-default, not both.",
+        );
+        await expect(setup()).rejects.toThrow("Missing required --ipv4.");
+        await expect(runCli(["help"], open)).rejects.toThrow("--ipv4 IP|--ipv4-default IP");
+      } finally {
+        process.stdout.write = write;
+      }
+    });
+
+    it("runCli setup prints the IPv4 it leaves recorded on a line of its own", async () => {
+      const open: DatabaseClient = { mode: dbClient.mode, db: dbClient.db, migrate: () => dbClient.migrate(), close: () => Promise.resolve() };
+      const lines: string[] = [];
+      const setup = async (...address: string[]) => {
+        lines.length = 0;
+        await runCli(["setup", "--name", "Test", "--hostname", "host.test", ...address], open);
+        return lines.join("").split("\n");
+      };
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = ((chunk: string) => (lines.push(chunk), true)) as typeof process.stdout.write;
+      try {
+        const first = await setup("--ipv4-default", "198.51.100.7");
+        expect(JSON.parse(first[0]!)).toEqual({ installationId: expect.any(String), hostId: expect.any(String) });
+        expect(first.slice(1)).toEqual(['{"recordedIpv4":"198.51.100.7"}', ""]);
+        expect((await setup("--ipv4", "203.0.113.10")).slice(1)).toEqual(['{"recordedIpv4":"203.0.113.10"}', ""]);
+        expect((await setup("--ipv4-default", "198.51.100.7")).slice(1)).toEqual(['{"recordedIpv4":"203.0.113.10"}', ""]);
+      } finally {
+        process.stdout.write = write;
+      }
+    });
+  });
+
+  describe("the server's IPv6", () => {
+    const PUBLIC = { ...SETUP, hostIpv4: "203.0.113.10" };
+    const host = async () => (await db().select().from(hosts))[0];
+    const audits = async () => (await db().select().from(auditEvents)).length;
+    const changes = async () =>
+      (await db().select().from(auditEvents).where(eq(auditEvents.action, "host.address.change"))).map((e) => e.details);
+
+    it("a first setup with an IPv6 records it in Node's compressed lower-case form", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:DB8:0:0:0:0:0:1" });
+      expect((await host())!.ipv6Address).toBe("2001:db8::1");
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      expect(await changes()).toEqual([]);
+    });
+
+    it("a rerun without one keeps it; another one replaces it with one audit row", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      await setupInstallation(db(), PUBLIC);
+      expect((await host())!.ipv6Address).toBe("2001:db8::1");
+      expect(await changes()).toEqual([]);
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::2" });
+      expect((await host())!.ipv6Address).toBe("2001:db8::2");
+      expect(await changes()).toEqual([
+        { from: "203.0.113.10", to: "203.0.113.10", ipv6From: "2001:db8::1", ipv6To: "2001:db8::2" },
+      ]);
+    });
+
+    it("null removes it, and an IPv4 change alone carries no IPv6 fields", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: null });
+      expect((await host())!.ipv6Address).toBeNull();
+      await setupInstallation(db(), { ...PUBLIC, hostIpv4: "203.0.113.20" });
+      const rows = await changes();
+      expect(rows).toHaveLength(2);
+      expect(rows).toContainEqual({ from: "203.0.113.10", to: "203.0.113.10", ipv6From: "2001:db8::1", ipv6To: null });
+      expect(rows).toContainEqual({ from: "203.0.113.10", to: "203.0.113.20" });
+    });
+
+    it("refuses an address the server cannot have before it writes anything", async () => {
+      const refused = [
+        { hostIpv4: "203.0.113.05" },
+        { hostIpv4: "2001:db8::5" },
+        ...["[2001:db8::5]", "fe80::1%eth0", "2001:db8::/64", "hello", "203.0.113.5", "::1", "::", "fe80::1", "febf::1", "::ffff:203.0.113.5"].map(
+          (hostIpv6) => ({ hostIpv6 }),
+        ),
+      ];
+      const first = await audits();
+      for (const bad of refused) {
+        await expect(setupInstallation(db(), { ...PUBLIC, ...bad }), JSON.stringify(bad)).rejects.toThrow(/^Invalid --ipv[46]: /);
+      }
+      expect(await db().select().from(platformInstallations)).toEqual([]);
+      expect(await host()).toBeUndefined();
+      expect(await audits()).toBe(first);
+
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      const before = await host();
+      const rerun = await audits();
+      for (const bad of refused) {
+        await expect(setupInstallation(db(), { ...PUBLIC, hostIpv4: "203.0.113.20", ...bad }), JSON.stringify(bad)).rejects.toThrow(
+          /^Invalid --ipv[46]: /,
+        );
+      }
+      expect(await host()).toEqual(before);
+      expect(await audits()).toBe(rerun);
+    });
+
+    it("runCli setup reads --ipv6 <address> and --ipv6 none", async () => {
+      // runCli closes its client; this one stays open so the row can be read afterwards.
+      const open: DatabaseClient = { mode: dbClient.mode, db: dbClient.db, migrate: () => dbClient.migrate(), close: () => Promise.resolve() };
+      const setup = (...extra: string[]) =>
+        runCli(["setup", "--name", "Test", "--hostname", "host.test", "--ipv4", "203.0.113.10", ...extra], open);
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        await setup("--ipv6", "2001:DB8::1");
+        expect((await host())!.ipv6Address).toBe("2001:db8::1");
+        await setup();
+        expect((await host())!.ipv6Address).toBe("2001:db8::1");
+        await setup("--ipv6", "none");
+        expect((await host())!.ipv6Address).toBeNull();
+        await expect(setup("--ipv6")).rejects.toThrow("Missing required --ipv6.");
+        await expect(runCli(["help"], open)).rejects.toThrow("--ipv6 IP|none");
+      } finally {
+        process.stdout.write = write;
+      }
+    });
   });
 
   it("createServerAdmin enrols TOTP and can log in", async () => {

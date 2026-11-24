@@ -6,7 +6,7 @@ import {
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { ExecutorCodedError, assertSafeIdentifier } from "../traefik-config.js";
-import { encodeAppStackHealthLabel, encodeAppStackSecretEnvLabel } from "./container-payload.js";
+import { APP_STACK_CONTAINER_BODY_VERSION, encodeAppStackHealthLabel, encodeAppStackSecretEnvLabel } from "./container-payload.js";
 
 function checked(value: string, pattern: RegExp, fieldName: string): string {
   if (typeof value !== "string" || !pattern.test(value)) {
@@ -56,6 +56,8 @@ export const APP_STACK_LABELS = Object.freeze({
   /** Only on a component with environment secrets (v2): their names and template text, never a value. */
   secretEnvironment: "io.hostingpanel.app_secret_env",
   volumeKey: "io.hostingpanel.app_volume_key",
+  /** Which version of the container builder wrote the body (`APP_STACK_CONTAINER_BODY_VERSION`); none before #96. */
+  bodyVersion: "io.hostingpanel.app_body_version",
 } as const);
 export const APP_STACK_COMPONENT_ROLE = "app_component" as const;
 
@@ -75,6 +77,7 @@ export function appStackComponentLabels(plan: ApprovedStackPlan, componentKey: s
     [APP_STACK_LABELS.startIndex]: String(index),
     [APP_STACK_LABELS.health]: encodeAppStackHealthLabel(component.healthcheck),
     ...(secretEnvironment === null ? {} : { [APP_STACK_LABELS.secretEnvironment]: secretEnvironment }),
+    [APP_STACK_LABELS.bodyVersion]: String(APP_STACK_CONTAINER_BODY_VERSION),
   });
 }
 

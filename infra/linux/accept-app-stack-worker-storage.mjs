@@ -18,6 +18,8 @@
  *    it denies foreign and unsafe requests. The script's own changes (cleanup) go through the same gate.
  *  - Every adapter directory and name option points into the temp dir, /dev/shm/hp_swarmtest_stk_<hex>-secrets or a
  *    nonexistent own *_unused name. No proxy is created, nothing is published, no network is attached to another.
+ *    The gate creates private networks only: a network with the app_edge role, which a live panel's proxy would
+ *    join, is denied (gate-self-test proves it).
  *  - The docker CLI (an independent observer) is called with an argv array only and refuses any argument naming an hp_
  *    object of another run; inspect/exec/top/stats only ever name this run's objects.
  *  - Images: the digest-pinned ref of the worker-storage seed in APP_BUILT_IN_TEMPLATES, pulled by the product through
@@ -279,12 +281,13 @@ function judge(method, rawUrl, bodyText) {
     return fake(500, '{"message":"injected fault"}', "FAULT");
   }
   if (method === "POST" && p === "/networks/create") {
+    // Private networks only: the template has no ingress, and an edge network would be picked up by a live panel's proxy.
     const ok =
       [undefined, "bridge"].includes(body.Driver) &&
       body.Options?.["com.docker.network.bridge.name"] === undefined &&
       body.IPAM === undefined &&
       String(body.Name).includes(marker) &&
-      ["app_internal", "app_edge"].includes(body.Labels?.[ROLE_LABEL]);
+      body.Labels?.[ROLE_LABEL] === "app_internal";
     return ok ? fwd() : deny("network create");
   }
   if (method === "POST" && p === "/volumes/create") {
@@ -571,6 +574,7 @@ async function main() {
         ["POST", `/v1.45/containers/create?name=${storage}`, createWith({}, { Env: [`K=${SECRET}`] })],
         ["POST", "/v1.45/networks/create", net(ownNet, "app_internal", { Options: { "com.docker.network.bridge.name": "x" } })],
         ["POST", "/v1.45/networks/create", net(ownNet, "site_internal")],
+        ["POST", "/v1.45/networks/create", net(appStackEdgeNetworkName(A), "app_edge")],
         ["POST", "/v1.45/networks/create", net(`${runPrefix}_ingress`, "ingress_public")],
         ["POST", "/v1.45/volumes/create", JSON.stringify({ Name: dataVolume(), Driver: "local", DriverOpts: { type: "none" } })],
       ];
