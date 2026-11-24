@@ -6,7 +6,7 @@ import { and, asc, count, eq, inArray, isNull } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { appStacks, organizations, resourceQuotas } from "./schema.js";
 
-export type AppStackQuotaField = "appStacks" | "components" | "cpuMilli" | "memoryBytes";
+export type AppStackQuotaField = "appStacks" | "cpuMilli" | "memoryBytes";
 
 export class AppStackQuotaError extends Error {
   readonly code = "QUOTA_EXCEEDED" as const;
@@ -96,9 +96,11 @@ export async function updateOrganizationAppStackLimitTransactional(
 
 /**
  * Inside the stack writer's transaction, after the stack row lock: applies next − previous to the organization's
- * resource_quotas row (FOR UPDATE), refusing a positive delta that would pass a maximum. The row is looked up only on the
- * first charge (no quota id and no previous revision) and its id recorded on the stack; a stack charged nothing then is
- * never charged. `next: null` releases the previous totals and clears the stack's quota id.
+ * resource_quotas row (FOR UPDATE), refusing a positive delta of processor or memory that would pass its maximum. The
+ * count of components (used_services) is kept but never refused: max_services is the default of the earlier generic
+ * services (20, no setter), while the application limit times the components of a plan already bounds the count. The
+ * row is looked up only on the first charge (no quota id and no previous revision) and its id recorded on the stack; a
+ * stack charged nothing then is never charged. `next: null` releases the previous totals and clears the stack's quota id.
  */
 export async function chargeAppStackQuota(
   tx: DatabaseExecutor,
@@ -135,9 +137,6 @@ export async function chargeAppStackQuota(
   const usedMemory = BigInt(quota.usedMemoryBytes);
   const maxMemory = BigInt(quota.maxMemoryBytes);
   const enforced = input.restore !== true;
-  if (enforced && components > 0 && quota.usedServices + components > quota.maxServices) {
-    throw new AppStackQuotaError("components", quota.usedServices, quota.maxServices);
-  }
   if (enforced && cpuMilli > 0 && quota.usedCpuMilli + cpuMilli > quota.maxCpuMilli) {
     throw new AppStackQuotaError("cpuMilli", quota.usedCpuMilli, quota.maxCpuMilli);
   }
