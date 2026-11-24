@@ -36,7 +36,7 @@ import NewSitePage from "@/app/sites/new/page";
 const request = (url: string, headers: Record<string, string> = {}) =>
   new Request(`http://localhost:3000${url}`, {
     method: "POST",
-    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", ...headers },
+    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ name: "Hotel" }),
   });
 

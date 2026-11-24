@@ -76,6 +76,7 @@ const req = (method: string, headers: Record<string, string> = {}, body?: unknow
       Host: "localhost:3000",
       Origin: "http://localhost:3000",
       "X-CSRF-Token": "csrf",
+      "Content-Type": "application/json",
       ...headers,
     },
     ...(method === "GET" || body === undefined ? {} : { body: JSON.stringify(body) }),
