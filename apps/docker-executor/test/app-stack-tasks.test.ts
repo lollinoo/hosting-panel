@@ -27,6 +27,7 @@ import {
   APP_STACK_TASK_KILL_SCRIPT,
   APP_STACK_TASK_MARK,
   APP_STACK_TASK_READ_TIMEOUT_MS,
+  APP_STACK_TASK_REAP_CONCURRENCY,
   APP_STACK_TASK_RUN_MARGIN_MS,
   AppStackExecutorError,
   DockerEngineSocketAdapter,
@@ -37,6 +38,7 @@ import {
   appStackContainerName,
   assertExecutableAppStackPlan,
   appStackSecretDirKey,
+  type AppStackTaskLimits,
   type IngressCapableDockerExecutor,
 } from "../src/index.js";
 import { type MockDockerContainerRecord, type MockDockerDaemon, type MockExecPlan, startMockDockerDaemon } from "./mock-docker-daemon.js";
@@ -104,7 +106,7 @@ interface Script {
   kill?: (call: ExecCall, daemon: MockDockerDaemon) => MockExecPlan | undefined;
 }
 
-async function setup(script: Script = {}) {
+async function setup(script: Script = {}, limits: AppStackTaskLimits = {}) {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-app-task-"));
   cleanup.push(() => rm(tmp, { recursive: true, force: true }));
   const secretsRootDir = path.join(tmp, "secrets");
@@ -120,7 +122,7 @@ async function setup(script: Script = {}) {
     secretsRootDir,
     ingressRootDir: path.join(tmp, "ingress"),
     // One "second" of a time limit lasts 20 ms here.
-    appStackTaskLimits: { secondMs: 20, killTimeoutMs: 1_000, endSettleMs: 100, retryDelayMs: 20 },
+    appStackTaskLimits: { secondMs: 20, killTimeoutMs: 1_000, endSettleMs: 100, retryDelayMs: 20, ...limits },
   });
   mockDaemon.containers.set(`${WEB}_id`, component("web"));
   return { adapter, mockDaemon, secretsRootDir };
@@ -742,6 +744,75 @@ describe("reapAppStackTasks at the start of the executor", () => {
     const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
     expect(Object.keys(logged).sort()).toEqual(["component", "count", "event", "timestamp"]);
     expect([logged.component, logged.event, logged.count]).toEqual(["hp-docker-executor", "app_task_mark_in_component", 2]);
+  });
+
+  const KEYS = ["web", "worker", "cache", "db", "queue", "mail"];
+  const addAll = (d: MockDockerDaemon) => {
+    for (const key of KEYS) d.containers.set(`${appStackContainerName(STACK, key)}_id`, component(key));
+  };
+
+  it("cleans a few components at once, not more", async () => {
+    const held: string[] = [];
+    const { adapter, mockDaemon } = await setup(
+      {
+        kill: (call) => {
+          held.push(call.execId);
+          return { stayOpen: true };
+        },
+      },
+      { reapDeadlineMs: 5_000, killTimeoutMs: 5_000 },
+    );
+    addAll(mockDaemon);
+    const pass = adapter.reapAppStackTasks();
+    await until(() => held.length === APP_STACK_TASK_REAP_CONCURRENCY);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(held).toHaveLength(APP_STACK_TASK_REAP_CONCURRENCY);
+    expect(APP_STACK_TASK_REAP_CONCURRENCY).toBeLessThan(KEYS.length);
+    // One ends: the next component starts.
+    mockDaemon.endExec(held[0]!, 0);
+    await until(() => held.length === APP_STACK_TASK_REAP_CONCURRENCY + 1);
+    for (const execId of held.slice(1)) mockDaemon.endExec(execId, 0);
+    await until(() => held.length === KEYS.length);
+    for (const execId of held) mockDaemon.endExec(execId, 0);
+    await expect(pass).resolves.toBeUndefined();
+  });
+
+  it("ends at its deadline: a component that never answers does not hold the start, and its tasks wait for its clean-up", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stuck: string[] = [];
+    const { adapter, mockDaemon } = await setup(
+      {
+        kill: (call) => {
+          // Only the start-up clean-up of this component hangs.
+          if (call.container !== `${WEB}_id` || stuck.length > 0) return undefined;
+          stuck.push(call.execId);
+          return { stayOpen: true };
+        },
+      },
+      { reapDeadlineMs: 200, killTimeoutMs: 5_000 },
+    );
+    addAll(mockDaemon);
+    const began = Date.now();
+    await expect(adapter.reapAppStackTasks()).resolves.toBeUndefined();
+    // Well before the clean-up of that component would give up by itself.
+    expect(Date.now() - began).toBeLessThan(1_500);
+    expect(stuck).toHaveLength(1);
+    expect(new Set(mockDaemon.execCalls.map((c) => c.container))).toEqual(new Set(KEYS.map((key) => `${appStackContainerName(STACK, key)}_id`)));
+    // One line for the pass, with a count only: no name and no id.
+    expect(warn).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(Object.keys(logged).sort()).toEqual(["component", "count", "event", "timestamp"]);
+    expect([logged.component, logged.event, logged.count]).toEqual(["hp-docker-executor", "app_task_reap_unfinished", 1]);
+
+    // While that clean-up still goes, no task of its application starts (it would be killed by it); then one does.
+    const execs = mockDaemon.execBodies.length;
+    const err = await refusal(adapter.runAppStackTask(request(1)));
+    expect([err.reason, err.code]).toEqual(["STACK_BUSY", "RESOURCE_LOCKED"]);
+    expect(mockDaemon.execBodies).toHaveLength(execs);
+    mockDaemon.endExec(stuck[0]!, 0);
+    await until(() => paths(mockDaemon).includes(`/exec/${stuck[0]!}/json`));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
   });
 
   it("says the engine is unavailable when the components cannot be listed", async () => {

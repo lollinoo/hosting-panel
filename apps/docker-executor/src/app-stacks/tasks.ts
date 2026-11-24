@@ -28,6 +28,13 @@ export const APP_STACK_TASK_OUTPUT_TAIL_BYTES = 65_536;
 export const APP_STACK_TASK_RUNS_REMEMBERED = 200;
 export const APP_STACK_TASK_CLEANUP_RETRIES = 6;
 export const APP_STACK_TASK_CLEANUP_RETRY_MS = 5_000;
+/** Components the start-up clean-up works in at once. */
+export const APP_STACK_TASK_REAP_CONCURRENCY = 4;
+/**
+ * The start-up clean-up ends by then, before the executor takes calls (one component can take about 30 s). A component
+ * it did not reach is cleaned by the probe of its next run.
+ */
+export const APP_STACK_TASK_REAP_DEADLINE_MS = 60_000;
 /**
  * How the engine's own message begins when it could not start the program of a run (it is not in the image, or it is
  * not executable; exit code 127 or 126). The message names the program, so it is never returned as what the run printed.
@@ -68,6 +75,7 @@ export interface AppStackTaskLimits {
   readonly killTimeoutMs?: number;
   readonly endSettleMs?: number;
   readonly retryDelayMs?: number;
+  readonly reapDeadlineMs?: number;
 }
 
 export interface AppStackTaskRunnerDeps {
@@ -221,6 +229,8 @@ class TaskOutputTail {
  */
 export class AppStackTaskRunner implements StackTaskExecutorPort {
   private readonly busy = new Set<string>();
+  /** Applications with a start-up clean-up still going, and how many. */
+  private readonly held = new Map<string, number>();
   private readonly runs = new Map<string, RememberedRun>();
   private readonly target: DockerExecTarget;
   private readonly secondMs: number;
@@ -250,6 +260,7 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     }
     if (this.busy.has(req.stackId)) refuse("STACK_BUSY", "A task of this application is already running");
     if (this.deps.engineBusy?.(req.stackId) === true) refuse("STACK_BUSY", "The application is being changed");
+    if (this.held.has(req.stackId)) refuse("STACK_BUSY", "The tasks of this application are still being cleaned up");
     this.busy.add(req.stackId);
     try {
       const containerId = await this.findContainer(req);
@@ -274,6 +285,20 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
   /** A task of the application runs here (the engine asks before it changes the application's containers). */
   public isRunning(stackId: string): boolean {
     return this.busy.has(stackId);
+  }
+
+  /**
+   * No task of the application starts until `cleaning` ends: the start-up clean-up, past its deadline, still works in
+   * one of its components, and would kill the command of a new run.
+   */
+  public holdWhile(stackId: string, cleaning: Promise<unknown>): void {
+    this.held.set(stackId, (this.held.get(stackId) ?? 0) + 1);
+    const release = (): void => {
+      const left = (this.held.get(stackId) ?? 1) - 1;
+      if (left > 0) this.held.set(stackId, left);
+      else this.held.delete(stackId);
+    };
+    void cleaning.then(release, release);
   }
 
   /** A read: it starts nothing. A run of another application, or of another customer, is `unknown`. */
@@ -503,6 +528,8 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
 export interface AppStackTaskReapResult {
   /** Components whose own environment carries the mark of a run: nothing was killed there. */
   readonly ownMark: number;
+  /** Components whose clean-up had not ended at the deadline. */
+  readonly unreached: number;
   /** The first failure of a component, once every other one was tried. */
   readonly failure: ExecutorCodedError | null;
 }
@@ -512,10 +539,14 @@ export interface AppStackTaskReapResult {
  * component (name and labels as the engine gives them), also one with no exec listed: the engine drops an exec once its
  * command ends, and what the command left in the background stays. One container that fails does not stop the pass.
  * A container with no shell never ran a task; nor did one whose own environment carries the mark (it is counted).
+ * A few containers at once, and one deadline for the whole pass: what it did not reach is counted and left to the probe
+ * of the next run. Each clean-up is handed to `hold` with its application: one still going after the deadline keeps the
+ * tasks of that application from starting.
  */
 export async function reapAppStackTasks(
   target: DockerExecTarget,
-  limits?: Pick<AppStackTaskLimits, "killTimeoutMs">,
+  limits?: Pick<AppStackTaskLimits, "killTimeoutMs" | "reapDeadlineMs">,
+  hold?: (stackId: string, cleaning: Promise<unknown>) => void,
 ): Promise<AppStackTaskReapResult> {
   const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_LABELS.role}=${APP_STACK_COMPONENT_ROLE}`] }));
   const res = await target.request("GET", `/containers/json?filters=${filters}`).catch(() => null);
@@ -528,31 +559,50 @@ export async function reapAppStackTasks(
   if (!Array.isArray(list)) {
     throw new ExecutorCodedError("Docker could not list the components of applications", "DOCKER_ENGINE_UNAVAILABLE");
   }
+  const ids = list.flatMap(({ Id }) => (typeof Id === "string" && Id.length > 0 ? [Id] : []));
   let failure: ExecutorCodedError | null = null;
   let ownMark = 0;
-  for (const { Id } of list) {
-    if (typeof Id !== "string" || Id.length === 0) continue;
+  let ended = 0;
+  let late = false;
+  const reapOne = async (Id: string): Promise<void> => {
+    const seen = await inspectTaskContainer(target, Id);
+    if (seen === null || seen.State?.Running !== true) return;
+    const labels = seen.Config?.Labels;
+    const stackId = labels?.[APP_STACK_LABELS.stackId];
+    const organizationId = labels?.[APP_STACK_LABELS.organizationId];
+    if (stackId === undefined || organizationId === undefined) return;
+    // A container whose name or labels are not as the engine gives them is not touched.
+    let own: string | null;
     try {
-      const seen = await inspectTaskContainer(target, Id);
-      if (seen === null || seen.State?.Running !== true) continue;
-      const labels = seen.Config?.Labels;
-      const stackId = labels?.[APP_STACK_LABELS.stackId];
-      const organizationId = labels?.[APP_STACK_LABELS.organizationId];
-      if (stackId === undefined || organizationId === undefined) continue;
-      // A container whose name or labels are not as the engine gives them is not touched.
-      let own: string | null;
-      try {
-        own = ownComponentKey(labels, seen.Name, { stackId, organizationId });
-      } catch {
-        own = null;
-      }
-      if (own === null) continue;
-      const outcome = await killMarkedProcesses(target, Id, "", limits?.killTimeoutMs ?? APP_STACK_TASK_KILL_TIMEOUT_MS);
-      if (outcome === "own_mark") ownMark += 1;
-      if (outcome === "failed") throw new ExecutorCodedError("The clean-up of tasks did not finish", "INTERNAL_ERROR");
-    } catch (err) {
-      failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The clean-up of tasks failed", "INTERNAL_ERROR");
+      own = ownComponentKey(labels, seen.Name, { stackId, organizationId });
+    } catch {
+      own = null;
     }
-  }
-  return { ownMark, failure };
+    // Past the deadline no clean-up starts: the executor may be taking calls already.
+    if (own === null || late) return;
+    const cleaning = killMarkedProcesses(target, Id, "", limits?.killTimeoutMs ?? APP_STACK_TASK_KILL_TIMEOUT_MS);
+    hold?.(stackId, cleaning);
+    const outcome = await cleaning;
+    if (outcome === "own_mark") ownMark += 1;
+    if (outcome === "failed") throw new ExecutorCodedError("The clean-up of tasks did not finish", "INTERNAL_ERROR");
+  };
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < ids.length && !late; i = next++) {
+      try {
+        await reapOne(ids[i]!);
+      } catch (err) {
+        failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The clean-up of tasks failed", "INTERNAL_ERROR");
+      }
+      ended += 1;
+    }
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, limits?.reapDeadlineMs ?? APP_STACK_TASK_REAP_DEADLINE_MS);
+  });
+  await Promise.race([Promise.all(Array.from({ length: Math.min(APP_STACK_TASK_REAP_CONCURRENCY, ids.length) }, worker)), deadline]);
+  clearTimeout(timer);
+  late = true;
+  return { ownMark, unreached: ids.length - ended, failure };
 }
