@@ -263,9 +263,18 @@ export async function countAppStacksByTemplateVersion(
     .groupBy(appStacks.templateVersionId);
 }
 
+/** One version of a built-in template as the seed carries it; `description` is what the catalog showed with it. */
+export interface BuiltInAppTemplateVersionSeed {
+  readonly versionId: string;
+  readonly description: string | null;
+  readonly version: NewAppTemplateVersion;
+}
+
 /**
- * Boot seed of built-in templates (M5). Inserts never rewrite what exists, so an admin's rename, enable or newer default
- * survives; only a template left without a default gets its seeded version.
+ * Boot seed of built-in templates (M5). Inserts never rewrite what exists, so an admin's rename, enable or own default
+ * survives. A built-in may carry earlier versions, oldest first: a missing one is added with the next number. The default
+ * moves to a version only when the seed adds it and the current default is none or one of the seed's own versions, so
+ * an admin's choice (their own version, or a move back) is kept; the description moves with it unless an admin edited it.
  */
 export async function ensureBuiltInAppTemplates(
   db: HostingPanelDatabase,
@@ -277,20 +286,55 @@ export async function ensureBuiltInAppTemplates(
     readonly description: string | null;
     readonly category: string;
     readonly version: NewAppTemplateVersion;
+    /** Oldest first; the item's own version is the newest. */
+    readonly previousVersions?: readonly BuiltInAppTemplateVersionSeed[];
   }[],
 ): Promise<void> {
-  const rows = items.map((item) => ({ item, values: versionValues(item.versionId, item.templateId, 1, item.version, null) }));
+  // Checked before the transaction: a seed with secret material writes nothing.
+  const rows = items.map((item) => ({
+    item,
+    versions: [...(item.previousVersions ?? []), { versionId: item.versionId, description: item.description, version: item.version }].map((v) => ({
+      ...v,
+      values: versionValues(v.versionId, item.templateId, 0, v.version, null),
+    })),
+  }));
   await db.transaction(async (tx) => {
-    for (const { item, values } of rows) {
+    for (const { item, versions } of rows) {
       await tx
         .insert(appTemplates)
         .values({ id: item.templateId, slug: item.slug, name: item.name, description: item.description, category: item.category, builtIn: true })
         .onConflictDoNothing({ target: appTemplates.id });
-      await tx.insert(appTemplateVersions).values(values).onConflictDoNothing({ target: appTemplateVersions.id });
-      await tx
-        .update(appTemplates)
-        .set({ defaultVersionId: item.versionId, updatedAt: new Date() })
-        .where(and(eq(appTemplates.id, item.templateId), isNull(appTemplates.defaultVersionId)));
+      const template = await lockTemplate(tx, item.templateId);
+      const existing = await tx
+        .select({ id: appTemplateVersions.id, versionNumber: appTemplateVersions.versionNumber })
+        .from(appTemplateVersions)
+        .where(eq(appTemplateVersions.templateId, item.templateId));
+      const present = new Set(existing.map((v) => v.id));
+      let latest = Math.max(0, ...existing.map((v) => v.versionNumber));
+      let { defaultVersionId, description } = template;
+      const seeded = new Map<string, string | null>();
+      for (const v of versions) {
+        if (!present.has(v.versionId)) {
+          const inserted = await tx
+            .insert(appTemplateVersions)
+            .values({ ...v.values, versionNumber: latest + 1 })
+            .onConflictDoNothing({ target: appTemplateVersions.id })
+            .returning({ id: appTemplateVersions.id });
+          if (inserted.length > 0) {
+            latest += 1;
+            if (defaultVersionId === null || seeded.has(defaultVersionId)) {
+              if (defaultVersionId !== null && description === seeded.get(defaultVersionId)) description = v.description;
+              defaultVersionId = v.versionId;
+            }
+          }
+        }
+        seeded.set(v.versionId, v.description);
+      }
+      // A template left without a default gets the newest seeded version.
+      defaultVersionId ??= item.versionId;
+      if (defaultVersionId !== template.defaultVersionId || description !== template.description) {
+        await tx.update(appTemplates).set({ defaultVersionId, description, updatedAt: new Date() }).where(eq(appTemplates.id, item.templateId));
+      }
     }
   });
 }

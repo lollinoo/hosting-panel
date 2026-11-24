@@ -390,7 +390,7 @@ describe("application stacks delete and data retention (Q4: A18)", () => {
       expect(view.body.data.status).toBe("delete_failed");
       expect(view.body.data.activeOperationId).toBeNull();
       // A secret cannot be changed on a stack that is being deleted.
-      const refused = await h.call(h.a.token, "POST", path(stackId, "/secrets"), { parameterKey: "app_secret", value: "late" });
+      const refused = await h.call(h.a.token, "POST", path(stackId, "/secrets"), { parameterKey: "app_secret", value: "late-value" });
       expect(refused.status).toBe(409);
 
       // Delete again, this time with the data flag: the stored policy follows the latest request.

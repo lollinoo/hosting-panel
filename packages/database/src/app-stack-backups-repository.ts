@@ -4,6 +4,7 @@ import {
   APP_STACK_BACKUP_ACTION_WINDOW_MS,
   APP_STACK_BACKUP_ACTIONS_PER_HOUR,
   APP_STACK_RESOURCE_TYPE,
+  appStackBackupEnqueueRefusal,
   appStackBackupEnqueueTarget,
   appStackBackupOperationSteps,
   appStackLockKey,
@@ -15,10 +16,10 @@ import {
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, or, sql } from "drizzle-orm";
-import { AppStackRepositoryError, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
+import { AppStackRepositoryError, getAppStackLockHolder, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
 import { resolveAppStackBackupTargets } from "./backup-targets-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
-import { ACTIVE_OPERATION_LOCK_STATUSES, enqueueOperationTransactional } from "./operations-repository.js";
+import { enqueueOperationTransactional } from "./operations-repository.js";
 import {
   appStackBackupCopies,
   appStackBackups,
@@ -152,16 +153,14 @@ export async function enqueueAppStackBackupTransactional(
       .for("update");
     if (!stack) throw new AppStackRepositoryError("NOT_FOUND", "Application not found.");
     const lockKey = appStackLockKey(stack.id);
-    const [active] = await tx
-      .select({ id: operations.id })
-      .from(operations)
-      .where(and(eq(operations.lockKey, lockKey), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
-      .limit(1);
-    if (active) {
-      throw codedError(`Resource lock '${lockKey}' is currently held by active operation '${active.id}'`, "RESOURCE_LOCKED");
+    const active = await getAppStackLockHolder(tx, stack.id);
+    // The decision the detail's allowedActions reads too (ADR-0035 §2.10), so the page never offers what this refuses.
+    const refused = appStackBackupEnqueueRefusal(stack.status, active !== null);
+    if (refused === "locked") {
+      throw codedError(`Resource lock '${lockKey}' is currently held by active operation '${active?.id}'`, "RESOURCE_LOCKED");
     }
     const target = appStackBackupEnqueueTarget(stack.status);
-    if (target === null) {
+    if (refused === "status" || target === null) {
       throw new AppStackRepositoryError(
         "INVALID_TRANSITION",
         `This action is not available while the application is ${stack.status}.`,

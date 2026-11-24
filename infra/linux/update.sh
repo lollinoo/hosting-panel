@@ -93,6 +93,8 @@ rollback_blockers() {
   cur="$(release_features <"$1/RELEASE.json")"
   [[ -n "${cur}" ]] || return 0
   tgt="$(tar -xzOf "$2" "hosting-panel-$3/RELEASE.json" 2>/dev/null | release_features)" || tgt=""
+  # Every 0.9 release lists app-stacks but has the applications switched off on every backend (issue #169).
+  if version_gt 0.10.0 "$3"; then tgt=" ${tgt} "; tgt="${tgt// app-stacks / }"; fi
   for f in ${cur}; do [[ " ${tgt} " == *" ${f} "* ]] || lacking+="${f} "; done
   [[ -n "${lacking}" ]] || return 0
   in_use="$(features_in_use)" || return 1
@@ -235,7 +237,7 @@ main() {
       ((allow_feature_loss)) || die 8 "Cannot tell whether this panel uses a feature that ${version} lacks (the database check failed); refusing the downgrade. Pass --allow-feature-loss to install it anyway."
       printf '[WARN] could not check the features in use; continuing because of --allow-feature-loss\n' >&2
     elif [[ -n "${blockers}" ]]; then
-      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and delete or re-create on built-in WordPress version 1 the sites on a custom template or a newer built-in version (a site cannot be moved back), delete the application stacks (their data volumes are kept; when only the extended application format is missing, the stacks installed from a template of that format are enough; the backups of applications go only with the nightly clean-up, once the application is deleted and the retention period is over), clear the redirect, the password and the paths of the application addresses (${version} would serve a password-protected address to everyone), disconnect the databases from the applications that use them, remove the notification channels (an older release sends no notification), or keep ${prev} (an application template that declares tasks cannot be taken back: ${version} would not read it); --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
+      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and delete or re-create on built-in WordPress version 1 the sites on a custom template or a newer built-in version (a site cannot be moved back), delete the application stacks (their data volumes are kept; below 0.10.0 every stack counts, as the applications are switched off there; when only the extended application format is missing, the stacks installed from a template of that format are enough; the backups of applications go only with the nightly clean-up, once the application is deleted and the retention period is over), clear the redirect, the password and the paths of the application addresses (${version} would serve a password-protected address to everyone), disconnect the databases from the applications that use them, remove the notification channels (an older release sends no notification), or keep ${prev} (an application template that declares tasks cannot be taken back: ${version} would not read it); --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
       printf '[WARN] --allow-feature-loss: %s stays unreachable until you upgrade again\n' "${blockers}" >&2
     fi
   fi

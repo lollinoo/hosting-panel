@@ -2086,7 +2086,9 @@ paths:
       description: >-
         Newest first: by `submittedAt` descending, then by `id` descending. `meta.total` counts every
         operation of the organization, not the page. The cursor is the `id` of the last operation of
-        the previous page; an unknown cursor gives an empty page.
+        the previous page; an unknown cursor gives an empty page. For a caller who may not read
+        applications (`app.read`), the operations of applications (`resourceType` `stack`) are left
+        out of the page and of `meta.total`, and a cursor naming one is an unknown cursor.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/CursorQuery"
@@ -2121,6 +2123,9 @@ paths:
       tags: [Operations]
       operationId: getOperation
       summary: Retrieve specific operation timeline and progress (operation.read)
+      description: >-
+        For a caller who may not read applications (`app.read`), an operation of an application
+        (`resourceType` `stack`) answers `404 NOT_FOUND` with the body of an unknown operation.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - in: path
@@ -5518,9 +5523,10 @@ paths:
         The same lines the customer reads on their own page, with the same secret values masked: at most 500
         (200 by default), read from the server on demand. Every read writes one `admin.app_stack.logs.read`
         audit row (organisation = the customer the application belongs to) with the component and the number
-        of lines asked for; the lines themselves are never stored. Returns 422 NOT_SUPPORTED (reason
-        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false, or when
-        the server's Docker executor cannot read application logs.
+        of lines asked for; the lines themselves are never stored. A read that cannot be masked answers 503, as
+        on the customer's page (`ADR-0041` §4). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false, or when the server's Docker executor
+        cannot read application logs.
       parameters:
         - $ref: "#/components/parameters/AppStackIdParam"
         - $ref: "#/components/parameters/AppStackComponentKeyParam"
@@ -6066,8 +6072,10 @@ paths:
       operationId: restartAppStack
       summary: Restart an application (app.control; audited as app.stack.restart)
       description: >-
-        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
-        `applicationStacksAvailable` is false.
+        Restarts every component in order, which also starts again one that stopped or crashed: from a stored
+        `running`, `degraded`, `failed` or `unknown`, it is the action that brings back an application whose component
+        crashed (start is accepted only from `stopped`, `failed` and `unknown`). Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6121,7 +6129,9 @@ paths:
         an optional one, set among the private values after the upgrade, whether or not the application has a value
         for it already (`secret_not_needed`), and a value over 4096 UTF-8 bytes that the new version puts in an
         environment variable, or over 24576 for any other (`value_too_long`, with `details[0].limit` `environment` or
-        `store`, the bound it passed). A value the new version requires that
+        `store`, the bound it passed). A value shorter than 6 characters, the shortest the log reader masks, is refused
+        (`VALIDATION_ERROR`, `details[0].field: secrets.<key>`, `details[0].reason: value_too_short`), is not echoed,
+        and nothing is stored or queued. A value the new version requires that
         the application has already (stored since the preview, e.g. by an upgrade taken back) means the preview is
         stale and is refused like a changed plan (`details[0].field: planHash`, `details[0].reason: plan_changed`);
         only such a value is, since no preview asks for any other. The values are never returned, logged or audited (the audit names each
@@ -6269,9 +6279,13 @@ paths:
       operationId: getAppStackComponentLogs
       summary: Read the last log lines of one component of an application (app.read)
       description: >-
-        At most 500 lines (200 by default), read from the server on demand; secret values are masked. Returns 422
-        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
-        false, or when the server's Docker executor cannot read application logs.
+        At most 500 lines (200 by default), read from the server on demand; secret values are masked. A read that
+        cannot be masked answers 503: a secret file the component's container was given is missing (after a host
+        reboot, until **Riavvia** writes it again), or a value stored before the 6-character minimum is shorter
+        (`ADR-0041` §4). The stored plan of the application is not read, so an application whose plan no longer
+        parses still has its logs.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false, or when the server's Docker executor cannot read application logs.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6361,9 +6375,11 @@ paths:
         a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
         (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`,
         `details[0].limit: environment`) and nothing is stored. A secret delivered as a file holds at most 24576 bytes
-        of UTF-8, the bound of the store, refused the same way with `details[0].limit: store`.
-        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        of UTF-8, the bound of the store, refused the same way with `details[0].limit: store`. A value shorter than 6
+        characters, the shortest the log reader masks, is refused (`VALIDATION_ERROR`, `details[0].field: value`,
+        `details[0].reason: value_too_short`) and is not echoed; a shorter value stored before still starts the
+        application, but the log read of a component that uses it answers 503. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -14576,11 +14592,12 @@ components:
                 $ref: "#/components/schemas/AppTemplateParameterKey"
               value:
                 type: string
-                minLength: 1
+                minLength: 6
                 maxLength: 16384
                 writeOnly: true
                 description: >-
-                  No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+                  At least 6 characters (`value_too_short`). No control character other than tab and line breaks, no
+                  unpaired surrogate, and no mark of a platform
                   process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
                   environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
@@ -14634,11 +14651,11 @@ components:
           $ref: "#/components/schemas/AppTemplateParameterKey"
         value:
           type: string
-          minLength: 1
+          minLength: 6
           maxLength: 16384
           writeOnly: true
           description: >-
-            No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
+            At least 6 characters (`value_too_short`). No control character other than tab and line breaks, no unpaired surrogate, and no mark of a platform
             process (`HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`, anywhere), which an image could put in a component's
             environment (`ADR-0041`); other `HP_` or `PHP_` text is accepted. Refused with `VALIDATION_ERROR`.
 
@@ -14789,7 +14806,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, platformWork, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, platformWork, allowedActions, outcomeUnknown, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -14808,6 +14825,34 @@ components:
                 The application is held by work of the platform (`backups_cleanup`: the nightly clean-up of its
                 backups, ADR-0038). Only the kind of work is given, never the operation, which the organisation cannot
                 read; its actions answer `409 RESOURCE_LOCKED` until it ends
+            allowedActions:
+              type: array
+              description: >-
+                What the stored status, the lock and the caller's permissions allow now, decided by the checks the
+                queueing request starts with (issue #106): none while an operation holds the application (whoever queued
+                it), else those the stored status allows (the transition table; a backup and a restore from `running`,
+                `degraded`, `failed` or `stopped`), kept to the ones the caller's permissions allow (`app.control` for
+                deploy, start, stop, restart, backup and restore, `app.update` for upgrade and rollback, `app.delete` for
+                delete; none for a suspended organisation). A run of a task that waits for its turn (ADR-0042) holds a
+                lock of its own and does not change this list, though `activeOperationId` names it; once it runs it holds
+                the application like any operation, and the list is empty. The `status` shown here also reflects the
+                health of the components (a crashed essential component reads `failed`, a stale reading `unknown`) and
+                never changes this list: an application that crashed keeps its stored `running` or `degraded`, so it offers
+                `stack.restart`, not `stack.start`. Upgrade and rollback also need their target (`upgrade`, `rollback`).
+                A listed action can still be refused for a reason of its own, which its answer gives: a database that
+                applications still use (`VALIDATION_ERROR`, reason `database_in_use`), the hourly limit of backups and
+                restores (`QUOTA_EXCEEDED`), a plan that no longer validates, or what `unavailableReason` of the backups
+                says. Read at the time of the request: an operation queued a moment later still makes a request answer
+                `409 RESOURCE_LOCKED`
+              items:
+                type: string
+                enum: [stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete, stack.backup, stack.restore]
+            outcomeUnknown:
+              type: boolean
+              description: >-
+                The outcome of the application's last operation is not known: its stored status is `unknown` (an
+                operation in doubt until recovery settles it, or a stop interrupted by an API restart). `false` when
+                `status` reads `unknown` only because the components could not be read lately
             revisionNumber:
               type: integer
               minimum: 1

@@ -19,6 +19,7 @@ import {
 } from "@hosting-panel/authz";
 import {
   APP_FEATURES_OFF,
+  APP_STACK_RESOURCE_TYPE,
   findSiteType,
   siteTypeKeyOf,
   CreateInvitationInputSchema,
@@ -73,6 +74,7 @@ import {
   listEncryptedSecretsMetadata,
   membershipRoles,
   memberships,
+  not,
   observedStates,
   operationSteps,
   operations,
@@ -1599,19 +1601,26 @@ export class OrganizationsController {
     });
 
     const { cursor, limit } = parsePaginationQuery(rawQuery);
+    // The operations of an application are read with app.read, as the application itself (ADR-0035):
+    // without it they are left out of the page, of the total and as a cursor, which then is an unknown cursor.
+    const hideApps = !this.authzService.allowsOrgPermission(auth, orgId, "app.read");
+    const visible = and(
+      eq(operations.organizationId, orgId),
+      hideApps ? not(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE)) : undefined,
+    );
     const [{ total } = { total: 0 }] = await this.dbClient.db
       .select({ total: sql<number>`count(*)::int` })
       .from(operations)
-      .where(eq(operations.organizationId, orgId));
+      .where(visible);
     // Keyset over (submitted_at, id), the cursor row read in SQL as admin-audit does; an unknown cursor gives an empty page.
     const rows = await this.dbClient.db
       .select()
       .from(operations)
       .where(
         and(
-          eq(operations.organizationId, orgId),
+          visible,
           cursor
-            ? sql`(${operations.submittedAt}, ${operations.id}) < (SELECT o.submitted_at, o.id FROM operations o WHERE o.id = ${cursor} AND o.organization_id = ${orgId})`
+            ? sql`(${operations.submittedAt}, ${operations.id}) < (SELECT o.submitted_at, o.id FROM operations o WHERE o.id = ${cursor} AND o.organization_id = ${orgId}${hideApps ? sql` AND o.resource_type <> ${APP_STACK_RESOURCE_TYPE}` : sql``})`
             : undefined,
         ),
       )
@@ -1665,6 +1674,13 @@ export class OrganizationsController {
       targetId: opId,
       resource: { id: op.id, organizationId: op.organizationId },
     });
+    // Without app.read an operation of an application is answered as one that does not exist (ADR-0035).
+    if (
+      op.resourceType === APP_STACK_RESOURCE_TYPE &&
+      !this.authzService.allowsOrgPermission(auth, orgId, "app.read")
+    ) {
+      throw new ControlPlaneError("NOT_FOUND", `Operation '${opId}' not found.`);
+    }
 
     const steps = await this.dbClient.db
       .select()
