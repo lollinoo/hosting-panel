@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { APP_STACK_SECRET_VALUE_LIMITS } from "./app-templates/limits.js";
 
 export const ERROR_CODES = [
   "UNAUTHENTICATED",
@@ -113,6 +114,8 @@ export const ErrorDetailSchema = z.object({
   field: z.string().min(1).optional(),
   message: z.string().min(1),
   reason: z.string().min(1).optional(),
+  /** Only on a `value_too_long` refusal of an application's private value: which bound it passed. */
+  limit: z.enum(APP_STACK_SECRET_VALUE_LIMITS).optional(),
 });
 export type ErrorDetail = z.infer<typeof ErrorDetailSchema>;
 

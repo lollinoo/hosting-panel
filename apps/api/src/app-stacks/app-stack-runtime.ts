@@ -280,9 +280,11 @@ export class AppStackRuntime {
   }
 
   /** The live stack; the deployment moves to running (a first deploy also moves the stack queued → deploying). */
-  async #begin(ctx: StackContext, deploy: boolean): Promise<AppStackRow> {
+  async #begin(ctx: StackContext, deploy: boolean, st?: RolloutState): Promise<AppStackRow> {
     const stack = await getAppStack(this.#deps.db, ctx.ref);
     if (!stack) throw new AppStackStepRefusal("STACK_TEMPLATE_INVALID");
+    // Known before the write below, so a failure of that write still settles from what the stack was.
+    if (st) st.stack = stack;
     await this.#deps.db.transaction(async (tx) => {
       if (deploy && stack.status === "queued") await transitionAppStackTransactional(tx, { ...ctx.ref, to: "deploying" });
       await updateAppStackDeploymentTransactional(tx, {
@@ -328,7 +330,7 @@ export class AppStackRuntime {
   }
 
   async #validate(ctx: StackContext, st: RolloutState, deploy: boolean): Promise<void> {
-    st.stack = await this.#begin(ctx, deploy);
+    st.stack = await this.#begin(ctx, deploy, st);
     if (deploy) st.previous = await this.#planOf(ctx, st.stack.appliedRevisionId);
     st.plan = await this.#planOf(
       ctx,
@@ -463,11 +465,15 @@ export class AppStackRuntime {
         const previous = deploy ? st.previous : st.plan;
         const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
         const observed = stack && previous ? await this.#status(ctx) : null;
-        // A stopped application whose start is refused stays stopped, read or not: nothing was started.
+        // A stopped application whose start is refused stays stopped, read or not: nothing was started. So does one whose
+        // deploy, upgrade or rollback is refused once a revision of it was applied, as its stopped containers would
+        // otherwise read as a failure; one never applied has no installed version a start could use, so it stays failed.
         const replaced =
-          ctx.op.kind === "stack.start" ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId }) : null;
+          ctx.op.kind === "stack.start" || (deploy && stack?.appliedRevisionId != null)
+            ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId })
+            : null;
         if (replaced?.replacedStatus === "stopped") {
-          return settle({ stackStatus: "stopped" }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
+          return settle({ stackStatus: "stopped", ...restore }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
         }
         if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");

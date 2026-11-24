@@ -4,9 +4,10 @@ import http from "node:http";
 import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
+import { createErrorEnvelope, signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
 import { APP_STACK_EXECUTOR_METHODS, Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import {
   APP_STACK_COMPONENT_TIMEOUT_MS,
   APP_STACK_CREATE_TIMEOUT_MS,
@@ -492,6 +493,130 @@ describe("application stack IPC routes", () => {
     const resolved = await failure(client.resolveAppStackImage({ image: lookup }));
     expect([resolved.code, resolved.ambiguousOutcome]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", false]);
     expect(hits).toBe(5);
+  });
+
+  describe("an answer the client cannot read after a change was sent", () => {
+    // A server that answers every request with the status and body of the moment: an executor of another release,
+    // or one whose answer broke on the way.
+    async function answering() {
+      const socketPath = socketPathFor();
+      let answer: readonly [number, string] = [200, "{}"];
+      let hits = 0;
+      const server = http.createServer((req, res) => {
+        hits += 1;
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(answer[0], { "Content-Type": "application/json" });
+          res.end(answer[1]);
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+      cleanup.push(async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(socketPath, { force: true });
+      });
+      const client = new SignedDockerExecutorIpcClient({ signingKey: SIGNING_KEY, socketPath });
+      /** How each call ends under each answer, and how many requests reached the server for it. */
+      return async (calls: ReadonlyArray<readonly [string, (c: Client) => Promise<unknown>]>, answers: ReadonlyArray<readonly [number, string]>) => {
+        const seen: Array<[string, number, string, string, number]> = [];
+        for (const [name, call] of calls) {
+          for (const next of answers) {
+            answer = next;
+            const before = hits;
+            seen.push([name, next[0], next[1].slice(0, 12), verdict(await call(client).then(() => RESOLVED, (err: unknown) => err)), hits - before]);
+          }
+        }
+        return seen;
+      };
+    }
+
+    const RESOLVED = Symbol("resolved");
+    /** Never the message itself: it could quote the body. */
+    function verdict(err: unknown): string {
+      if (err === RESOLVED) return "resolved";
+      if (err instanceof ZodError) return "ZodError";
+      if (!(err instanceof ExecutorIpcClientError)) return `other: ${(err as Error).name}`;
+      if (err.message.includes(CANARY) || JSON.stringify(err.details).includes(CANARY)) return "quotes the body";
+      return `${err.code}/${String(err.ambiguousOutcome)}/${String(err.statusCode)}`;
+    }
+    const envelope = (code: "DOCKER_ENGINE_UNAVAILABLE" | "RESOURCE_LOCKED") =>
+      JSON.stringify(createErrorEnvelope({ code, message: "refused", requestId: "req-1" }));
+    const outcomes = (seen: ReadonlyArray<[string, number, string, string, number]>) => [...new Set(seen.map(([, , , v, n]) => `${v} x${n}`))];
+
+    const stackJob = { ...ref, jobId: "op_0123456789abcdef01234567-apply" };
+    // The closed list (ADR-0035, ADR-0038, ADR-0042): calls whose request, once sent, may have changed the server.
+    const CHANGES: ReadonlyArray<readonly [string, (c: Client) => Promise<unknown>]> = [
+      ...CALLS.filter(({ method }) => !["syncAppStackLinks", "getAppStackStatus", "getAppStackComponentLogs", "resolveAppStackImage"].includes(method)).map(
+        ({ method, call }) => [method, call] as const,
+      ),
+      [
+        "runAppStackTask",
+        (c) => c.runAppStackTask({ ...ref, componentKey: "web", runId: "srun_0123456789abcdef01234567", argv: ["true"], timeoutSeconds: 5 }),
+      ],
+      ["backups stackStart", (c) => c.backups({ action: "stackStart", ...stackJob, volumeKeys: ["data"] } as never)],
+      ["backups stackRestore", (c) => c.backups({ action: "stackRestore", ...stackJob, volumeKeys: ["data"] } as never)],
+      ["backups stackForget", (c) => c.backups({ action: "stackForget", ...stackJob } as never)],
+    ];
+    // An empty 200, one that fails the schema (its keys must not reach a message), a body that is not JSON, a 5xx
+    // without the executor's error envelope.
+    const UNREADABLE: ReadonlyArray<readonly [number, string]> = [
+      [200, "{}"],
+      [200, ""],
+      [200, JSON.stringify({ data: { [CANARY]: CANARY } })],
+      [200, `not json ${CANARY}`],
+      [500, ""],
+      [500, `boom ${CANARY}`],
+      [502, JSON.stringify({ message: CANARY })],
+    ];
+
+    it("is a lost answer for every call on the closed list: sent once, never quoted", async () => {
+      expect(CHANGES).toHaveLength(14);
+      const seen = await (await answering())(CHANGES, UNREADABLE);
+      expect(seen.filter(([, , , v, n]) => v !== "OPERATION_AMBIGUOUS/true/502" || n !== 1)).toEqual([]);
+    });
+
+    it("keeps a refusal the executor stated, and a 4xx, a sure refusal for the same calls", async () => {
+      const answers = [
+        [500, envelope("DOCKER_ENGINE_UNAVAILABLE")],
+        [409, envelope("RESOURCE_LOCKED")],
+        [400, ""],
+        [404, ""],
+        [400, `bad ${CANARY}`],
+      ] as const;
+      const seen = await (await answering())(CHANGES, answers);
+      // One list per answer, in the order above: every call ends the same way under it.
+      expect(answers.map((_, k) => outcomes(seen.filter((_row, i) => i % answers.length === k)))).toEqual([
+        ["DOCKER_ENGINE_UNAVAILABLE/false/500 x1"],
+        ["RESOURCE_LOCKED/false/409 x1"],
+        ["INTERNAL_ERROR/false/400 x1"],
+        ["NOT_FOUND/false/404 x1"],
+        ["INTERNAL_ERROR/false/400 x1"],
+      ]);
+    });
+
+    it("leaves every other call as it was: reads, links, other backup actions, sites", async () => {
+      const others: ReadonlyArray<readonly [string, (c: Client) => Promise<unknown>]> = [
+        ["getAppStackStatus", (c) => c.getAppStackStatus(ref)],
+        ["getAppStackTaskRun", (c) => c.getAppStackTaskRun({ ...ref, runId: "srun_0123456789abcdef01234567" })],
+        ["syncAppStackLinks", (c) => c.syncAppStackLinks(links)],
+        ["backups status", (c) => c.backups({ action: "status", jobId: stackJob.jobId } as never)],
+        ["backups start", (c) => c.backups({ action: "start", siteId: "site_0123456789abcdef", jobId: "job-1" } as never)],
+        ["stopService", (c) => c.stopService("svc_0123456789abcdef")],
+      ];
+      const seen = await (await answering())(others, UNREADABLE);
+      for (const name of others.map(([n]) => n)) {
+        expect(seen.filter(([n]) => n === name).map(([, s, , v, n]) => `${String(s)} ${v} x${String(n)}`), name).toEqual([
+          "200 ZodError x1",
+          "200 ZodError x1",
+          "200 ZodError x1",
+          "200 INTERNAL_ERROR/false/200 x1",
+          "500 INTERNAL_ERROR/false/500 x1",
+          "500 INTERNAL_ERROR/false/500 x1",
+          "502 INTERNAL_ERROR/false/502 x1",
+        ]);
+      }
+    });
   });
 
   it("drives the socket adapter through the signed client against the mock Engine", async () => {
