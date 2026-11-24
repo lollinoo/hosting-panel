@@ -85,6 +85,9 @@ const JOB_V2 = JOB_V1.replace("schemaVersion: 1", "schemaVersion: 2")
     ].join("\n"),
   );
 if (!JOB_V2.includes("MAIL_PASSWORD") || !JOB_V2.includes("mail_password\n    label")) throw new Error("the job template fixture lost its secret");
+/** Version 2 with the mail password delivered as a file: no environment limit, only the bound of the store. */
+const JOB_V2_FILE = JOB_V2.replace("      - name: MAIL_PASSWORD\n", "      - name: MAIL_PASSWORD_FILE\n");
+if (JOB_V2_FILE === JOB_V2) throw new Error("the job template fixture lost its file secret");
 
 const MAIL_PASSWORD = "Upgrade-typed mail password 7f3a";
 const json = (value: unknown): string => JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
@@ -169,7 +172,7 @@ describe("an upgrade to a version that adds a required private value (issue #89)
   }
 
   /** Version 1 installed and running, version 2 published as the default. */
-  async function installed(name: string): Promise<{ stackId: string; v1: string; v2: string }> {
+  async function installed(name: string, next = JOB_V2): Promise<{ stackId: string; v1: string; v2: string }> {
     const { templateId, versionId: v1 } = await h.publish(JOB_V1);
     const created = await h.call(
       h.a.token,
@@ -181,7 +184,7 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     expect(created.status, created.raw).toBe(202);
     const stackId = created.body.data.stackId as string;
     await runUntilSettled(stackId);
-    const added = await h.call(h.adminToken, "POST", `/v1/admin/app-templates/${templateId}/versions`, { source: JOB_V2, makeDefault: true });
+    const added = await h.call(h.adminToken, "POST", `/v1/admin/app-templates/${templateId}/versions`, { source: next, makeDefault: true });
     expect(added.status, added.raw).toBe(201);
     return { stackId, v1, v2: added.body.data.versionId as string };
   }
@@ -398,6 +401,31 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     await runUntilSettled(stackId);
     expect(await upgradeOps(stackId)).toEqual(["succeeded"]);
     expect(envOf(stackId, "worker")).toContain("MAIL_PASSWORD=stored meanwhile");
+  }, 120_000);
+
+  it("a value delivered as a file is bounded by the bytes the store keeps, refused next to its field before anything is written", async () => {
+    const { stackId, v2 } = await installed("job-file", JOB_V2_FILE);
+    const diff = await plan(stackId, v2);
+    expect(diff.body.data.newSecrets).toEqual([{ key: "mail_password", label: "Mail password" }]);
+    const planHash = diff.body.data.planHash as string;
+    const withValue = (value: string) => upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "mail_password", value }] });
+    // 12 289 characters, within the request's limit; 24 578 UTF-8 bytes, over the 24 576 the store keeps.
+    const over = "é".repeat(12_289);
+    const before = await h.counts();
+    expectRefusal(await withValue(over), 400, { field: "secrets.mail_password", reason: "value_too_long" });
+    expect(await h.counts()).toEqual(before);
+    expect(await versionsOf(stackId)).toEqual([]);
+
+    const fits = "é".repeat(12_288);
+    const queued = await withValue(fits);
+    expect(queued.status, queued.raw).toBe(202);
+    await runUntilSettled(stackId);
+    expect(await valueOf(stackId, "mail_password")).toBe(fits);
+
+    // The private values route answers the same reason, on the field of its body that holds the value.
+    const replaced = await h.call(h.a.token, "POST", `${stacks()}/${stackId}/secrets`, { parameterKey: "mail_password", value: over });
+    expectRefusal(replaced, 400, { field: "value", reason: "value_too_long" });
+    expect(await versionsOf(stackId)).toEqual(["mail_password:1", "session_key:1"]);
   }, 120_000);
 
   it("a rollback and a redeploy take no private value", async () => {

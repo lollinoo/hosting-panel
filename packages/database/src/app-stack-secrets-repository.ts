@@ -32,8 +32,9 @@ export class AppStackSecretError extends Error {
   }
 }
 
-/** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. */
-const VALUE_MAX_UTF8_BYTES = 24_576;
+/** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. Exported so the API refuses a
+ *  longer value next to its field before a transaction starts. */
+export const APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES = 24_576;
 const HOUR_MS = 3_600_000;
 const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 const metadataColumns = {
@@ -68,7 +69,7 @@ export async function setAppStackSecretTransactional(
     !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(input.parameterKey) ||
     input.value.length < 1 ||
     input.value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
-    Buffer.byteLength(input.value, "utf8") > VALUE_MAX_UTF8_BYTES
+    Buffer.byteLength(input.value, "utf8") > APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES
   ) {
     throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");
   }
@@ -143,7 +144,7 @@ export async function insertGeneratedAppStackSecrets(
         !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(parameterKey) ||
         value.length < 1 ||
         value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
-        Buffer.byteLength(value, "utf8") > VALUE_MAX_UTF8_BYTES,
+        Buffer.byteLength(value, "utf8") > APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES,
     )
   ) {
     throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");

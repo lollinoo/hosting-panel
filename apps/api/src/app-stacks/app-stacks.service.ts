@@ -37,6 +37,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   ACTIVE_OPERATION_LOCK_STATUSES,
+  APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES,
   addAppStackDomainsTransactional,
   and,
   appStackComponents,
@@ -175,10 +176,13 @@ function assertCustomerSecret(spec: AppTemplateSpec, entry: TypedSecret, fields:
   if (!spec.parameters.some((p) => p.key === entry.parameterKey && p.type === "secret" && p.customer)) {
     throw refusal(fields.key, "STACK_PARAMETER_INVALID", "This setting is not a secret of this application.");
   }
-  // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit.
-  const { secretBytes } = APP_STACK_SECRET_ENV_LIMITS;
-  if (appTemplateEnvironmentSecretKeys(spec).has(entry.parameterKey) && Buffer.byteLength(entry.value, "utf8") > secretBytes) {
-    throw refusal(fields.value, "value_too_long", `This value is too long for this application: at most ${String(secretBytes)} bytes.`);
+  // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit;
+  // any other value by what the store keeps, checked here so the refusal names the field instead of failing the write.
+  const maxBytes = appTemplateEnvironmentSecretKeys(spec).has(entry.parameterKey)
+    ? APP_STACK_SECRET_ENV_LIMITS.secretBytes
+    : APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES;
+  if (Buffer.byteLength(entry.value, "utf8") > maxBytes) {
+    throw refusal(fields.value, "value_too_long", `This value is too long for this application: at most ${String(maxBytes)} bytes.`);
   }
 }
 function statusLocked(status: string): ControlPlaneError {
