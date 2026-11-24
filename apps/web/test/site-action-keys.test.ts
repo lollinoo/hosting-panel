@@ -31,6 +31,19 @@ vi.mock("react", async (importOriginal) => {
   return { ...real, ...patched, default: { ...real, ...patched } };
 });
 
+// The real upload queue, with its onFileDone kept so a test can say "a file finished uploading".
+const uploads = vi.hoisted(() => ({ onFileDone: null as null | ((dir: string) => void) }));
+vi.mock("@/components/customer/file-uploads", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/components/customer/file-uploads")>();
+  return {
+    ...real,
+    useUploadQueue: (opts: Parameters<typeof real.useUploadQueue>[0]) => {
+      uploads.onFileDone = opts.onFileDone;
+      return real.useUploadQueue(opts);
+    },
+  };
+});
+
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => "/sites/site_k1/files",
@@ -41,7 +54,8 @@ import { format } from "@/i18n";
 import { en } from "@/i18n/en";
 import { postJson } from "@/components/customer/site-wordpress";
 import { FilesPanel } from "@/components/customer/files-panel";
-import { NameDialog } from "@/components/customer/file-dialogs";
+import { DeleteFilesDialog, NameDialog } from "@/components/customer/file-dialogs";
+import { FileEditorDialog } from "@/components/customer/file-editor";
 
 const WP = "/api/bff/orgs/org_k1/managed-sites/site_k1/wordpress";
 const FILES_PROPS = { apiBase: "/api/bff/orgs/org_k1/managed-sites/site_k1", orgId: "org_k1", siteId: "site_k1", csrfToken: "csrf-k" };
@@ -151,5 +165,37 @@ describe("a site action keeps its Idempotency-Key until an answer comes (issue #
     const sent = await expectKeptUntilAnswered((p) => nameDialog(panel.render(), title).onSubmit(p === "a" ? "" : "unpacked"));
     expect(JSON.parse(sent[0]!.body)).toEqual({ path: "site.zip", to: "" });
     expect(JSON.parse(sent[5]!.body)).toEqual({ path: "site.zip", to: "unpacked" });
+  });
+
+  it("files: a change that went through ends the kept zip keys (delete, upload, save, new folder, extract)", async () => {
+    // A compress whose answer was lost, then another change: the same compress again must not replay the old
+    // one, which ran on files that have changed since.
+    const panel = filesPanel();
+    panel.render();
+    const zip = { name: "site.zip", kind: "file", size: 10, modifiedAt: "2026-11-20T10:00:00.000Z", writable: true };
+    const selection = panel.h.state.findIndex((v) => v instanceof Set);
+    panel.h.state[panel.h.state.findIndex((v) => Array.isArray(v))] = [zip];
+    panel.h.state[selection] = new Set([zip.name]);
+    const open = panel.render().find((e) => (e.props as { children?: unknown }).children === en.site.files.actions.extract);
+    (open!.props as { onClick: () => void }).onClick();
+    panel.h.state[selection] = new Set(); // the compress below always sends the same body
+    const sent = answering(["lost", 200, "lost", "lost", "lost", 201, "lost", 202, "lost"]);
+    const compress = () => nameDialog(panel.render(), en.site.files.compress.title).onSubmit("backup");
+    await compress();
+    await (panel.render().find((e) => e.type === DeleteFilesDialog)!.props as { onConfirm: () => Promise<unknown> }).onConfirm();
+    await compress();
+    uploads.onFileDone!("elsewhere"); // a file finished uploading, here in another folder
+    await compress();
+    (panel.render().find((e) => e.type === FileEditorDialog)!.props as { onSaved: () => void }).onSaved();
+    await compress();
+    await nameDialog(panel.render(), en.site.files.newFolder.title).onSubmit("new");
+    await compress();
+    await nameDialog(panel.render(), format(en.site.files.extract.title, { name: zip.name })).onSubmit("");
+    await compress();
+    const compresses = [0, 2, 3, 4, 6, 8].map((i) => sent[i]!);
+    expect(sent).toHaveLength(9);
+    expect(new Set(compresses.map((s) => s.body))).toEqual(new Set(['{"paths":[],"to":"backup.zip"}']));
+    for (const s of compresses) expect(s.key).toMatch(/\S{8,}/);
+    expect(new Set(compresses.map((s) => s.key)).size).toBe(6);
   });
 });

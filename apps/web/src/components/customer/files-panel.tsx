@@ -452,6 +452,7 @@ export function FilesPanel({
     csrfToken: liveCsrf,
     onCsrfToken: setLiveCsrf,
     onFileDone: (dir) => {
+      zipKeysRef.current = {}; // an uploaded file, in any folder, ends the kept zip keys
       if (dir === folderRef.current) {
         refresh();
       }
@@ -571,6 +572,8 @@ export function FilesPanel({
         body: payload,
       });
       if (keys) settleKey(keys, subpath, res.status);
+      // A change that went through ends every kept zip key: a retry would replay work done on the files before it.
+      if (res.ok) zipKeysRef.current = {};
       const json = (await res.json().catch(() => null)) as {
         data?: T;
         error?: { code?: string; details?: Array<{ field?: string; reason?: string }> };
@@ -1049,7 +1052,10 @@ export function FilesPanel({
         onOpenChange={(o) => {
           if (!o) setEditingEntry(null);
         }}
-        onSaved={refresh}
+        onSaved={() => {
+          zipKeysRef.current = {}; // a saved file ends the kept zip keys
+          refresh();
+        }}
         onDownload={triggerDownload}
       />
     </div>
