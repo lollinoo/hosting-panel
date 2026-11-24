@@ -984,5 +984,40 @@ describe("B3: application web addresses touch only the application's own route f
       expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${(await address("unreachable-b.example.test")).accessPasswordHash!}"`);
       expect((await detail()).routesPending).toBe(false);
     });
+
+    it("a failed application keeps an address its file still serves: another organisation cannot take the name until the route is withdrawn", async () => {
+      const name = "held.example.test";
+      const theirs = () => call("POST", `/v1/organizations/${otherOrgId}/app-stacks/${otherStackId}/domains`, { hostname: name, ...WEB }, otherToken);
+      const { appId, domainId } = await published(name, 702);
+      sim.appStacks.failNextAppStackStep("restart", "engine_unavailable");
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await appRow(appId)).status).toBe("failed");
+      expect((await files()).get(`app_${appId}.yml`)).toContain(name);
+
+      const before = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "app.stack.domain.remove"));
+      const removed = await owner("DELETE", `${base(appId)}/${domainId}`);
+      expect(removed.status, removed.raw).toBe(409);
+      expect(removed.body.error.code).toBe("RESOURCE_LOCKED");
+      expect(removed.body.error.details).toContainEqual(expect.objectContaining({ field: "status", reason: "failed" }));
+      expect(await address(name)).toMatchObject({ id: domainId, stackId: appId });
+      expect(await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "app.stack.domain.remove"))).toHaveLength(before.length);
+      const taken = await theirs();
+      expect(taken.status, taken.raw).toBe(409);
+      expect(taken.body.error.code).toBe("DOMAIN_CONFLICT");
+      await pass(703);
+      for (const [file, text] of await files()) if (file !== `app_${appId}.yml`) expect(text, file).not.toContain(name);
+
+      // Once it runs again the removal is accepted and withdraws the route; only then does the name change hands.
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await owner("DELETE", `${base(appId)}/${domainId}`)).status).toBe(200);
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
+      expect((await theirs()).status).toBe(201);
+      await pass(704);
+      expect((await files()).get(`app_${otherStackId}.yml`)).toContain(name);
+      expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
+    });
   });
 });

@@ -6331,8 +6331,13 @@ paths:
       operationId: removeAppStackDomain
       summary: Remove a web address from an application (app.update; audited as app.stack.domain.remove)
       description: >-
-        Its route is withdrawn. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        Its route is withdrawn: on a running application the route refresh is queued in the same request (ADR-0037).
+        Removing frees the hostname, so while a route file of the application may be in place that the panel cannot
+        rewrite now (an action in progress other than the panel's own route refresh, a failed or unknown application,
+        or a stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with
+        `details[0].field: status` and `details[0].reason` the status, and the address is kept. No Idempotency-Key.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6363,6 +6368,11 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
+            `details[0].reason` is the status); the address is kept
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"

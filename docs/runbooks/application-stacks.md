@@ -280,6 +280,10 @@ administrator's console has no such action, and nobody writes proxy configuratio
      customer asked for that did not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
      nothing would rewrite. Let the action finish, or start or restart the application, then save again.
 
+   Removing an address follows the same rule and is refused in the same states: removing frees the name for anyone,
+   another customer included, while the live file would still serve it. Adding an address is always possible: it
+   reads «In attesa» until a published file holds it.
+
    When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
    what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
    next to every address that shows an option, never the option as active. The next successful start, restart or

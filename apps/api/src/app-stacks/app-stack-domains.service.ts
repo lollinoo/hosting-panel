@@ -158,7 +158,10 @@ export class AppStackDomainsService {
     return { domains: await this.list(stack), applies };
   }
 
-  /** The route refresh queued in the same transaction withdraws the route. */
+  /**
+   * The route refresh queued in the same transaction withdraws the route. Removing frees the host name for anyone, so
+   * where a route file may be in place that nothing rewrites now (ADR-0037) the address is kept and the removal refused.
+   */
   public async remove(ctx: AppStackRequestContext, stack: AppStackRow, domainId: string): Promise<AppStackDomainDto[]> {
     const row = await this.#row(stack, domainId);
     const queued = await guardedApp(mapAppStackError, () =>
@@ -168,13 +171,18 @@ export class AppStackDomainsService {
         if (!(await removeAppStackDomainTransactional(t, { organizationId: ctx.organizationId, stackId: stack.id, domainId }))) {
           throw appNotFound();
         }
+        const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
+        if (appStackOptionsApply(locked, await lastOperation(t, stack.id)) === null) {
+          const message = `This web address cannot be withdrawn while the application is ${locked.status}.`;
+          throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: locked.status }, false);
+        }
         await ctx.audit(t, {
           action: APP_AUDIT_ACTIONS.domainRemove,
           targetType: "app_stack",
           targetId: stack.id,
           details: { domainId, hostname: row.hostname },
         });
-        return this.#queueRefresh(t, (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack);
+        return this.#queueRefresh(t, locked);
       }),
     );
     await this.#reconcile(stack, [], false, queued);
