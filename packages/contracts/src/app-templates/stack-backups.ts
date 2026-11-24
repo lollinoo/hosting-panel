@@ -121,8 +121,9 @@ export const AppStackBackupsDtoSchema = z.object({
   backups: z.array(AppStackBackupDtoSchema), // newest first
   unavailableReason: z.enum(APP_STACK_BACKUP_UNAVAILABLE_REASONS).nullable(),
   /**
-   * While the data are half written (the newest action asked of the application, backups and clean-ups aside, is a
-   * restore that left them so): the safety backup that holds them whole, to restore. A start takes them as they are.
+   * While the data are half written (the newest action asked of the application, backups, clean-ups and failed actions
+   * other than restores aside, is a restore that left them so): the safety backup that holds them whole, to restore. A
+   * start takes them as they are, unless it fails.
    */
   goBackTo: AppEntityIdSchema.nullable(),
 });

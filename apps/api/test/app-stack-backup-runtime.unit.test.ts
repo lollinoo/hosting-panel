@@ -973,6 +973,41 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(kept).toEqual(expect.arrayContaining(safety.slice(1)));
     });
 
+    it("a start that fails takes nothing: the page still points back, and the clean-up keeps the safety backup of whole data", async () => {
+      const { stackId, source } = await withBackup();
+      const safety = await failedRestores(stackId, source.id, 4);
+
+      // The customer presses «Avvia»; the executor refuses it before any part runs, and the start fails.
+      n += 1;
+      const { operation: start } = await enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId,
+        kind: "stack.start",
+        requestedByUserId: null,
+        idempotencyKey: `bk-${String(n)}`,
+        requestHash: hex(`lifecycle ${String(n)}`),
+        revision: null,
+        destroyData: false,
+      });
+      fake.failNext("startAppStackComponent", "definite", "STACK_BUSY");
+      expect(await apply(start!)).toBeInstanceOf(ControlPlaneError);
+      expect((await opOf(start!.id)).status).toBe("failed");
+
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
+      expect(await apply(await prune(stackId))).toBeUndefined();
+      expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).toContain(safety[0]);
+
+      // The next restore copies the same half written data; failing too, the page still names the backup of whole data.
+      const { operation: next, backup: nextSafety } = await request(stackId, "stack.restore", safety[0]!);
+      expect(nextSafety.incompleteData).toBe(true);
+      before = (req) => {
+        if (req.action === "stackRestore") sim.failNext("no_space");
+      };
+      expectFailed(await apply(next), "INTERNAL_ERROR", "stack.restore");
+      before = null;
+      expect((await page(stackId)).goBackTo).toBe(safety[0]);
+    });
+
     it("a restore that succeeds in writing back a copy of half written data keeps the safety backup of whole data", async () => {
       const { stackId, source } = await withBackup();
       const safety = await failedRestores(stackId, source.id, 4);

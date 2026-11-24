@@ -14,7 +14,7 @@ import {
   type BackupTargetKind,
   type ErrorCode,
 } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, or, sql } from "drizzle-orm";
 import { AppStackRepositoryError, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
 import { resolveAppStackBackupTargets } from "./backup-targets-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
@@ -455,16 +455,24 @@ export async function settleAppStackRestore(
 
 /**
  * The safety backup of the restore that left an application's data half written, while they still are (ADR-0038 K5):
- * that restore is the newest operation asked of the application that is not a backup or a clean-up, and its safety
- * backup says it left them so. Anything else asked since, a start above all, takes the data as they are. Null while
- * the data are whole. The one test of "the data are half written now": the mark on a new safety backup, the retention
- * rule and the page all ask it.
+ * that restore is the newest operation asked of the application that is not a backup, a clean-up or another action
+ * that failed, and its safety backup says it left them so. Anything else asked since, a start above all, takes the
+ * data as they are; one that fails (a start the executor refuses) leaves them as they were. A restore counts even when
+ * it failed: its safety backup says whether it left them so. Null while the data are whole. The one test of "the data
+ * are half written now": the mark on a new safety backup, the retention rule and the page all ask it.
  */
 export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackId: string): Promise<AppStackBackupRow | null> {
   const [last] = await db
     .select({ id: operations.id, kind: operations.kind })
     .from(operations)
-    .where(and(eq(operations.lockKey, appStackLockKey(stackId)), notInArray(operations.kind, ["stack.backup", "stack.prune"])))
+    .where(
+      and(
+        eq(operations.lockKey, appStackLockKey(stackId)),
+        notInArray(operations.kind, ["stack.backup", "stack.prune"]),
+        // A cancelled one failed before the worker took it up.
+        or(eq(operations.kind, "stack.restore"), notInArray(operations.status, ["failed", "cancelled"])),
+      ),
+    )
     .orderBy(desc(operations.submittedAt), desc(operations.id))
     .limit(1);
   if (last?.kind !== "stack.restore") return null;

@@ -311,12 +311,14 @@ approval.
    («Questa copia è stata fatta dopo un ripristino non finito»). Restoring such a marked copy succeeds but brings the
    half written data back: the section goes on naming the backup of whole data. Do not press **Avvia** first unless losing the state
    before the restore is acceptable: a start, or any other action asked of the application except a backup, takes the
-   data as they are, and from then on the section names no backup to go back to. The data are half written **now**
-   only while the newest operation of the application other than a backup or a clean-up is a restore whose safety
-   backup (the row with the same `operation_id`) has `left_incomplete`; `incomplete_data` marks a copy of half written
+   data as they are, and from then on the section names no backup to go back to. An action that fails takes nothing
+   (a start the executor refuses because a backup job of the application still runs, for example: step 3).
+   The data are half written **now** only while the newest operation of the application other than a backup, a
+   clean-up or a failed action that is not a restore is a restore whose safety backup (the row with the same
+   `operation_id`) has `left_incomplete`; `incomplete_data` marks a copy of half written
    data. To see both:
    ```bash
-   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, status, submitted_at from operations where lock_key = 'stack:<stackId>' and kind not in ('stack.backup', 'stack.prune') order by submitted_at desc, id desc limit 1"
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, kind, status, submitted_at from operations where lock_key = 'stack:<stackId>' and kind not in ('stack.backup', 'stack.prune') and (kind = 'stack.restore' or status not in ('failed', 'cancelled')) order by submitted_at desc, id desc limit 1"
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, operation_id, status, started_at, incomplete_data, left_incomplete from app_stack_backups where stack_id = '<stackId>' and kind = 'pre_restore' order by started_at desc"
    ```
 7. **What is kept.** For each application the three newest good backups made by hand and the three newest good safety

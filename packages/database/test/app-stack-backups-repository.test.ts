@@ -636,6 +636,45 @@ describe("@hosting-panel/database — application backups", () => {
       expect((await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id })).backup.incompleteData).toBe(false);
     });
 
+    it("an action that failed, a restore aside, leaves the data as the failed restore left them", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const failedRestore = async () => {
+        const written = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
+        await finish(written);
+        await settleAppStackRestore(db(), { operationId: written.operation.id, status: "failed", problem: "no_space", mayHaveWritten: true });
+        await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+        return written;
+      };
+      const start = (status: "failed" | "cancelled" | "queued") =>
+        db().insert(operations).values({
+          id: `op_${hex(`start ${status}`).slice(0, 24)}`,
+          organizationId: orgA,
+          kind: "stack.start",
+          resourceType: "stack",
+          resourceId: stack.id,
+          status,
+          lockKey: `stack:${stack.id}`,
+          idempotencyKey: `sb-start-${status}`,
+        });
+      const first = await failedRestore();
+
+      // The customer presses Start and it fails before any part runs (or never leaves the queue): nothing ran on the data.
+      await start("failed");
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(first.backup.id);
+      await start("cancelled");
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(first.backup.id);
+
+      // The next restore copies the same half written data; failing too, it holds the mark itself.
+      const second = await failedRestore();
+      expect(second.backup.incompleteData).toBe(true);
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(second.backup.id);
+
+      // A start that is not over takes the data as they are.
+      await start("queued");
+      expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
+    });
+
     it("accepts a partial backup: one good copy is enough", async () => {
       await setPolicyTargets(db(), policyId, [S3, LOCAL]);
       const stack = await installed();
