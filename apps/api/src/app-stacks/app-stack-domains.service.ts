@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APP_AUDIT_ACTIONS,
   APP_STACK_RESOURCE_TYPE,
+  APP_STACK_TASK_KIND,
   ApprovedStackPlanSchema,
   type AppStackDomainDto,
   type AppStackDomainEntry,
@@ -18,6 +19,7 @@ import {
   getAppTemplateVersion,
   listAppStackDomains,
   lockAppStackLimitUsage,
+  not,
   operations,
   removeAppStackDomainTransactional,
   updateAppStackDomainRoutingTransactional,
@@ -273,7 +275,10 @@ function notNow(stack: AppStackRow, last: Awaited<ReturnType<typeof lastOperatio
   return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: unfinished ? "stop_unfinished" : stack.status }, false);
 }
 
-/** The latest operation of the stack; the caller holds the stack row. */
+/**
+ * The latest action on the stack; the caller holds the stack row. A run of a task is none (ADR-0042): it changes neither
+ * the containers nor the routes, and one that waits for its lane does not hold the application.
+ */
 async function lastOperation(db: DatabaseExecutor, stackId: string) {
   const [last] = await db
     .select({
@@ -283,7 +288,9 @@ async function lastOperation(db: DatabaseExecutor, stackId: string) {
       idempotencyKey: operations.idempotencyKey,
     })
     .from(operations)
-    .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stackId)))
+    .where(
+      and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stackId), not(eq(operations.kind, APP_STACK_TASK_KIND))),
+    )
     .orderBy(desc(operations.submittedAt))
     .limit(1);
   return last;

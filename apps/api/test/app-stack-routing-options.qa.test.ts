@@ -9,7 +9,9 @@ import {
   appStacks,
   asc,
   auditEvents,
+  beginAppStackTaskRunTransactional,
   enqueueAppStackOperationTransactional,
+  enqueueAppStackTaskRunTransactional,
   eq,
   operations,
   outboxEvents,
@@ -555,6 +557,54 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
       expect((await remove(stopped.stackId, stopped.id)).status).toBe(200);
       const running = await installed("running", true);
       expect((await remove(running.stackId, running.id)).status).toBe(200);
+    });
+
+    /** A run of a task of the application, queued for the lane of tasks (ADR-0042), and begun when asked. */
+    async function taskRun(stackId: string, begin: boolean): Promise<void> {
+      const { appliedRevisionId } = await stackRow(stackId);
+      const runId = `srun_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+      const queued = await enqueueAppStackTaskRunTransactional(h.dbClient.db, {
+        organizationId: h.a.orgId,
+        stackId,
+        taskKey: "tidy",
+        runId,
+        componentKey: "app",
+        appliedRevisionId: appliedRevisionId!,
+        request: { trigger: "manual", requestedByUserId: null, idempotencyKey: randomUUID(), requestHash: "0".repeat(64) },
+      });
+      if (queued.outcome !== "queued") throw new Error(`the run was not queued: ${JSON.stringify(queued)}`);
+      if (!begin) return;
+      const begun = await beginAppStackTaskRunTransactional(h.dbClient.db, {
+        runId,
+        operationId: queued.operationId,
+        revisionId: appliedRevisionId!,
+        componentKey: "app",
+        startedAt: new Date(),
+      });
+      expect(begun.outcome).toBe("started");
+    }
+
+    it("a run of a task that waits for its turn holds no address: a change and a removal go through (ADR-0042)", async () => {
+      const { stackId, id } = await installed("running", true);
+      await taskRun(stackId, false);
+      const res = await patch(stackId, id, { ...OFF, compression: true });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.body.applies).toBe("shortly");
+      expect((await h.call(h.a.token, "DELETE", `${base(h.a, stackId)}/${id}`)).status).toBe(200);
+    });
+
+    it("while a run of a task executes, a change the route file must take now waits for it: a 409 to try again, never a 500 (ADR-0042)", async () => {
+      const { stackId, id } = await installed("running", true);
+      // Something is published: the change has to reach the route file, through a refresh queued with it.
+      await h.dbClient.db.update(appStacks).set({ appliedAddressesHash: "0".repeat(64) }).where(eq(appStacks.id, stackId));
+      await taskRun(stackId, true);
+      const before = await h.counts();
+      for (const res of [await patch(stackId, id, { ...OFF, compression: true }), await h.call(h.a.token, "DELETE", `${base(h.a, stackId)}/${id}`)]) {
+        expectRefusal(res, 409, "RESOURCE_LOCKED");
+        expect(res.body.error.retryable, res.raw).toBe(true);
+      }
+      expect(await h.counts()).toEqual(before);
+      expect((await rows(stackId)).map((r) => [r.id, r.compression])).toEqual([[id, false]]);
     });
 
     describe("a path points at a part of the revision that runs and of the one asked for", () => {
