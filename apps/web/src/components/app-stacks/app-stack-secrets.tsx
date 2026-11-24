@@ -17,7 +17,7 @@ import { Label } from "@/components/ui/label";
 import { format } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
-import { appStackRefusalText } from "./app-stack-view";
+import { appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
 
 /** Private values are write-only: a row says whether one is set; the typed value lives only in the field until it is sent. */
 export function AppStackSecrets({
@@ -76,7 +76,7 @@ export function AppStackSecrets({
       setEditing(null);
       setNotice(t.replaced);
       router.refresh();
-    } else if (sent.reason === "value_too_long" || sent.reason === "value_too_short") setFieldError(appStackRefusalText(m, sent.code, sent.reason));
+    } else if (sent.reason === "value_too_long" || sent.reason === "value_too_short") setFieldError(appStackSecretRefusalText(m, sent));
     else setError(appStackRefusalText(m, sent.code, sent.reason));
   }
 

@@ -586,6 +586,32 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await stackOf(stackId)).toMatchObject({ status: "starting", appliedRoutesHash: null });
     });
 
+    it("a stop whose unpublish answer is lost: recovery sees no routes, drops their hash, and the restart it queues writes them again", async () => {
+      const { stackId } = await running();
+      const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+      expect(routesHash).not.toBeNull();
+      const { operation: op } = await request(stackId);
+      // The executor withdrew the routes; its answer could not be read.
+      fake.failNext("unpublishAppStackRoutes", "ambiguous");
+
+      expectParked(await apply(op));
+      expect(trace()).toEqual(["unpublishAppStackRoutes"]);
+      expect(sim.appStackJobs()).toEqual([]);
+
+      await transitionOperation(db(), op.id, "unknown");
+      fake.calls.length = 0;
+      expect(await runtime().recover(await opOf(op.id))).toBe("settled");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).appliedRoutesHash).toBeNull();
+      const resume = await resumeOf(op.id);
+      expect(resume).toMatchObject({ kind: "stack.restart", status: "queued" });
+
+      fake.calls.length = 0;
+      expect(await apply(resume!)).toBeUndefined();
+      expect(trace()).toContain("publishAppStackRoutes");
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: routesHash });
+    });
+
     it("a copy the executor refuses because the application is busy is closed as busy", async () => {
       const { stackId } = await stopped();
       const { operation: op, backup } = await request(stackId);
@@ -808,13 +834,19 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
     it("an answer lost after the restore was accepted: recovery reads the job, never sends it again, and starts the application", async () => {
       const { stackId, source } = await withBackup();
       const { operation: op } = await request(stackId, "stack.restore", source.id);
+      let restoresSent = 0;
+      before = (req) => {
+        if (req.action === "stackRestore") restoresSent += 1;
+      };
       after = (req) => {
         if (req.action === "stackRestore") throw new ControlPlaneError("OPERATION_AMBIGUOUS", "answer lost");
       };
 
       expectParked(await apply(op));
       expect((await stackOf(stackId)).status).toBe("stopped");
+      // Not closed (so not recorded as a restore that wrote nothing), and nothing starts the application yet.
       expect((await backupOf(source.id)).restoreStatus).toBe("running");
+      expect(await resumeOf(op.id)).toBeNull();
 
       after = null;
       await transitionOperation(db(), op.id, "unknown");
@@ -822,6 +854,7 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await runtime().recover(await opOf(op.id))).toBe("settled");
 
       expect(trace()).toEqual([]);
+      expect(restoresSent).toBe(1);
       expect(sim.appStackJobs().filter((j) => j.action === "stackRestore")).toHaveLength(1);
       expect((await backupOf(source.id)).restoreStatus).toBe("succeeded");
       expect((await opOf(op.id)).status).toBe("succeeded");

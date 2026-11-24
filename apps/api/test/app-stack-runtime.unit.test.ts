@@ -507,6 +507,27 @@ describe("AppStackRuntime (RT3)", () => {
       expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
     });
 
+    it("a start in doubt inside an upgrade removes nothing: the recovery settles from what runs", async () => {
+      const webFirst = component("web");
+      const { stackId } = await running([webFirst, CACHE]);
+      const v2 = revision(stackId, [{ ...webFirst, environment: [{ name: "CACHE_HOST", value: "cache" }] }, CACHE]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      // The executor started the new container; its answer could not be read.
+      fake.failNext("startAppStackComponent", "ambiguous");
+
+      expect(((await run(upgrade)) as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+
+      expect(trace()).not.toContain("removeAppStackComponents");
+      expect((await stackOf(stackId)).status).toBe("unknown");
+      await transitionOperation(db(), upgrade.operation!.id, "unknown");
+      fake.calls.length = 0;
+      expect(await runtime().recover(await opOf(upgrade.operation!.id))).toBe("settled");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect([...fake.stack(stackId).components.keys()].sort()).toEqual(["cache", "web"]);
+      expect(fake.stack(stackId).components.get("web")!.componentHash).toBe(computeAppStackComponentHash(v2.plan as ApprovedStackPlan, "web"));
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: v2.revisionId });
+    });
+
     it("a cleanup that fails for sure records the component as observed, not missing", async () => {
       const webFirst = component("web");
       const { stackId } = await running([webFirst, CACHE]);
@@ -740,6 +761,40 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await stackOf(stackId)).status).toBe("degraded");
       expect((await stackOf(stackId)).appliedRoutesHash).toBeNull();
       expect((await stepsOf(stop))["stop"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+    });
+
+    it("a stop whose unpublish answer is lost: the recovery sees no routes and drops the hash, so the restart writes them again", async () => {
+      const { stackId } = await running();
+      const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+      expect(routesHash).not.toBeNull();
+      const stop = await enqueue(stackId, "stack.stop");
+      // The executor withdrew the routes; its answer could not be read.
+      fake.failNext("unpublishAppStackRoutes", "ambiguous");
+
+      expect(((await run(stop)) as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+      expect(trace()).toEqual(["unpublishAppStackRoutes"]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+      await transitionOperation(db(), stop.operation!.id, "unknown");
+      expect(await runtime().recover(await opOf(stop.operation!.id))).toBe("settled");
+      expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: null });
+
+      fake.calls.length = 0;
+      expect(await run(await enqueue(stackId, "stack.restart"))).toBeUndefined();
+      expect(trace()).toContain("publishAppStackRoutes");
+      expect(fake.stack(stackId).routes).toHaveLength(1);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: routesHash });
+    });
+
+    it("a stop the executor refuses before anything is withdrawn keeps the routes and their hash", async () => {
+      const { stackId } = await running();
+      const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+      fake.failNext("unpublishAppStackRoutes", "definite");
+
+      expectFailure(await run(await enqueue(stackId, "stack.stop")), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toEqual(["unpublishAppStackRoutes"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: routesHash });
+      expect(fake.stack(stackId).routes).toHaveLength(1);
     });
 
     it("delete without data keeps the volumes; with destroyData it asks the executor to remove them", async () => {

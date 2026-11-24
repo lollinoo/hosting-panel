@@ -2,22 +2,32 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { appStackEnqueueTarget, type AppStackDetailDto, type AppStackPlanDiffDto, type AppStackStatus } from "@hosting-panel/contracts";
+import {
+  APP_STACK_PROCESS_MARK_PATTERN,
+  SetAppStackSecretInputSchema,
+  appStackEnqueueTarget,
+  type AppStackDetailDto,
+  type AppStackPlanDiffDto,
+  type AppStackStatus,
+} from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
-import { appStackRefusalText } from "./app-stack-view";
+import { appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
 
 export type StackAction = "start" | "stop" | "restart" | "deploy";
 type QueuedAction = StackAction | "upgrade" | "rollback";
 type Sent = Awaited<ReturnType<typeof keyedSend>>;
 type PlanTarget = { templateVersionId: string } | { revisionId: string };
+type TypedSecret = { parameterKey: string; value: string };
+const SECRET_FIELD = "secrets.";
 
 export function stackActionEnabled(action: QueuedAction, status: AppStackStatus): boolean {
   return appStackEnqueueTarget(`stack.${action}`, status) !== null;
@@ -70,7 +80,8 @@ export function AppStackActions({
       setNotice(t.accepted);
       router.refresh();
     } else if (sent.ok) setError(appStackRefusalText(m, ""));
-    else if (sent.reason !== "plan_changed") setError(appStackRefusalText(m, sent.code, sent.reason, status)); // the plan dialog plans again
+    // The plan dialog plans again on plan_changed, and shows the refusal of a private value next to its field.
+    else if (sent.reason !== "plan_changed" && !sent.field?.startsWith(SECRET_FIELD)) setError(appStackRefusalText(m, sent.code, sent.reason, status));
     return sent;
   }
 
@@ -133,7 +144,7 @@ export function AppStackActions({
           csrfToken={csrfToken}
           target={target}
           busy={busy !== null}
-          onSend={(planHash) => run(plan, { ...target, planHash })}
+          onSend={(planHash, secrets) => run(plan, { ...target, planHash, ...(secrets.length > 0 ? { secrets } : {}) })}
           onClose={() => !busyRef.current && setPlan(null)}
         />
       )}
@@ -141,7 +152,7 @@ export function AppStackActions({
   );
 }
 
-/** Upgrade and rollback: the plan is asked on open, the confirm echoes its hash. */
+/** Upgrade and rollback: the plan is asked on open, the confirm echoes its hash with the private values the new version needs. */
 function PlanDialog({
   mode,
   base,
@@ -156,17 +167,22 @@ function PlanDialog({
   csrfToken: string;
   target: PlanTarget;
   busy: boolean;
-  onSend: (planHash: string) => Promise<Sent | null>;
+  onSend: (planHash: string, secrets: TypedSecret[]) => Promise<Sent | null>;
   onClose: () => void;
 }) {
   const m = useMessages();
   const [diff, setDiff] = useState<AppStackPlanDiffDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ack, setAck] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // A typed private value lives only in its field, which is emptied once the request is sent.
+  const inputs = useRef(new Map<string, HTMLInputElement>());
+  const asked = mode === "upgrade" ? (diff?.newSecrets ?? []) : [];
 
   async function load() {
     setDiff(null);
     setAck(false);
+    setFieldErrors({});
     try {
       const res = await fetch(`${base}/plan`, {
         method: "POST",
@@ -188,7 +204,26 @@ function PlanDialog({
 
   async function confirm() {
     if (!diff) return;
-    const sent = await onSend(diff.planHash);
+    const secrets = asked.map((wanted) => ({ parameterKey: wanted.key, value: inputs.current.get(wanted.key)?.value ?? "" }));
+    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041).
+    const problems = secrets.flatMap((typed): [string, string][] =>
+      !typed.value
+        ? [[typed.parameterKey, m.apps.wizard.required]]
+        : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
+          ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
+          : [],
+    );
+    if (problems.length > 0) return setFieldErrors(Object.fromEntries(problems));
+    setFieldErrors({});
+    const sent = await onSend(diff.planHash, secrets);
+    for (const input of inputs.current.values()) input.value = "";
+    if (sent && !sent.ok && sent.field?.startsWith(SECRET_FIELD)) {
+      const key = sent.field.slice(SECRET_FIELD.length);
+      const text = appStackSecretRefusalText(m, sent);
+      if (asked.some((wanted) => wanted.key === key)) setFieldErrors({ [key]: text });
+      else setError(text);
+      return;
+    }
     if (sent && !sent.ok && sent.reason === "plan_changed") {
       setError(m.apps.reasons.plan_changed);
       return load();
@@ -215,6 +250,47 @@ function PlanDialog({
           </Alert>
         )}
         {diff && <PlanDiff diff={diff} m={m} />}
+        {asked.length > 0 && (
+          <fieldset className="space-y-3">
+            <legend className="text-sm font-medium">{m.apps.upgrade.secretsTitle}</legend>
+            <p className="text-sm text-muted-foreground">{m.apps.upgrade.secretsHint}</p>
+            {asked.map((wanted) => {
+              const id = `app-upgrade-secret-${wanted.key}`;
+              const fieldError = fieldErrors[wanted.key];
+              return (
+                <div key={wanted.key} className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Label htmlFor={id}>{wanted.label}</Label>
+                    <span className="text-sm text-muted-foreground">{m.apps.secrets.required}</span>
+                  </div>
+                  <Input
+                    id={id}
+                    ref={(el) => {
+                      if (el) inputs.current.set(wanted.key, el);
+                      else inputs.current.delete(wanted.key);
+                    }}
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    required
+                    maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
+                    readOnly={busy}
+                    aria-describedby={`${id}-note`}
+                    aria-invalid={fieldError !== undefined || undefined}
+                  />
+                  <p id={`${id}-note`} className="text-sm text-muted-foreground">
+                    {m.apps.wizard.secretHint}
+                  </p>
+                  {fieldError && (
+                    <p role="alert" className="text-sm text-destructive">
+                      {fieldError}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </fieldset>
+        )}
         {diff?.dataRisk && (
           <div className="flex items-center gap-2">
             <input id="app-plan-ack" type="checkbox" required checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={busy} />
