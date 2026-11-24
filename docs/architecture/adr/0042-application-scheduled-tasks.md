@@ -92,6 +92,7 @@ Una passata dell'API, ogni minuto, mette in coda ciò che è in programma:
 - ogni orario parte **al massimo una volta**: l'orario servito è scritto nella stessa transazione che crea l'operazione;
 - se in quel momento l'applicazione è occupata, la passata riprova per **30 minuti**; poi l'orario è saltato. Lo stesso vale per un orario già in coda la cui esecuzione, quando è toccato a lei, ha trovato l'applicazione occupata o ferma: l'orario torna dovuto. Un orario saltato (applicazione occupata, ferma, API spenta in quel momento) è scritto sulla riga del programma con il motivo, non come un'esecuzione, e non viene recuperato dopo;
 - un programma di un'attività che la versione installata non ha più resta fermo e torna a valere se una versione successiva, o un ritorno indietro, riporta quell'attività.
+- un orario scritto sul programma (l'ultimo servito o quello della modifica) più avanti dell'orologio non è creduto, perché viene da un orologio che correva avanti: la passata lo azzera e il programma riparte da quel momento, e un orario che ha già un'esecuzione conta come servito, senza una seconda esecuzione e senza nota.
 
 ### A8 — Che cosa resta di un'esecuzione
 
