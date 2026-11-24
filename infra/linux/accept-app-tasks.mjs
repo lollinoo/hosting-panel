@@ -6,7 +6,9 @@
  * terminal, no input, plus the mark of its run), a shell is refused before any Docker request, the exit code and the
  * output come back, the time limit kills the command and what left its session, one run per application at a time and
  * never the same run twice, a container that is not that component is refused, what an executor that died left running
- * is ended at the next start, and nothing a run printed is written anywhere by this process.
+ * is ended at the next start (also what a command that has ended left in the background, with no exec listed), a
+ * component whose own environment carries the mark is never cleaned up nor given a task, and nothing a run printed is
+ * written anywhere by this process.
  *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack ids stk_swarmtest_<hex>_a…e, so every container, network and volume
@@ -19,7 +21,8 @@
  *    argument empty or a run id, no environment) or one of the commands declared in ARGV below with the one variable
  *    HP_TASK_RUN=<run id>; never with a user, a directory, a privilege or a terminal. The gate records every exec it
  *    forwards, by container. The raw stream of an exec is piped only for an exec the gate saw created. The first step
- *    proves that it denies foreign and unsafe requests.
+ *    proves that it denies foreign and unsafe requests. One allowed request is held instead (never forwarded, never
+ *    answered): the clean-up of the one run of cleanup-of-what-an-ended-command-left, whose executor dies before it.
  *  - No image is ever pulled (the gate denies every pull; the seed image must be local), no edge network is created
  *    (the gate allows only a private network, internal) and no network is attached to anything: the live panel's
  *    executor attaches its proxy to any edge network it finds. The networks of the live proxy are read before the first
@@ -38,7 +41,8 @@
  * task-runs-as-the-component, a-shell-is-refused-before-docker, exit-code-and-output, time-limit-kills-the-command,
  * time-limit-kills-what-left-the-session, one-at-a-time-and-never-twice, refuses-what-is-not-that-component,
  * no-shell-no-task (skipped: no local image without /bin/sh is allowed through the gate), cleanup-after-executor-death,
- * nothing-recorded, remove-everything, gate-clean, nothing-left.
+ * cleanup-of-what-an-ended-command-left, a-component-with-the-mark-in-its-own-environment, nothing-recorded,
+ * remove-everything, gate-clean, nothing-left.
  * Each prints PASS/FAIL/SKIP <step> (a PASS may add ": <what was measured>"); final line RESULT n/m passed in Xs (a
  * skipped step is never a pass and is not counted).
  */
@@ -102,7 +106,10 @@ const runPrefix = `hp_swarmtest_task_${hex}`;
 const secretsRoot = `/dev/shm/${runPrefix}-secrets`;
 const ORG = `org_swarmtest_${hex}`;
 const OTHER_ORG = `org_swarmtest_${hex}_other`;
-/** A, B: two applications of one customer; C: one of another customer; D: only impostor containers; E: never created. */
+/**
+ * A, B: two applications of one customer; C: one of another customer; D: only throwaway containers (impostors, and one
+ * whose own environment carries the mark of a run); E: never created.
+ */
 const [A, B, C, D, E] = ["a", "b", "c", "d", "e"].map((s) => `stk_swarmtest_${hex}_${s}`);
 const OWNER = new Map([[A, ORG], [B, ORG], [C, OTHER_ORG], [D, ORG]]);
 /** This run's: the stack-derived names carry the marker, the script's own names and paths the prefix. */
@@ -122,6 +129,7 @@ const ARGV = Object.freeze({
   wrapped: ["timeout", "300", "sleep", "302"],
   twentySeconds: ["sleep", "20"],
   orphan: ["sleep", "303"],
+  leftBehind: ["setsid", "sleep", "304"],
 });
 const TASK_ARGVS = Object.values(ARGV);
 const words = (argv) => argv.join(" ");
@@ -322,6 +330,10 @@ const streams = new Set();
 const execLog = [];
 const execsIn = (name, from = 0) => execLog.slice(from).filter((e) => e.container === name).length;
 const execsOf = (form, from = 0) => execLog.slice(from).filter((e) => e.form === form).length;
+/** The run whose clean-up the gate holds, never forwarded and never answered: its executor "dies" before it. */
+let heldCleanupOf = null;
+/** The answers the gate holds back (each one a clean-up of heldCleanupOf). */
+const heldCleanups = [];
 const DENIED = JSON.stringify({ message: "gate: denied" });
 const isOwn = (ref) => ours(ref) || ownIds.has(ref);
 const deny = (why) => ({ kind: "deny", why });
@@ -474,6 +486,12 @@ function startGate(socketPath) {
       } catch (err) {
         verdict = deny(`unparsable (${String(err?.message)})`);
       }
+      // Stricter than judge(), never looser: an allowed clean-up of the held run goes nowhere.
+      if (verdict.exec?.form === "kill" && heldCleanupOf !== null && JSON.parse(bodyText).Cmd[4] === heldCleanupOf) {
+        gateLog.push(`${req.method} ${req.url} -> held`);
+        heldCleanups.push(res);
+        return;
+      }
       gateLog.push(`${req.method} ${req.url} -> ${verdict.kind}`);
       if (verdict.kind === "deny") {
         gateDenied.push(`${req.method} ${req.url}: ${verdict.why}`);
@@ -596,6 +614,7 @@ function cleanup() {
       client.destroy();
       engine.destroy();
     }
+    for (const res of heldCleanups.splice(0)) res.destroy();
     if (gateServer) {
       gateServer.closeAllConnections?.();
       await new Promise((resolve) => gateServer.close(() => resolve()));
@@ -1204,6 +1223,109 @@ async function main() {
       assert(execsOf("task", from) === 0, "a second pass starts no command either", String(execsOf("task", from)));
       const again = await task(A, "storage", ARGV.id);
       assert(endedAs(again.result, "succeeded", 0), "the cleaned component takes a new task", how(again.result));
+    });
+
+    await step("cleanup-of-what-an-ended-command-left", async () => {
+      // The engine drops an exec from ExecIDs once its command ends; what the command left in the background stays.
+      const name = cName(B, "storage");
+      const leftover = (args) => args.includes(words(ARGV.leftBehind.slice(1)));
+      const before = await componentState(name);
+      const req = request(B, "storage", ARGV.leftBehind, { timeoutSeconds: 600 });
+      heldCleanupOf = req.runId;
+      try {
+        const args = ["--input-type=module", "-e", DYING_EXECUTOR, "--", pathToFileURL(DIST[0]).href, JSON.stringify(adapterOptions), JSON.stringify(req)];
+        dying = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+        dying.stdout.on("data", (c) => (dyingOut += String(c)));
+        dying.stderr.on("data", (c) => (dyingErr += String(c)));
+        // Its command starts the sleep in a session of its own and ends; the executor then asks for the clean-up of the
+        // run, which the gate holds: the executor dies before it.
+        await until("the other executor asks for the clean-up after its command", 30_000, async () => {
+          assert(dyingRuns(), "the other executor runs", dyingErr.trim().split("\n").slice(-2).join(" / ").slice(0, 300));
+          return heldCleanups.length > 0;
+        }, 250);
+        const exited = new Promise((resolve) => dying.once("exit", resolve));
+        dying.kill("SIGKILL");
+        await exited;
+      } finally {
+        if (dyingRuns()) dying.kill("SIGKILL");
+        heldCleanupOf = null;
+        for (const res of heldCleanups.splice(0)) res.destroy();
+      }
+      const listed = await containerState(name);
+      assert(listed.execs === 0, "the engine lists no exec in the component: the command has ended", String(listed.execs));
+      const orphans = await runningIn(name, leftover);
+      assert(orphans.length === 1, "what the command left in the background runs on", `${String(orphans.length)} process(es)`);
+
+      const from = execLog.length;
+      const next = new DockerEngineSocketAdapter(adapterOptions);
+      await next.reapAppStackTasks();
+      const asked = execLog.slice(from);
+      assert(asked.length > 0 && asked.every((e) => e.form === "kill"), "the clean-up at start asked only for the clean-up script", asked.map((e) => e.form).join(",") || "nothing");
+      assert(asked.some((e) => e.container === name), "it ran in the component that lists no exec", asked.map((e) => e.container).join(","));
+      const left = await runningIn(name, leftover);
+      assert(left.length === 0, "the clean-up at start ended what the ended command left", `${String(left.length)} process(es)`);
+      const after = await componentState(name);
+      assert(after.running === true && changed(before, after).length === 0, "the component runs on: the same first process, not restarted", `changed: ${changed(before, after).join(",")}`);
+    });
+
+    await step("a-component-with-the-mark-in-its-own-environment", async () => {
+      // A throwaway component of the fourth application whose own environment carries the mark: so does its first process.
+      const name = cName(D, "storage");
+      const marked = (args) => args.includes("sleep 601");
+      const body = {
+        Image: SEED_IMAGE,
+        // The image's timeout runs the program as the first process and watches it from a second one: both carry the mark.
+        Cmd: ["timeout", "600", "sleep", "601"],
+        User: "999:1000",
+        Env: [`${APP_STACK_TASK_MARK}=${rid()}`],
+        Labels: appStackComponentLabels(planD, "storage"),
+        HostConfig: { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], ReadonlyRootfs: true, NetworkMode: "none", PidsLimit: 64, Memory: 64 << 20 },
+      };
+      const drop = async () => {
+        const r = await viaGate("DELETE", `/v1.45/containers/${name}?force=true&v=true`);
+        assert(r.status === 204 || r.status === 404, "the component with the mark is removed", `${String(r.status)} ${r.body.slice(0, 120)}`);
+      };
+      try {
+        const created = await viaGate("POST", `/v1.45/containers/create?name=${name}`, body);
+        assert(created.status === 201, "the component with the mark is created", `${String(created.status)} ${created.body.slice(0, 120)}`);
+        const started = await viaGate("POST", `/v1.45/containers/${name}/start`);
+        assert(started.status === 204, "the component with the mark runs", `${String(started.status)} ${started.body.slice(0, 120)}`);
+        const second = await until("its second process runs", 10_000, async () => {
+          const found = await runningIn(name, marked);
+          return found.length > 0 ? found.length : null;
+        }, 250);
+        const before = await componentState(name);
+
+        const from = execLog.length;
+        const refused = await rejection(task(D, "storage", ARGV.id));
+        assert(reasonOf(refused) === "DOCKER_ENGINE_UNAVAILABLE", "a run there is refused as not available", refused ? reasonOf(refused) : "it ran");
+        const asked = execLog.slice(from);
+        assert(
+          asked.length === 1 && asked[0].form === "kill" && asked[0].container === name,
+          "only the clean-up was tried there, never the command",
+          asked.map((e) => `${e.form} in ${e.container}`).join(",") || "nothing",
+        );
+        const after = await componentState(name);
+        assert(after.running === true && changed(before, after).length === 0, "the clean-up killed nothing: the same first process, not restarted", `changed: ${changed(before, after).join(",")}`);
+        const still = (await runningIn(name, marked)).length;
+        assert(still === second, "and the other process, which carries the mark too, runs on", `${String(still)} of ${String(second)}`);
+
+        // The clean-up at start: that component is no failure, it is counted in one line that names nothing.
+        const mark = printed.length;
+        const reapFrom = execLog.length;
+        const next = new DockerEngineSocketAdapter(adapterOptions);
+        const failed = await rejection(next.reapAppStackTasks());
+        assert(failed === null, "the clean-up at start does not fail because of that component", failed ? reasonOf(failed) : "");
+        assert(execLog.slice(reapFrom).some((e) => e.container === name), "it ran the clean-up there too", "not there");
+        const logged = printed.slice(mark).join("");
+        assert(logged.includes('"event":"app_task_mark_in_component","count":1'), "it logs the component as a count", logged.length > 0 ? "another line" : "no line");
+        assert(!ours(logged) && !hasDockerId(logged), "the line names no object and holds no Docker id", "a name or an id");
+        const later = await componentState(name);
+        assert(changed(before, later).length === 0 && (await runningIn(name, marked)).length === second, "nothing of that component was killed at start either", `changed: ${changed(before, later).join(",")}`);
+      } finally {
+        await drop().catch(() => undefined);
+      }
+      await gone(D, "the component with the mark");
     });
 
     await step("nothing-recorded", async () => {
