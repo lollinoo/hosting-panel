@@ -93,4 +93,11 @@ UPDATE app_stack_backups s SET left_incomplete = (s.status IN ('succeeded','part
  WHERE src.restore_status = 'running' AND src.restore_operation_id = s.operation_id AND s.kind = 'pre_restore';
 UPDATE app_stack_backups SET restore_status = 'failed', restore_problem = 'interrupted', restored_at = COALESCE(restored_at, now())
  WHERE restore_status = 'running';
+-- Notifications (ADR-0040): the alerts a channel was told belong to the host the copy was made on. Forgetting them
+-- makes the first passes tell what is open here as new, and tell no alert of the old host as closed. A message that
+-- was still waiting when the copy was made is old news: it is not sent. The channels and their secrets stay.
+DELETE FROM notification_channel_alerts;
+UPDATE notification_deliveries SET status = 'failed', problem = 'expired', next_attempt_at = NULL,
+       finished_at = COALESCE(finished_at, now())
+ WHERE status = 'pending';
 DELETE FROM user_sessions;

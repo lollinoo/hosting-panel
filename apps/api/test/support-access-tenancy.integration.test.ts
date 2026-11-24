@@ -209,6 +209,7 @@ describe("support access tenancy over every organization route", () => {
       stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
       componentKey: "app",
       linkId: `slnk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      channel: "webhook",
     };
   });
 

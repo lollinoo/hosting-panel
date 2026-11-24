@@ -24,6 +24,7 @@ import type {
   HostDaemonHeartbeatDto,
   RuntimeBackend,
   MailRelaySettingsDto,
+  NotificationSettingsDto,
   DnsProviderSettingsDto,
   BackupSettingsDto,
   AdminSiteBackupStatusDto,
@@ -216,6 +217,16 @@ export async function fetchServerSiteDomains(orgId: string, siteId: string): Pro
 
 export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto | null> {
   return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
+}
+
+export async function fetchServerAdminNotifications(): Promise<NotificationSettingsDto | null> {
+  return orNull(await serverGet<NotificationSettingsDto>("v1/admin/notifications"));
+}
+
+/** The whole result: a customer without the permission gets 403, and the page says so instead of an error. */
+export async function fetchServerOrgNotifications(orgId: string): Promise<ServerResult<NotificationSettingsDto>> {
+  if (!isValidPathSegment(orgId)) return { ok: false, outcome: "notFound" };
+  return serverGet<NotificationSettingsDto>(`v1/organizations/${orgId}/notifications`);
 }
 
 export async function fetchServerAdminDnsProvider(): Promise<DnsProviderSettingsDto | null> {

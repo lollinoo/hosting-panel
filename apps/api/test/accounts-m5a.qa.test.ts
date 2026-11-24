@@ -5,7 +5,7 @@ import { METHOD_METADATA, PATH_METADATA } from "@nestjs/common/constants.js";
 import { ModulesContainer } from "@nestjs/core";
 import { auditEvents, createDatabaseClient, eq, passwordResetTokens, sql, users, type DatabaseClient } from "@hosting-panel/database";
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
-import type { PanelMailRequest } from "@hosting-panel/executor-contracts";
+import type { PasswordResetMailRequest } from "@hosting-panel/executor-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // index.js first: the reset service sits in the import cycle cli/accounts -> create-app -> app.module.
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
@@ -52,7 +52,7 @@ describe("M5a accounts QA", () => {
     call("POST", "/v1/auth/login", { email, password, ...(totp ? { totpCode: totpCodeAt(totp, step()) } : {}) });
   const request = (email: string) => call("POST", "/v1/auth/password-reset/request", { email });
   const confirm = (token: string, newPassword = NEW_PW) => call("POST", "/v1/auth/password-reset/confirm", { token, newPassword });
-  const tokenOf = (m: PanelMailRequest) => m.link.split("#")[1]!;
+  const tokenOf = (m: PasswordResetMailRequest) => m.link.split("#")[1]!;
   const me = async (token: string) => (await call("GET", "/v1/me", undefined, token)).status;
   const userRow = async (id: string) => (await dbClient.db.select().from(users).where(eq(users.id, id)))[0]!;
   const audits = (action: string) => dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, action));
@@ -74,7 +74,7 @@ describe("M5a accounts QA", () => {
     await app.mailRelay.ensureApplied();
   }
 
-  async function requestMail(email = CUSTOMER): Promise<PanelMailRequest> {
+  async function requestMail(email = CUSTOMER): Promise<PasswordResetMailRequest> {
     const before = sim.panelMails.length;
     expect((await request(email)).status).toBe(202);
     await service.idle();

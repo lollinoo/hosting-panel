@@ -5,6 +5,8 @@ export const DATABASE_CLIENT_TOKEN = Symbol.for("hosting-panel.api.databaseClien
 export const DNS_LOOKUP_TOKEN = Symbol.for("hosting-panel.api.dnsLookup");
 export const DOCKER_EXECUTOR_TOKEN = Symbol.for("hosting-panel.api.dockerExecutor");
 export const HOST_AGENT_TOKEN = Symbol.for("hosting-panel.api.hostAgent");
+/** The one module that makes an HTTP request to the outside (ADR-0040 N7). */
+export const NOTIFICATION_OUTBOUND_TOKEN = Symbol.for("hosting-panel.api.notificationOutbound");
 
 export interface ControlPlaneRuntimeConfig {
   readonly oidcIssuer: string;

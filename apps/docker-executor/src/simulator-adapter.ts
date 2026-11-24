@@ -22,8 +22,10 @@ import {
   PINNED_PANEL_CONTAINERS,
   type PanelContainer,
   PanelMailIpcRequestSchema,
+  type NotificationMailRequest,
   type PanelMailRequest,
   type PanelMailResult,
+  type PasswordResetMailRequest,
   type SiteTypeKey,
   type WordpressImportLoadResult,
   type WordpressStateResult,
@@ -283,8 +285,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public readonly mailRelayApplies: Array<MailRelayApplyRequest | null> = [];
   public readonly mailDeliveries: SimulatedMailDelivery[] = [];
   public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
-  /** Every panel mail request in order. */
-  public readonly panelMails: PanelMailRequest[] = [];
+  /** Every password reset mail request in order. */
+  public readonly panelMails: PasswordResetMailRequest[] = [];
+  /** Every notification mail request in order. */
+  public readonly notificationMails: NotificationMailRequest[] = [];
   private failingMailApplies = 0;
   public dnsProvider: DnsProviderApplyRequest | null = null;
   public dnsProviderApplies = 0;
@@ -446,7 +450,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
     const parsed = PanelMailIpcRequestSchema.safeParse(req);
     if (!parsed.success) throw new ExecutorCodedError("Invalid panel mail", "VALIDATION_ERROR");
-    this.panelMails.push(parsed.data);
+    if (parsed.data.kind === "notification") this.notificationMails.push(parsed.data);
+    else this.panelMails.push(parsed.data);
     return { outcome: this.mailRelay ? "queued" : "failed" };
   }
 

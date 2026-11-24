@@ -114,7 +114,18 @@ const SEED = `
     ('sbc_src','sbak_src','t_local',1,TRUE,'succeeded','${SNAP}',70,NULL,'2026-11-02T03:00:00Z'),
     ('sbc_old_ok','sbak_old','t_local',1,TRUE,'succeeded','${SNAP}',60,NULL,'2026-11-01T03:00:00Z'),
     ('sbc_old_bad','sbak_old','t_s3',2,TRUE,'failed',NULL,NULL,'unreachable','2026-11-01T03:00:00Z'),
-    ('sbc_done','sbak_done','t_s3',1,TRUE,'succeeded','${SNAP_2}',50,NULL,'2026-11-01T03:00:00Z');`;
+    ('sbc_done','sbak_done','t_s3',1,TRUE,'succeeded','${SNAP_2}',50,NULL,'2026-11-01T03:00:00Z');
+
+  INSERT INTO notification_channels (id, organization_id, kind, groups, recipients, last_tested_at)
+    VALUES ('nch_mail',NULL,'email','["availability","server"]','["ops@example.com"]','2026-11-01T00:00:00Z');
+  INSERT INTO notification_channel_alerts (channel_id, alert_key, kind, severity, event, announced_at) VALUES
+    ('nch_mail','disk_high','disk_high','critical','{}','2026-11-01T00:00:00Z'),
+    ('nch_mail','site_container_down:s1','site_container_down','critical','{}',NULL);
+  INSERT INTO notification_deliveries (id, channel_id, events, locale, recipient, status, attempts, next_attempt_at, problem,
+    finished_at) VALUES
+    ('ndl_wait','nch_mail','[]','it','ops@example.com','pending',1,'2026-11-01T00:02:00Z','mail_refused',NULL),
+    ('ndl_sent','nch_mail','[]','it','ops@example.com','sent',1,NULL,NULL,'2026-11-01T00:00:00Z'),
+    ('ndl_failed','nch_mail','[]','it','ops@example.com','failed',4,NULL,'mail_refused','2026-11-01T00:00:00Z');`;
 
 const LEGACY_SETTINGS = `
   INSERT INTO backup_settings (id, endpoint, region, bucket, prefix, access_key_id, secret_access_key_ciphertext_base64,
@@ -153,6 +164,9 @@ const LEDGER = `
     COALESCE(restore_status, '-'), COALESCE(restore_problem, '-'), COALESCE(restored_at::text, '-'), left_incomplete::text) FROM app_stack_backups
   UNION ALL SELECT 'ax', id, status, problem, concat_ws('|', COALESCE(snapshot_id, '-'), COALESCE(size_bytes::text, '-'),
     COALESCE(finished_at::text, '-')) FROM app_stack_backup_copies
+  UNION ALL SELECT 'nc', id, kind, enabled::text, concat_ws('|', groups, recipients, last_tested_at) FROM notification_channels
+  UNION ALL SELECT 'na', alert_key, severity, NULL, announced_at::text FROM notification_channel_alerts
+  UNION ALL SELECT 'nd', id, status, problem, concat_ws('|', attempts, next_attempt_at, finished_at) FROM notification_deliveries
   ORDER BY 1, 2`;
 
 describe.each([
@@ -298,6 +312,22 @@ describe.each([
     }
     expect(first.filter((r) => (r.t === "ab" || r.t === "ax") && r.status === "running")).toEqual([]);
     expect(first.filter((r) => r.t === "ab" && String(r.x).split("|")[2] === "running")).toEqual([]);
+  });
+
+  it("forgets what the notification channels were told and gives up the messages still waiting (ADR-0040)", () => {
+    const was = (t: string, id: string) => before.find((r) => r.t === t && r.id === id);
+    // The alerts of the host the copy was made on are not this host's.
+    expect(before.filter((r) => r.t === "na").map((r) => r.id)).toEqual(["disk_high", "site_container_down:s1"]);
+    expect(first.filter((r) => r.t === "na")).toEqual([]);
+    // Waiting: one attempt made, the next one due. After: not delivered, no attempt due, an end.
+    expect(was("nd", "ndl_wait")?.x).toMatch(/^1\|[^|]+$/);
+    expect(byId("nd", "ndl_wait")).toMatchObject({ status: "failed", problem: "expired" });
+    expect(byId("nd", "ndl_wait")?.x).toMatch(/^1\|[^|]+$/);
+    expect(byId("nd", "ndl_wait")?.x).not.toBe(was("nd", "ndl_wait")?.x);
+    // What already had an outcome keeps it, and so does the channel.
+    for (const id of ["ndl_sent", "ndl_failed"]) expect(byId("nd", id)).toEqual(was("nd", id));
+    expect(byId("nc", "nch_mail")).toEqual(was("nc", "nch_mail"));
+    expect(byId("nc", "nch_mail")).toMatchObject({ status: "email", problem: "true" });
   });
 
   it("is idempotent: a second run changes nothing", async () => {

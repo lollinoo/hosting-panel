@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { Check, ChevronDown, CircleUser, LogOut, Plus, UserCog } from "lucide-react";
+import { Bell, Check, ChevronDown, CircleUser, LogOut, Plus, UserCog } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -102,6 +102,12 @@ export function CustomerTopBar({ apps = [], userName, csrfToken }: { apps?: read
                 <Link href="/account">
                   <UserCog aria-hidden className="h-4 w-4" />
                   {m.shell.account}
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link href="/account/notifications">
+                  <Bell aria-hidden className="h-4 w-4" />
+                  {m.shell.notifications}
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />

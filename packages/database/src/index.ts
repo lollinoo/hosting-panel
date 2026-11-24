@@ -33,6 +33,7 @@ export * from "./app-stack-limit.js";
 export * from "./app-stack-backups-repository.js";
 export * from "./domains-repository.js";
 export * from "./mail-relay-repository.js";
+export * from "./notifications-repository.js";
 export * from "./dns-provider-repository.js";
 export * from "./site-sftp-users-repository.js";
 export * from "./backups-repository.js";
