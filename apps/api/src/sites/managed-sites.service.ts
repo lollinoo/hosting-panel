@@ -146,14 +146,31 @@ export async function stoppedSiteIds(db: HostingPanelDatabase, siteIds: readonly
 
 const ADDRESS_TAKEN =
   "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.";
+const SLUG_TAKEN = "A site with this slug already exists.";
+
+/** The unique violation is the organisation's slug (only the generic route lets the caller choose one). */
+const isSlugViolation = (err: unknown): boolean =>
+  [err, (err as { cause?: unknown } | null)?.cause].some((current) => {
+    const e = current as { code?: unknown; constraint?: unknown; message?: unknown } | null;
+    return (
+      e?.code === "23505" &&
+      (e.constraint === "uq_sites_org_slug" || (typeof e.message === "string" && e.message.includes("uq_sites_org_slug")))
+    );
+  });
 
 /**
- * A refused site create, as both create routes answer it: the site limit; an address another site, an application or
- * the panel holds (SQLSTATE 23505, raised by the unique index or the hostname trigger); a manual certificate that
- * captures the address; a template that cannot render. Anything else passes through.
+ * A refused site create, as both create routes answer it: the site limit; a slug the organisation already has; an
+ * address another site, an application or the panel holds (SQLSTATE 23505, raised by the unique index or the
+ * hostname trigger); a manual certificate that captures the address; a template that cannot render. Anything else
+ * passes through.
  */
 export function newSiteError(err: unknown): unknown {
   if (err instanceof SiteLimitReachedError) return siteLimitError(err);
+  if (isSlugViolation(err)) {
+    return new ControlPlaneError("ALREADY_EXISTS", SLUG_TAKEN, {
+      details: [{ field: "slug", message: SLUG_TAKEN, reason: "slug_taken" }],
+    });
+  }
   if (isUniqueViolation(err)) return new ControlPlaneError("DOMAIN_CONFLICT", ADDRESS_TAKEN);
   return coverageError(renderRefusal(err));
 }

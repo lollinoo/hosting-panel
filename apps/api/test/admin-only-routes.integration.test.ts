@@ -256,6 +256,21 @@ describe("generic service routes and invitations are for the server administrato
     expect(await stored()).toEqual(before);
   });
 
+  it("refuses a second site with the same slug as a taken slug, not as a taken address, and stores nothing", async () => {
+    const first = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-twin", initialDomain: "twin-one.example.test" });
+    expect(first.status).toBe(201);
+    const before = await stored();
+    // The caller chooses the slug here: the unique constraint uq_sites_org_slug refuses it inside the transaction.
+    const slug = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-twin", initialDomain: "twin-two.example.test" });
+    const message = "A site with this slug already exists.";
+    expect([slug.status, slug.body.error?.code, slug.body.error?.message]).toEqual([409, "ALREADY_EXISTS", message]);
+    expect(slug.body.error?.details).toEqual([{ field: "slug", message, reason: "slug_taken" }]);
+    // The same route still answers a taken address as one.
+    const address = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-twin-two", initialDomain: "twin-one.example.test" });
+    expect([address.status, address.body.error?.code, address.body.error?.message]).toEqual([409, "DOMAIN_CONFLICT", TAKEN]);
+    expect(await stored()).toEqual(before);
+  });
+
   it("lets an administrator who is also an owner create a service and a revision", async () => {
     const created = await call(ADMIN_MEMBER, `/sites/${SITE}/services`, {
       serviceTemplateId: DEMO_IDS.templates.nodejs,
