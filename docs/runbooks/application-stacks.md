@@ -147,8 +147,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 ## 4. Downgrade while stacks exist
 
 1. `sudo hp-update --version <older> --allow-downgrade` exits with **code 8** when the target release's `RELEASE.json`
-   does not list the feature `app-stacks` and a stack that is not deleted exists (drafts included). A `psql` error also
-   counts as a refusal. `--dry-run` does not run this check. See what blocks:
+   does not list the feature `app-stacks` and a stack that is not deleted exists (drafts included), whatever its format.
+   A release below `0.10.0` counts as not listing it: every `0.9` release lists `app-stacks` but has the stacks switched
+   off on every backend. A `psql` error also counts as a refusal. `--dry-run` does not run this check. See what blocks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where deleted_at is null"
    ```
@@ -163,11 +164,12 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
 5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026`, `0027`, `0028` and `0030` are additive.
-6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
-   knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
-   with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
-   written in it. Stacks of the first format do not block, and neither does a template of the extended format that no
-   stack uses (the built-in WordPress template is such a row on every panel). See what blocks:
+6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release from `0.10.0` on that lists `app-stacks` but not
+   `app-format-v2` knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same
+   command exits with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a
+   revision written in it. Stacks of the first format do not block, and neither does a template of the extended format
+   that no stack uses (the built-in WordPress template is such a row on every panel). A `0.9` release also lists
+   `app-stacks` without `app-format-v2`, but step 1 applies to it: every stack blocks. See what blocks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and (exists (select 1 from app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'))"
    ```
@@ -333,10 +335,11 @@ names only the key of a task, and the command is read from the template version 
      archive the ones that are not built-in (procedure 6, step 2). The catalog then offers nothing to install;
      installed stacks keep running.
    - **Go back to an earlier release**, where both flags are `false` on every backend:
-     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases before this one, from `0.9.0`,
-     list `app-stacks` but not `app-format-v2` in `RELEASE.json`, so the gate exits with **code 8** while a stack that
-     is not deleted uses the extended format (procedure 4, step 6); stacks of the first format do not block. An older
-     release does not list `app-stacks` and refuses while any stack that is not deleted exists (procedure 4, step 1).
+     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases below `0.10.0`, from `0.9.0`,
+     list `app-stacks` in `RELEASE.json` but have both flags off, so the gate counts them as not listing it and exits
+     with **code 8** while any stack that is not deleted exists, whatever its format (procedure 4, step 1); an older
+     release does not list `app-stacks` and refuses the same way. From `0.10.0` on, only the features that the target
+     does not list block (procedure 4, from step 6).
    - **Change the code:** a release whose `appFeaturesFor` gives `false` for `linux-systemd`.
 2. If a release with the flags on is followed by one with them off (or by a downgrade), do this first: disable or
    archive the templates so nobody installs one, and ask the customers to stop or delete their stacks. Once the flags
