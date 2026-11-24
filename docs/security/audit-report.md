@@ -241,9 +241,9 @@ last cycle unless a repair item names them.
 | L81 | `install.test.ts` | Port 3000 is asserted in the install case only. | `aud-host` | **open.** |
 | L82 | E4 install and update dry-run tests | They skip without cgroups v2 or Docker. | `aud-host` | **open.** |
 
-Low rows: 82. Repaired 14 (in the code with a test: L1, L5, L18, L30, L41, L46, L51; in the documents:
-L11, L12, L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 66 (L2 to L53 less the
-fifteen others above, and L54 to L82).
+Low rows: 82. Repaired 17 (in the code with a test: L1, L5, L18, L30, L41, L43, L45, L46, L49, L51; in the
+documents: L11, L12, L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 63 (L2 to L53 less
+the eighteen others above, and L54 to L82).
 
 ## Findings the lead judged not a defect
 

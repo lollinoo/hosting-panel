@@ -276,21 +276,24 @@ const BACKUPS_ANSWER_CLASS: Readonly<Record<BackupsRequest["action"], Unreadable
   // Writes a marker and probes the volume. No test result is recorded, the API answers with its existing "connectivity
   // test timed out" error, and running the set-up again is safe (ADR-0032).
   localInit: "change",
-  // See #202: the start holds the site's lock while a recovery read can fail for ever (#183).
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
   start: "kept",
   status: "read",
   // A failed forget and a lost one end the same way for the retention: it is tried again the next night.
   forget: "kept",
   // See #202: the restore settles through a call that repeats (#199).
   restore: "kept",
-  // See #202: the start holds the site's lock while a recovery read can fail for ever (#183).
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
   archive: "kept",
   readArchive: "read",
   // Best effort: the caller ignores every failure, and the executor drops an archive nobody collects.
   discardArchive: "kept",
   // The restore recovery's own settling call: any failure leaves the restore pending, and the next pass asks again.
   settle: "kept",
-  // See #202: the start holds the site's lock while a recovery read can fail for ever (#183).
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
   panelStart: "kept",
   siteState: "read",
   // The backup jobs of an application (ADR-0038).
