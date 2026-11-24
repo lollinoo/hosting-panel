@@ -110,7 +110,10 @@ async function inspectTaskContainer(target: DockerExecTarget, ref: string): Prom
   }
 }
 
-/** Runs the kill script in one container. `gone`: the container is not there or not running, so nothing is left in it. */
+/**
+ * Runs the kill script in one container. `gone`: the container is not there or not running, so nothing is left in it.
+ * Only the start of the output is read: the script prints nothing, the engine its message when it cannot start /bin/sh.
+ */
 async function killMarkedProcesses(
   target: DockerExecTarget,
   containerId: string,
@@ -121,11 +124,13 @@ async function killMarkedProcesses(
     const done = await runDockerExec(
       target,
       { container: containerId, cmd: ["/bin/sh", "-c", APP_STACK_TASK_KILL_SCRIPT, "sh", runId] },
-      { timeoutMs, maxOutputBytes: 0 },
+      { timeoutMs, maxOutputBytes: APP_STACK_TASK_ENGINE_ERROR_PREFIX.length },
     );
     if (done.exitCode === 0) return "done";
-    // The engine could not start the shell (126, 127): this image has none.
-    return done.exitCode === 126 || done.exitCode === 127 ? "no_shell" : "failed";
+    // The engine could not start the shell (126, 127, with its own message): this image has none. The script's own
+    // exit never carries that message.
+    const engine = [done.stdout, done.stderr].some((out) => out.toString("utf8").startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX));
+    return (done.exitCode === 126 || done.exitCode === 127) && engine ? "no_shell" : "failed";
   } catch (err) {
     return codeOf(err) === "NOT_FOUND" ? "gone" : "failed";
   }

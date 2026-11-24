@@ -47,6 +47,8 @@ const ORG = "org_acme";
 const RUN = (n: number) => `srun_${String(n).padStart(24, "0")}`;
 const WEB = appStackContainerName(STACK, "web");
 const CANARY = "CANARY-secret-7d41e9";
+/** What the engine writes when it cannot start /bin/sh in an image that has none (exit 127; 126: not runnable). */
+const NO_SHELL = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory: unknown\r\n';
 const ARGV = ["php", "artisan", "schedule:run"];
 
 const request = (n: number, extra: Partial<AppStackTaskRunIpcRequest> = {}): AppStackTaskRunIpcRequest => ({
@@ -346,7 +348,7 @@ describe("runAppStackTask on the Docker Engine", () => {
 
   it("does not start a command it could not stop: a component with no shell answers not_started", async () => {
     for (const exitCode of [126, 127]) {
-      const { adapter, mockDaemon } = await setup({ kill: () => ({ exitCode }) });
+      const { adapter, mockDaemon } = await setup({ kill: () => ({ exitCode, frames: [[1, NO_SHELL]] }) });
       const result = await adapter.runAppStackTask(request(1));
       expect(result).toEqual({
         runId: RUN(1),
@@ -364,6 +366,18 @@ describe("runAppStackTask on the Docker Engine", () => {
       expect(await adapter.runAppStackTask(request(1))).toEqual(result);
       expect(mockDaemon.execBodies).toHaveLength(1);
     }
+  });
+
+  it("takes a 126 or 127 of the clean-up for no shell only with the engine's own message", async () => {
+    // The script itself, in a component that has a shell, ending with 126 or 127: the clean-up did not finish.
+    for (const exitCode of [126, 127]) {
+      const { adapter, mockDaemon } = await setup({ kill: () => ({ exitCode, frames: [[2, "kill: something of its own\n"]] }) });
+      const err = await refusal(adapter.runAppStackTask(request(1)));
+      expect([err.code, err.reason], String(exitCode)).toEqual(["DOCKER_ENGINE_UNAVAILABLE", undefined]);
+      expect(cmds(mockDaemon).every((cmd) => cmd[2] === APP_STACK_TASK_KILL_SCRIPT)).toBe(true);
+    }
+    const silent = await setup({ kill: () => ({ exitCode: 127 }) });
+    expect((await refusal(silent.adapter.runAppStackTask(request(1)))).code).toBe("DOCKER_ENGINE_UNAVAILABLE");
   });
 
   it("starts nothing when the clean-up before the command does not finish, and forgets the run", async () => {
@@ -543,7 +557,7 @@ describe("reapAppStackTasks at the start of the executor", () => {
   it("goes on after a component that fails and tells the failure at the end; no shell is not a failure", async () => {
     const outcomes = new Map<string, MockExecPlan>([
       [`${appStackContainerName(STACK, "web")}_id`, { exitCode: 1 }],
-      [`${appStackContainerName(STACK, "worker")}_id`, { exitCode: 127 }],
+      [`${appStackContainerName(STACK, "worker")}_id`, { exitCode: 127, frames: [[1, NO_SHELL]] }],
     ]);
     const { adapter, mockDaemon } = await setup({ kill: (call) => outcomes.get(call.container) });
     for (const key of ["web", "worker", "cache"]) {
