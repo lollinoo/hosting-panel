@@ -498,14 +498,19 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
   const focusRunRef = useRef(false);
   const outcomeRef = useRef<HTMLDivElement>(null);
   const followedRef = useRef(initial.runningOperation !== null);
-  // The start's key, kept until answered; a reload forgets it.
+  // The start's key, kept until answered; a reload forgets it. Any change to the files ends it too: the API
+  // replays a start by its key before it looks at the files, so a kept key would follow the old import.
   const startKeysRef = useRef<KeptKeys>({});
-  const onChanged = useCallback(() => void reload(), [reload]);
+  const onChanged = useCallback(() => {
+    startKeysRef.current = {};
+    void reload();
+  }, [reload]);
   const [sendingSlots, setSendingSlots] = useState<Record<WordpressImportSlot, boolean>>({ archive: false, dump: false });
-  const onSending = useCallback(
-    (name: WordpressImportSlot, active: boolean) => setSendingSlots((prev) => (prev[name] === active ? prev : { ...prev, [name]: active })),
-    [],
-  );
+  const onSending = useCallback((name: WordpressImportSlot, active: boolean) => {
+    // An upload or a pick that begins may replace the file even when it then fails.
+    if (active) startKeysRef.current = {};
+    setSendingSlots((prev) => (prev[name] === active ? prev : { ...prev, [name]: active }));
+  }, []);
 
   const op = data.runningOperation;
   const slots = data.slots;
@@ -554,6 +559,7 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
       // status 0: no answer reached the browser.
     }
     if (status >= 200 && status < 300) {
+      startKeysRef.current = {};
       setFilesNote({ text: t.discardDone, failed: false });
       await reload();
     } else {
