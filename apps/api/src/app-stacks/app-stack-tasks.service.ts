@@ -21,14 +21,15 @@ import {
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
+import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { appNotFound, appRefusal, guardedApp } from "../app-templates/app-template-errors.js";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { canonicalRequestHash } from "../common/request-hash.js";
-import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
+import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import { mapAppStackError } from "./app-stack-errors.js";
-import { appStackTaskDto, appStackTaskRunDto, installedAppStackTasks } from "./app-stack-tasks.js";
+import { appStackTaskDto, appStackTaskPort, appStackTaskRunDto, installedAppStackTasks } from "./app-stack-tasks.js";
 import type { AppStackRequestContext } from "./app-stacks.service.js";
 
 export interface AppStackTaskRunAccepted {
@@ -45,6 +46,11 @@ const busy = () =>
   new ControlPlaneError("RESOURCE_LOCKED", "Another action is still running on this application. Try again when it ends.", {
     retryable: true,
   });
+/** ADR-0042 A5: without the task calls of the executor nothing is queued that could only fail. */
+function tasksUnavailable(): ControlPlaneError {
+  const message = "Tasks cannot run on this server.";
+  return new ControlPlaneError("NOT_SUPPORTED", message, { details: [{ message, reason: "STACK_UNSUPPORTED_FEATURE" }] });
+}
 
 /**
  * Tasks of a customer's application (ADR-0042). A request names a task by its key and nothing else: the command is the
@@ -55,6 +61,8 @@ export class AppStackTasksService {
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN) private readonly validation: AppTemplateValidationOptions,
+    @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
+    @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
   ) {}
 
   /** The tasks of the installed version, in the order of the template; none when nothing is installed. */
@@ -75,7 +83,10 @@ export class AppStackTasksService {
     return { runs: rows.map(appStackTaskRunDto) };
   }
 
-  /** Queues one run. Refused while the application is being changed, is stopped or was never installed. */
+  /**
+   * Queues one run. Refused while the application is being changed, is stopped or was never installed, and (422) when the
+   * executor has no task calls.
+   */
   public async run(ctx: AppStackRequestContext, stack: AppStackRow, taskKey: string): Promise<AppStackTaskRunAccepted> {
     const db = this.dbClient.db;
     const requestHash = canonicalRequestHash({
@@ -86,6 +97,7 @@ export class AppStackTasksService {
     });
     // A retry of a request that was accepted is answered as before, whatever the application runs by now.
     const replay = await this.#keyUsed(ctx);
+    if (!replay && appStackTaskPort({ executor: this.executor, config: this.config }) === null) throw tasksUnavailable();
     const found = replay ? null : await this.#task(stack, taskKey);
     const result = await guardedApp(mapAppStackError, () =>
       db.transaction(async (tx) => {

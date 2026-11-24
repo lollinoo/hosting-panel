@@ -71,7 +71,7 @@ L'API manda all'esecutore l'applicazione, l'organizzazione, la chiave del compon
 - ricorda in memoria le ultime esecuzioni per id: una seconda chiamata con lo stesso id non lancia il comando un'altra volta, e l'API può chiedere com'è finita un'esecuzione di cui ha perso la risposta;
 - non restituisce mai un id di Docker.
 
-Le due chiamate (esegui, leggi l'esito) sono nuove e stanno in un'interfaccia opzionale accanto a quella delle applicazioni. Con un esecutore che non le offre, la richiesta di lanciare un'attività è rifiutata (`422`).
+Le due chiamate (esegui, leggi l'esito) sono nuove e stanno in un'interfaccia opzionale accanto a quella delle applicazioni. Con un esecutore che non le offre, la richiesta di lanciare un'attività è rifiutata (`422 NOT_SUPPORTED`) prima di mettere in coda qualcosa, e la passata dei programmi non mette in coda niente: l'orario resta dovuto e, finita la sua finestra, è scritto come saltato (`missed`).
 
 ### A6 — Un'esecuzione è lavoro in coda dell'applicazione
 

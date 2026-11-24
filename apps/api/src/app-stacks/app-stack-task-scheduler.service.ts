@@ -12,11 +12,12 @@ import {
   type AppStackTaskScheduleRow,
   type DatabaseClient,
 } from "@hosting-panel/database";
+import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
-import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
-import { installedAppStackTasks, type InstalledAppStackTasks } from "./app-stack-tasks.js";
+import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { appStackTaskPort, installedAppStackTasks, type InstalledAppStackTasks } from "./app-stack-tasks.js";
 
 /** One pass a minute: a schedule asks for a run at whole hours only. */
 export const APP_STACK_TASK_SCHEDULE_INTERVAL_MS = 60_000;
@@ -33,6 +34,7 @@ export interface AppStackTaskSchedulePass {
  * Queues the tasks that are due (ADR-0042 A7). Each time of a schedule is queued at most once (the database writes the
  * served time with the operation), tried again while the application is busy or stopped, and given up after the retry
  * window; an older time is never caught up. A schedule whose task the installed version does not have stays idle.
+ * Without the task calls of the executor nothing is queued: the time stays owed and is written as missed after its window.
  */
 @Injectable()
 export class AppStackTaskSchedulerService {
@@ -45,6 +47,7 @@ export class AppStackTaskSchedulerService {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN) private readonly validation: AppTemplateValidationOptions,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
+    @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
   ) {}
 
   public startBackgroundLoop(intervalMs: number | null | undefined): void {
@@ -84,6 +87,7 @@ export class AppStackTaskSchedulerService {
     let queued = 0;
     let refused = 0;
     let skipped = 0;
+    const runnable = appStackTaskPort({ executor: this.executor, config: this.config }) !== null;
     const installedOf = new Map<string, InstalledAppStackTasks | null>();
     for (const { schedule: row } of await listAppStackTaskSchedulesOfLiveStacks(db)) {
       const due = appStackTaskDueSlot({
@@ -99,6 +103,7 @@ export class AppStackTaskSchedulerService {
           if (await closeAppStackTaskSlot(db, { ...slot, skipped: true })) skipped += 1;
           continue;
         }
+        if (!runnable) continue;
         if (!installedOf.has(row.stackId)) installedOf.set(row.stackId, await this.#installed(row));
         const installed = installedOf.get(row.stackId) ?? null;
         if (installed === null) {

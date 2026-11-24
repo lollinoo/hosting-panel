@@ -21,6 +21,7 @@ import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { APP_STACK_TASK_LEASE_EXTRA_MS, AppStackTaskRuntime, appStackTaskRefusalProblem } from "../src/app-stacks/app-stack-task-runtime.js";
 import { AppStackTaskSchedulerService } from "../src/app-stacks/app-stack-task-scheduler.service.js";
+import { AppStackTasksService } from "../src/app-stacks/app-stack-tasks.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness } from "./fixtures/app-stack-harness.js";
@@ -280,6 +281,36 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
     expect(run).not.toHaveBeenCalled();
     await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "never" }, changedBy: null });
     await free(again.find((r) => r.status === "queued")!.operationId);
+  });
+
+  it("without the task calls of the executor a run is refused with 422 and a schedule queues nothing", async () => {
+    const opsOf = async () => (await h.dbClient.db.select().from(operations).where(eq(operations.resourceId, stackId))).length;
+    const before = await opsOf();
+    const disabled = { runtimeBackend: "disabled" } as ControlPlaneRuntimeConfig;
+    for (const [port, cfg] of [[new Phase1DisabledDockerExecutor(), config], [executor().port, disabled]] as const) {
+      const service = new AppStackTasksService(h.dbClient, validation, port, cfg);
+      const ctx = { organizationId: h.a.orgId, userId: h.a.userId, idempotencyKey: randomUUID(), audit: async () => undefined };
+      await expect(service.run(ctx, await stack(), "save")).rejects.toMatchObject({
+        code: "NOT_SUPPORTED",
+        details: [expect.objectContaining({ reason: "STACK_UNSUPPORTED_FEATURE" })],
+      });
+    }
+    expect(await opsOf()).toBe(before);
+
+    // The scheduler queues no operation that could only fail: the time stays owed and is written as missed after its window.
+    const changedAt = new Date("2026-11-22T12:00:00.000Z");
+    const slot = new Date("2026-11-23T03:00:00.000Z");
+    const schedule = { organizationId: h.a.orgId, stackId, taskKey: "save" };
+    await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "daily", hourUtc: 3 }, changedBy: null, now: changedAt });
+    const worker = h.app.nestApp.get(OutboxWorkerService);
+    const scheduler = new AppStackTaskSchedulerService(h.dbClient, config, validation, worker, new Phase1DisabledDockerExecutor());
+    expect(await scheduler.tick(new Date(slot.getTime() + 60_000))).toEqual({ queued: 0, refused: 0, skipped: 0 });
+    expect(await opsOf()).toBe(before);
+    expect(await scheduler.tick(new Date(slot.getTime() + 31 * 60_000))).toEqual({ queued: 0, refused: 0, skipped: 1 });
+    const [row] = await h.dbClient.db.select().from(appStackTaskSchedules).where(eq(appStackTaskSchedules.stackId, stackId));
+    expect(row).toMatchObject({ servedSlotAt: slot, skippedSlotAt: slot, skipReason: "missed" });
+    expect(await opsOf()).toBe(before);
+    await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "never" }, changedBy: null });
   });
 
   it("fails an operation whose payload is not of one of its runs, and sends nothing", async () => {

@@ -6427,7 +6427,8 @@ paths:
         not hold the application (a stop, an update or a delete is accepted meanwhile); it holds it from when it begins
         until it ends. A run that finds the application busy or stopped when its turn comes ends as `not_started`
         (problem `busy` or `component_not_running`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        while the capability flag `applicationStacksAvailable` is false, and when the executor of this server has no
+        task calls.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6462,7 +6463,7 @@ paths:
           description: The application is being changed or another run of it is waiting or running (`RESOURCE_LOCKED`, retryable), it is stopped, failed or was never installed (`RESOURCE_LOCKED`, `details[0].reason` is its status), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          description: "Applications are not available yet, or this server cannot run tasks (its executor has no task calls): `NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`; nothing is queued"
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/tasks/{taskKey}/schedule:
