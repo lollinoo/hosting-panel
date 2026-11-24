@@ -175,8 +175,10 @@ describe("application backup texts", () => {
   it.each(locales)("%s: a change of version held by an address being removed says to try again in a few minutes, then to restart; other refusals read as usual", (_n, m) => {
     const text = appStackChangeRefusalText(m, "RESOURCE_LOCKED", "address_removing", "running");
     expect(text).toBe(m.apps.reasons.versionAddressRemoving);
-    // A failed application, or one whose stop failed, never frees the address by itself: a restart does.
+    // A failed application, or one whose stop failed, never frees the address by itself: a restart does, and a
+    // stop does when the application cannot start (a restart that fails at the health wait leaves the routes).
     expect(text).toContain(m.apps.actions.restart);
+    expect(text).toContain(m.apps.actions.stop);
     expect(text).not.toBe(m.apps.reasons.address_removing);
     expect(text).not.toMatch(/proxy|caddy|traefik|docker|route/i);
     expect(appStackChangeRefusalText(m, "VALIDATION_ERROR", "domain_target_removed")).toBe(m.apps.reasons.domain_target_removed);
