@@ -94,12 +94,18 @@ describe("mapAppStackError", () => {
     );
   });
 
-  it("a quota refusal is the one-detail QUOTA_EXCEEDED of the limit helper", () => {
-    expect(mapped(new AppStackQuotaError("cpuMilli", 3000, 2000))).toMatchObject({
-      status: 409,
-      code: "QUOTA_EXCEEDED",
-      details: [{ field: "cpuMilli", reason: "STACK_QUOTA_EXCEEDED", message: "3000 of 2000 in use." }],
-    });
+  const LIMIT = "This customer has reached its application limit. Delete an application or ask the administrator to raise the limit.";
+  const USES_MORE = (what: string) =>
+    `The applications of this customer would use more ${what} than the customer has on this server. Delete an application or ask the administrator.`;
+
+  it.each([
+    ["appStacks", LIMIT, "STACK_QUOTA_EXCEEDED", "2 of 2 in use.", [2, 2]],
+    ["cpuMilli", USES_MORE("processor"), "cpu_limit_reached", "3000 of 2000 in use.", [3000, 2000]],
+    ["memoryBytes", USES_MORE("memory"), "memory_limit_reached", "3000 of 2000 in use.", [3000, 2000]],
+  ] as const)("a quota refusal on %s is the one-detail QUOTA_EXCEEDED with its own sentence and reason (issue #151)", (field, message, reason, used, [n, limit]) => {
+    const out = mapped(new AppStackQuotaError(field, n, limit));
+    expect(out).toMatchObject({ status: 409, code: "QUOTA_EXCEEDED", message });
+    expect(out.details).toEqual([{ field, reason, message: used }]);
   });
 
   it.each([

@@ -671,16 +671,59 @@ describe("private values", () => {
     expect(sets).not.toContainEqual([2, en.apps.wizard.valueReserved]);
   });
 
-  it("a status refusal says the status in words and the field is still emptied", async () => {
+  it("a status refusal says the status in words and the field keeps what was typed (issue #136)", async () => {
     const { out, sets } = callHooks(AppStackSecrets, props, itMsgs, { 0: "ADMIN_PASSWORD" });
     const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } };
     ref.current = { value: "n3w-V4lue" };
     keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "stopped" });
     await submit(out);
-    expect(ref.current.value).toBe("");
+    expect(ref.current.value).toBe("n3w-V4lue");
     expect(sets).toContainEqual([3, "Non è possibile ora: l'applicazione è nello stato «Ferma»."]);
     expect(sets).not.toContainEqual([0, null]);
     expect(router.refresh).not.toHaveBeenCalled();
+    expect(JSON.stringify(sets)).not.toContain("n3w-V4lue");
+  });
+
+  it.each([
+    ["the application is busy", { ok: false, code: "RESOURCE_LOCKED", reason: "stopped", field: "status" }],
+    ["too many requests", { ok: false, code: "RATE_LIMITED" }],
+    ["a server error", { ok: false, code: "INTERNAL_ERROR" }],
+    ["a lost reply", { ok: false, code: "" }],
+  ])("%s: the value stays in its field and the next send carries the same value (issue #136)", async (_name, refusal) => {
+    const { out } = callHooks(AppStackSecrets, props, en, { 0: "ADMIN_PASSWORD" });
+    const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } };
+    ref.current = { value: "n3w-V4lue" };
+    keyedSend.mockResolvedValueOnce(refusal).mockResolvedValueOnce({ ok: true, data: { data: { key: "ADMIN_PASSWORD", isSet: true, version: 3, setAt: NOW } } });
+    await submit(out);
+    expect(ref.current.value).toBe("n3w-V4lue");
+    await submit(out);
+    expect(keyedSend.mock.calls.map((call) => (call[5] as { value: string }).value)).toEqual(["n3w-V4lue", "n3w-V4lue"]);
+    expect(ref.current.value).toBe("");
+  });
+
+  it("a refusal that names the value as its field empties it, and so does a success; a refusal of anything else does not (issue #136)", async () => {
+    const send = async (answer: unknown) => {
+      keyedSend.mockReset();
+      keyedSend.mockResolvedValue(answer);
+      const { out } = callHooks(AppStackSecrets, props, en, { 0: "ADMIN_PASSWORD" });
+      const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } };
+      ref.current = { value: "n3w-V4lue" };
+      await submit(out);
+      return ref.current.value;
+    };
+    expect(await send({ ok: true, data: { data: {} } })).toBe("");
+    expect(await send({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "value", limit: "store" })).toBe("");
+    expect(await send({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_short", field: "value" })).toBe("");
+    expect(await send({ ok: false, code: "VALIDATION_ERROR", reason: "too_big", field: "value" })).toBe("");
+    expect(await send({ ok: false, code: "VALIDATION_ERROR", reason: "STACK_PARAMETER_INVALID", field: "parameterKey" })).toBe("n3w-V4lue");
+    expect(await send({ ok: false, code: "RESOURCE_LOCKED", reason: "stopped", field: "status" })).toBe("n3w-V4lue");
+  });
+
+  it("the replace dialog is rendered only while a value is being replaced, so closing it leaves no field behind (issue #136)", () => {
+    expect(html(callHooks(AppStackSecrets, props, en, { 0: "ADMIN_PASSWORD" }).out)).toContain("app-secret-value");
+    const closed = callHooks(AppStackSecrets, props, en, { 0: null });
+    expect(html(closed.out)).not.toContain("app-secret-value");
+    expect(byId(closed.out, "app-secret-value")).toBeUndefined();
   });
 
   it.each([
@@ -688,9 +731,11 @@ describe("private values", () => {
     ["it", itMsgs],
   ] as const)("%s: a value too long for the application is an error on the field that states the limit", async (_n, m) => {
     const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
-    (byId(out, "app-secret-value")!.props.ref as { current: unknown }).current = { value: "x".repeat(5_000) };
+    const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } };
+    ref.current = { value: "x".repeat(5_000) };
     keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "value", limit: "environment" });
     await submit(out);
+    expect(ref.current.value).toBe(""); // the value itself was refused: the customer types another
     const text = format(m.apps.reasons.value_too_long, { max: 4096 });
     expect(text).toContain("4096");
     expect(text).not.toMatch(/byte|ambiente|environment|variab/i);
@@ -1295,7 +1340,7 @@ describe("address options (ADR-0037)", () => {
     expect(html(callHooks(AppStackDomainOptions, dialogProps({ ingress: [] })).out)).not.toContain(o.pathsAdvanced);
   });
 
-  it("save hands over the options built from the form and empties the password field", async () => {
+  it("save hands over the options built from the form; the password field keeps what was typed until the dialog closes", async () => {
     const onSave = vi.fn();
     const { out, sets } = callHooks(AppStackDomainOptions, dialogProps({ onSave }), en, { 1: true, 2: true, 3: "guest", 4: [API_PATH] });
     const ref = byId(out, "app-domain-password")!.props.ref as { current: { value: string } | null };
@@ -1308,12 +1353,63 @@ describe("address options (ADR-0037)", () => {
       protection: { username: "guest", password: PASSWORD },
       pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }],
     });
-    expect(ref.current.value).toBe("");
+    // The page closes the dialog on success, which takes the field with it; a refusal leaves it for the next Save.
+    expect(ref.current.value).toBe(PASSWORD);
     expect(sets).toEqual([[5, {}]]);
+    expect(JSON.stringify(sets)).not.toContain(PASSWORD);
     // while a save is running, a second one is not sent
     const busy = callHooks(AppStackDomainOptions, dialogProps({ onSave, busy: true }));
     await submit(busy.out);
     expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused save keeps the typed password, and the second Save sends that same password (issue #136)", async () => {
+    const { out: page } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    const onSave = dialogOf(page)!.props.onSave as (b: unknown) => Promise<void>;
+    const { out } = callHooks(AppStackDomainOptions, dialogProps({ onSave }), en, { 1: true, 2: true, 3: "guest" });
+    const ref = byId(out, "app-domain-password")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: PASSWORD };
+    keyedSend.mockResolvedValueOnce({ ok: false, code: "RESOURCE_LOCKED", reason: "failed" }).mockResolvedValueOnce({ ok: true, data: { data: [DOMAIN, SECOND] } });
+
+    await submit(out);
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(ref.current.value).toBe(PASSWORD);
+    await submit(out);
+
+    expect(keyedSend).toHaveBeenCalledTimes(2);
+    const bodies = keyedSend.mock.calls.map((call) => call[5] as { protection: { username: string; password?: string } });
+    expect(bodies.map((b) => b.protection.password)).toEqual([PASSWORD, PASSWORD]);
+    // Both went out under the one action name, so a retry after a lost reply is a replay of the same request.
+    expect(keyedSend.mock.calls.map((call) => call[2])).toEqual(["options:sdom_1", "options:sdom_1"]);
+  });
+
+  it.each([
+    ["a status refusal", { ok: false, code: "RESOURCE_LOCKED", reason: "failed" }],
+    ["too many requests", { ok: false, code: "RATE_LIMITED" }],
+    ["a server error", { ok: false, code: "INTERNAL_ERROR" }],
+    ["a lost reply", { ok: false, code: "" }],
+  ])("%s keeps the password field and shows the reason in the open dialog (issue #136)", async (_name, refusal) => {
+    const { out: page, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    const onSave = dialogOf(page)!.props.onSave as (b: unknown) => Promise<void>;
+    const { out } = callHooks(AppStackDomainOptions, dialogProps({ onSave }), en, { 1: true, 2: true, 3: "guest" });
+    const ref = byId(out, "app-domain-password")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: PASSWORD };
+    keyedSend.mockResolvedValue(refusal);
+    await submit(out);
+    expect(ref.current.value).toBe(PASSWORD);
+    expect(sets.filter(([slot]) => slot === 6 || slot === 7)).toEqual([[7, null]]); // still editing, nothing announced
+    expect(JSON.stringify(sets)).not.toContain(PASSWORD);
+  });
+
+  it("the dialog is rendered only while an address is being edited, so closing it leaves no field behind (issue #136)", async () => {
+    expect(dialogOf(callHooks(AppStackDomains, props(), en, { 6: "sdom_1" }).out)).toBeDefined();
+    const closed = callHooks(AppStackDomains, props(), en, { 6: null });
+    expect(dialogOf(closed.out)).toBeUndefined();
+    expect(html(closed.out)).not.toContain("app-domain-password");
+    // Cancel, Escape and a click outside all end in onClose, which is the page's setEditing(null).
+    const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    (dialogOf(out)!.props.onClose as () => void)();
+    expect(sets).toContainEqual([6, null]);
   });
 
   it("a form with something to correct sends nothing and says where, each message tied to its field", async () => {

@@ -5775,7 +5775,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: "The name is taken (`ALREADY_EXISTS`, `details[0].reason: name_taken`), a web address is in use (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`), the application limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: STACK_QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
+          description: "The name is taken (`ALREADY_EXISTS`, `details[0].reason: name_taken`), a web address is in use (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`), the application limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: STACK_QUOTA_EXCEEDED`), an application that deploys now would use more processor or memory than the customer has (`QUOTA_EXCEEDED`, `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet, or need a dedicated server (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -5989,7 +5989,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6195,7 +6195,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6247,7 +6247,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan would use more processor or memory than the customer has (`QUOTA_EXCEEDED`; `details[0].reason: cpu_limit_reached` or `memory_limit_reached`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -10960,6 +10960,9 @@ components:
           type: integer
         maxServices:
           type: integer
+          description: >-
+            The limit of the earlier generic services. Applications add their components to `usedServices` but this
+            number never refuses one: only `maxCpuMilli` and `maxMemoryBytes` do.
         maxCpuMilli:
           type: integer
         maxMemoryBytes:
@@ -10970,6 +10973,8 @@ components:
           type: integer
         usedServices:
           type: integer
+          description: >-
+            Services plus the components of the customer's applications. It can be above `maxServices`.
         usedCpuMilli:
           type: integer
         usedMemoryBytes:

@@ -498,6 +498,23 @@ describe("AppWizard install", () => {
     expect(router.push).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["en", "cpu_limit_reached", en],
+    ["en", "memory_limit_reached", en],
+    ["it", "cpu_limit_reached", itMsgs],
+    ["it", "memory_limit_reached", itMsgs],
+  ] as const)("a create refused for the processor or the memory of the plan shows its own sentence, not the generic limit (issue #151, %s %s)", async (_l, reason, m) => {
+    answer({ [BASE]: [refusal(409, "QUOTA_EXCEEDED", [{ field: reason === "cpu_limit_reached" ? "cpuMilli" : "memoryBytes", reason }])] });
+    const { tree, sets } = wizard({ ...ready, 3: [] }, {}, NO_SECRETS, m);
+    await click(tree, m.apps.wizard.install);
+    const shown = sets.find(([slot, v]) => slot === 6 && v !== null)?.[1];
+    expect(shown).not.toBe(m.apps.codes.QUOTA_EXCEEDED);
+    expect(shown).not.toBe(m.apps.reasons.STACK_QUOTA_EXCEEDED);
+    expect(shown).toBe(appStackRefusalText(m, "QUOTA_EXCEEDED", reason));
+    expect(shown).toBe((m.apps.reasons as Record<string, string>)[reason]);
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
   it("keeps the create key after a lost reply or a 5xx, renews it after a 4xx", async () => {
     const keys = { current: {} as Record<string, string> };
     answer({ [BASE]: ["network", refusal(503, "UPSTREAM_UNAVAILABLE"), refusal(409, "ALREADY_EXISTS", [{ field: "name", reason: "name_taken" }]), accepted(202)] });
