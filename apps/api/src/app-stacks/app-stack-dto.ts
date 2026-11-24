@@ -70,6 +70,8 @@ export function appStackDetailDto(input: {
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
   installed: { revisionNumber: number; templateVersionNumber: number } | null;
+  /** The applied revision's plan when it is not the desired one; null when none is applied or it does not parse. */
+  appliedPlan: ApprovedStackPlan | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
   now: Date;
@@ -96,7 +98,8 @@ export function appStackDetailDto(input: {
   for (const meta of input.secrets) {
     if ((latestSecrets.get(meta.parameterKey)?.version ?? 0) < meta.version) latestSecrets.set(meta.parameterKey, meta);
   }
-  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : null;
+  // The status follows what runs: the applied revision's plan, also while the desired one differs.
+  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : input.appliedPlan;
   return {
     ...appStackSummaryDto(input),
     status: appStackDisplayStatus({ stack, plan: applied, components: input.components, domainCount: input.domains.length, now }),

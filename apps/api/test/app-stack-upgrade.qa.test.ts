@@ -441,6 +441,40 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       expect(await shown(stackId)).toMatchObject({ status: "failed", version: 1 });
     });
 
+    it("a deploy with new settings that fails at pull keeps them as the target; the page follows what runs, a crash included", async () => {
+      const { stackId } = await install(BASE, [{ key: "worker_interval_seconds", value: 45 }]);
+      const [rev1] = await revisions(stackId);
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const deploy = await h.call(
+        h.a.token,
+        "POST",
+        orgPath(stackId, "deploy"),
+        { parameters: [{ key: "worker_interval_seconds", value: 60 }] },
+        { "Idempotency-Key": randomUUID() },
+      );
+      expect(deploy.status, deploy.raw).toBe(202);
+      await drain(stackId);
+
+      // A deploy is not taken back: its revision stays the target, a reinstall tries it again.
+      const [, rev2] = await revisions(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", desiredRevisionId: rev2!.id, appliedRevisionId: rev1!.id });
+      expect(await shown(stackId)).toMatchObject({ status: "running", revision: 2, installed: { revisionNumber: 1, templateVersionNumber: 1 } });
+
+      // The storage stops: the next observation of what runs (revision 1) shows on the page.
+      sim.appStacks.crashAppStackComponent(stackId, "storage");
+      await recordAppStackComponentHealthTransactional(h.dbClient.db, {
+        organizationId: h.a.orgId,
+        stackId,
+        observedAt: new Date(),
+        components: appStackHealthRows(
+          ApprovedStackPlanSchema.parse(rev1!.plan),
+          await sim.appStacks.getAppStackStatus({ stackId, organizationId: h.a.orgId }),
+          "observer",
+        ),
+      });
+      expect(await shown(stackId)).toMatchObject({ status: "failed", revision: 2 });
+    });
+
     it("the failed upgrade stays in the history, its key answers the same operation, and a new request tries it again", async () => {
       const { templateId, stackId } = await install(BASE);
       const [rev1] = await revisions(stackId);

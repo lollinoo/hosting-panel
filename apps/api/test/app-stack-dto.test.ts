@@ -134,6 +134,7 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   secrets: [],
   activeOperationId: null,
   installed: null,
+  appliedPlan: null,
   upgrade: null,
   rollback: null,
   now: NOW,
@@ -208,11 +209,35 @@ describe("appStackDetailDto", () => {
     expect(dto.components[0]).toMatchObject({ key: "cache", health: "unknown", healthObservedAt: STALE.toISOString() });
   });
 
-  it("keeps the stored status while the desired revision is not the applied one", () => {
-    const dto = appStackDetailDto(
-      deployed([component("app", "healthy", STALE)], { stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: "srev_old" }) }),
-    );
-    expect(dto.status).toBe("running");
+  it("while the desired revision is not the applied one, the status follows the applied revision's plan", () => {
+    // The target runs only the cache; what runs is the full plan, whose web part is the essential one.
+    const target = {
+      revision: { ...revision, id: "srev_new", revisionNumber: 4 },
+      plan: { ...PLAN, revisionId: "srev_new", components: PLAN.components.filter((c) => c.key === "cache"), ingress: [] } as ApprovedStackPlan,
+    };
+    const shown = (components: AppStackComponentRow[]) =>
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          appliedPlan: PLAN,
+          components,
+        }),
+      ).status;
+    expect(shown([component("app", "healthy", FRESH), component("cache", "healthy", FRESH)])).toBe("running");
+    // A crash of what runs shows, and so does an observation gone stale.
+    expect(shown([component("app", "stopped", FRESH), component("cache", "healthy", FRESH)])).toBe("failed");
+    expect(shown([component("app", "healthy", STALE), component("cache", "healthy", FRESH)])).toBe("unknown");
+    // No readable applied plan: the stored status.
+    expect(
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          components: [component("app", "stopped", FRESH)],
+        }),
+      ).status,
+    ).toBe("running");
   });
 
   it("joins secret parameters with their latest metadata and never lists a secret key among the parameters", () => {

@@ -13671,8 +13671,12 @@ components:
               type: object
               nullable: true
               description: >-
-                The revision that runs when it is not the current one: while a change runs, or after one that failed once
-                its components were being created; `null` otherwise, and when none ever ran
+                The revision that runs (the applied one) whenever it is not the current one: while a change runs; after a
+                change that failed once its components were being created; after an upgrade or a rollback that failed
+                before that but was not taken back, because a web address now points at a part only the new version has;
+                after a deploy with new settings that failed before its components were created (a deploy is not taken
+                back). `status` then follows the components of this revision. `null` when the current revision is the
+                one that runs, and when none ever ran
               required: [revisionNumber, templateVersionNumber]
               properties:
                 revisionNumber:

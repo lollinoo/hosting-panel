@@ -361,6 +361,7 @@ export class AppStacksService {
     const installed = applied
       ? { revisionNumber: applied.revisionNumber, templateVersionNumber: (await this.#version(stack, applied.templateVersionId)).versionNumber }
       : null;
+    const appliedPlan = applied ? ApprovedStackPlanSchema.safeParse(applied.plan) : null;
     return appStackDetailDto({
       stack,
       templateName: template.name,
@@ -374,6 +375,7 @@ export class AppStacksService {
       secrets,
       activeOperationId: active?.id ?? null,
       installed,
+      appliedPlan: appliedPlan?.success ? appliedPlan.data : null,
       upgrade:
         latest && latest.versionNumber > version.versionNumber ? { templateVersionId: latest.id, versionNumber: latest.versionNumber } : null,
       rollback:
