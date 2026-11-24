@@ -60,6 +60,32 @@ describe("the registry part of an image name", () => {
     expect(appStackImageRegistryProblem(image)).toBe("registry_not_public");
   });
 
+  it.each([
+    ["localdomain", "registry.localdomain"],
+    ["lan", "nas.lan"],
+    ["home", "registry.home"],
+    ["corp", "hub.acme.corp"],
+    ["intranet", "registry.intranet"],
+    ["private", "registry.private"],
+  ])("refuses a name under .%s, in any case, with or without a port", (_, host) => {
+    for (const registry of [host, `${host}:5000`, host.toUpperCase(), `${host.toUpperCase()}:5000`]) {
+      expect(appStackImageRegistryProblem(`${registry}/x`)).toBe("registry_not_public");
+      expect(appStackImageRegistryProblem(`${registry}/x@${DIGEST}`)).toBe("registry_not_public");
+    }
+    expect(appStackImageLookupProblem(`${host}:5000/x:1.0`)).toBe("registry_not_public");
+  });
+
+  it.each([
+    "registry.home.example.org/x",
+    "lan.example.com/x",
+    "corp.example.net:5000/x",
+    "private-registry.example.com/x",
+    "intranet.example.io/x",
+    `localdomain.example.com/x@${DIGEST}`,
+  ])("accepts %s, a public name that only contains one of those words", (image) => {
+    expect(appStackImageRegistryProblem(image)).toBeNull();
+  });
+
   it.each(["localhost", "localhost:5000", "registry.local", `localhost@${DIGEST}`, "nginx:1.27"])(
     "reads %s, which has no '/', as a name of Docker Hub",
     (image) => {

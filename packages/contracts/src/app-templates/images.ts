@@ -117,7 +117,9 @@ export const APP_STACK_IMAGE_LOOKUP_MAX_LENGTH = 255;
 
 /** Two or more DNS labels whose last one starts with a letter (so no IPv4 address in any spelling), optional port. */
 const APP_STACK_PUBLIC_REGISTRY_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::[0-9]{1,5})?$/;
-const APP_STACK_PRIVATE_REGISTRY_SUFFIX = /(?:^|\.)(?:localhost|local|internal|home\.arpa)$/;
+/** Names of this server or of a private network: special-use or reserved ones, and those private networks often use. */
+const APP_STACK_PRIVATE_REGISTRY_SUFFIX =
+  /(?:^|\.)(?:localhost|local|internal|home\.arpa|localdomain|lan|home|corp|intranet|private)$/i;
 
 /**
  * The registry an image name points the Engine at must be a public DNS name (ADR-0036): never this server, an IP

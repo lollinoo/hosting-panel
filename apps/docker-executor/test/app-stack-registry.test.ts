@@ -31,6 +31,8 @@ const PRIVATE = [
   "a.localhost/x",
   "registry.local/x",
   "registry.internal:5000/x",
+  "nas.lan/x",
+  "hub.acme.corp:5000/x",
   "[::1]:5000/x",
   "0x7f.0.0.1/x",
 ];
