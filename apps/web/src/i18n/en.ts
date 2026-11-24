@@ -1947,7 +1947,6 @@ export const en: Messages = {
         "The operation was interrupted or timed out after being sent and is in the unknown state. The exclusive lock stays held: the reconciler reads the observed state without replaying the request.",
       errorTitle: "Operation error: [{code}]",
       errorFallback: "The asynchronous run did not succeed.",
-      unconfirmed: "The outcome could not be confirmed: check the state before you try again. Nothing was sent again.",
       pollTitle: "Operation notice",
       pollFailed: "Unable to refresh the operation status.",
       pollOffline: "Connection temporarily unavailable.",

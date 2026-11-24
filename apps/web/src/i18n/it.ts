@@ -1972,7 +1972,6 @@ export const it = {
         "L'operazione ha subito un'interruzione o un timeout dopo l'invio ed è nello stato unknown. Il blocco esclusivo resta attivo: il riconciliatore legge lo stato osservato senza rieseguire la richiesta.",
       errorTitle: "Errore operazione: [{code}]",
       errorFallback: "L'esecuzione asincrona non è andata a buon fine.",
-      unconfirmed: "Non è stato possibile confermare l'esito: controlla lo stato prima di riprovare. Nulla è stato inviato di nuovo.",
       pollTitle: "Avviso sull'operazione",
       pollFailed: "Impossibile aggiornare lo stato dell'operazione.",
       pollOffline: "Connessione temporaneamente non disponibile.",

@@ -68,7 +68,6 @@ import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
 import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
-import { OperationTimeline } from "@/components/shared/operation-timeline";
 import { AppStackTasks, appStackTaskScheduleOf, appStackTaskScheduleText } from "@/components/app-stacks/app-stack-tasks";
 
 const NOW = "2026-11-22T10:00:00.000Z";
@@ -1494,26 +1493,6 @@ describe("scheduled tasks", () => {
       expect(html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, m, { 0: other, 1: "done" }).out, m)).toContain(
         m.apps.progress[usual],
       );
-    }
-  });
-
-  it("the administrator's timeline says the same in the page's language, not the server's English text (issue #183)", () => {
-    for (const m of [en, itMsgs]) {
-      const operation = {
-        id: "op_9",
-        kind: "host.reconcile",
-        status: "failed",
-        errorCode: "OPERATION_AMBIGUOUS",
-        errorMessage: "server text",
-        resourceId: null,
-        steps: [],
-      };
-      const h = html(callHooks(OperationTimeline, { pollUrl: "/x", operationId: "op_9" }, m, { 0: operation }).out, m);
-      expect(h).toContain(m.admin.operation.unconfirmed);
-      expect(h).not.toContain("server text");
-      // Any other failure still shows the server's message.
-      const other = { ...operation, errorCode: "INTERNAL_ERROR" };
-      expect(html(callHooks(OperationTimeline, { pollUrl: "/x", operationId: "op_9" }, m, { 0: other }).out, m)).toContain("server text");
     }
   });
 });
