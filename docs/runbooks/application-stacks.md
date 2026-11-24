@@ -497,17 +497,18 @@ approval.
    while it runs the application page says that its expired backups are being removed and every action on it answers
    `409 RESOURCE_LOCKED`. A destination that fails keeps the rows, and the next night finishes the work.
    On a server with no usable destination the nightly run does nothing, and no backup of an application is removed.
-   The executor runs two backup jobs at a time: the panel's own nightly copy, queued in the same run, may find them
-   taken by a clean-up and an application's backup. It then asks again every minute, under the same operation, for
-   at most two hours in all, also with two destinations (meanwhile the sites' backups and restores wait in the same
-   worker lane), and only then fails; each night has at most one panel copy. The sites' nightly backups, in the same
-   worker lane, may find both jobs taken by an application's backup or restore and another job (the copy before a
-   WordPress update, a clean-up): a refused one is asked again every minute under its own operation, but the whole run
-   has one wait, two hours from its first refusal. After it, each refused site fails at once as before (`site_busy`)
-   and gets its next backup the next night; twenty refused sites hold the lane two hours, not forty. A site that waits
-   is locked as during its backup (its actions answer `409 RESOURCE_LOCKED`). The wait is kept in memory: restarting
-   `hp-api` during the run starts another one. A backup a person asks for, and the one before a WordPress update, are
-   refused at once.
+   The executor runs two backup jobs at a time: the sites' nightly backups and the panel's own nightly copy, queued in
+   the same run, may find both taken by a clean-up, an application's backup or restore, or another job (the copy
+   before a WordPress update). A refused one is asked again every minute under its own operation, but the night has
+   one wait, shared by the sites and the panel copy with all its destinations: **15 minutes** in all from its first
+   refusal. After it, each one still refused fails at once as before (a site as `site_busy`) and gets its next backup
+   the next night; each night has at most one panel copy. It is reported like any failed nightly backup: the site's
+   backup list shows it failed, and the server administrator's **Stato** page shows the alert of the site's failed
+   backup or of the panel's. While the night waits, the worker lane of the sites' and the panel's backups is held: a
+   backup, a restore or a download a person asks for then starts when the wait ends, at most 15 minutes later. A site
+   that waits is locked as during its backup (its actions answer `409 RESOURCE_LOCKED`). The wait is kept in memory:
+   restarting `hp-api` during the run starts another one. A backup a person asks for, and the one before a WordPress
+   update, never wait for a job: with both taken they are refused at once.
 8. **Where the copies are** (server administrator). One encrypted repository per application per destination, next to
    the sites' ones and with their key: on a local destination the folder `stacks/<stackId>` under that destination's
    folder (`/var/lib/hosting-panel/local-repos/<targetId>` unless `HP_BACKUP_LOCAL_ROOT` says otherwise), on S3 the

@@ -39,7 +39,6 @@ import {
   isTerminalStepStatus,
   normalizeBackupProblem,
   type BackupOperationRef,
-  type BusyWait,
   type SiteBackupsApplier,
 } from "./site-backups-applier.js";
 
@@ -110,8 +109,9 @@ export class PanelBackupApplier {
 
       const retentionDays = (await getPolicy(db, "panel")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
       // The nightly clean-ups of applications, queued in the same run, and a customer's application backup can take both
-      // job slots of the executor: one wait for a free one for the whole copy, a second destination gets none of its own.
-      const busyWait: BusyWait = { until: null };
+      // job slots of the executor: the copy waits for a free one within the night's one wait, which the sites' nightly
+      // backups share, for every destination together.
+      const busyWait = await this.parent.nightlyBusyWait();
       // One dump, one copy per target (at most two), in priority order and one after the other: the panel lane runs a single
       // job at a time. The second job (`<op>-t2`) reads the first one's dump, so the file stays until every copy settled.
       // A copy that fails does not stop the next one; an unknown outcome stops the run and keeps the file for recovery.

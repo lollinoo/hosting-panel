@@ -73,11 +73,11 @@ export const SITE_BACKUPS_INTERRUPTED = "This backup was interrupted before it f
  */
 export const BACKUP_BUSY_RETRY_MS = 60_000;
 /**
- * ...for at most this long after the first refusal of its wait, then the refusal stands like any other. One wait for
- * every destination of the panel copy, one for all the nightly backups of the sites in a run: twenty sites refused one
- * after the other hold the backup lane two hours, not forty.
+ * ...for at most this long after the first refusal of the night's one wait, then the refusal stands like any other. The
+ * nightly backups of the sites and the panel copy of a run share it, every destination included: the backup lane, where
+ * a backup, a restore or a download a person asks for waits its turn, is held at most this long a night.
  */
-export const BACKUP_BUSY_WAIT_MS = 2 * 3_600_000;
+export const BACKUP_BUSY_WAIT_MS = 15 * 60_000;
 
 /** A wait for a free job slot of the executor: its end is set by its first refusal. */
 export interface BusyWait {
@@ -165,7 +165,7 @@ export class SiteBackupsApplier {
   public pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
   public busyRetryMs = BACKUP_BUSY_RETRY_MS;
   public busyWaitMs = BACKUP_BUSY_WAIT_MS;
-  /** The wait the nightly backups of the sites share, and the run (its date) it belongs to. */
+  /** The wait the nightly backups of the sites and the panel copy share, and the run (its date) it belongs to. */
   #nightlyWait: { run: string | null; wait: BusyWait } | null = null;
   public readonly sftp: SiteSftpService | null;
   public readonly panel: PanelBackupApplier;
@@ -453,7 +453,7 @@ export class SiteBackupsApplier {
 
       // A nightly backup refused because the executor's job slots are taken is asked again within the one wait of its
       // run; one a person asked for, or the one before a WordPress update, is refused at once.
-      const busyWait = kind === "nightly" ? await this.#nightlyBusyWait() : null;
+      const busyWait = kind === "nightly" ? await this.nightlyBusyWait() : null;
       const failures: CopyFailure[] = [];
       for (const copy of (await this.#copiesOf(backupId)).filter((c) => c.status === "running")) {
         await this.#ensureBackupRowStillRunning(op.id);
@@ -589,8 +589,11 @@ export class SiteBackupsApplier {
     return { id: backupRow.id, kind: backupRow.kind };
   }
 
-  /** The one wait of the nightly backups of the sites in a run; the run is named by its date (the default_site policy's). */
-  async #nightlyBusyWait(): Promise<BusyWait> {
+  /**
+   * @internal The one wait of a run's nightly backups, of the sites and of the panel; the run is named by its date (the
+   * default_site policy's).
+   */
+  public async nightlyBusyWait(): Promise<BusyWait> {
     const [policy] = await this.dbClient.db
       .select({ run: backupPolicies.lastNightlyRunOn })
       .from(backupPolicies)

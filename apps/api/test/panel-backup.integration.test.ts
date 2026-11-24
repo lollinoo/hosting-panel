@@ -150,8 +150,8 @@ describe("nightly panel copy (panel.backups.create)", () => {
     await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, "panel")).id, ids);
   }
 
-  async function queuePanel(): Promise<string> {
-    await scheduler.tick(NIGHT);
+  async function queuePanel(night: Date = NIGHT): Promise<string> {
+    await scheduler.tick(night);
     const [op] = await panelOps();
     expect(op).toBeDefined();
     return op!.id;
@@ -660,11 +660,14 @@ describe("nightly panel copy (panel.backups.create)", () => {
     };
   }
 
+  // Each of these runs a night of its own: the night's one wait is kept for the run of its date.
+  const busyNight = (days: number) => new Date(NIGHT.getTime() + days * 24 * 3_600_000);
+
   it("Busy: a copy refused while the executor runs two jobs already is asked again the same night, under the same operation", async () => {
     applier.busyRetryMs = 1;
     const restore = refuseAsBusy(2);
     try {
-      const opId = await queuePanel();
+      const opId = await queuePanel(busyNight(30));
       await app.outboxWorker.processPendingOnce();
 
       expect((await panelOps()).map((o) => o.status)).toEqual(["succeeded"]);
@@ -674,7 +677,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
       expect((await panelAudits()).map((a) => a.action)).toEqual(["panel.backups.succeeded"]);
       expect(await dumpFiles()).toEqual([]);
       // One copy per date: a later tick of the same night queues nothing.
-      await scheduler.tick(new Date(NIGHT.getTime() + 3_600_000));
+      await scheduler.tick(new Date(busyNight(30).getTime() + 3_600_000));
       expect(await panelOps()).toHaveLength(1);
     } finally {
       restore();
@@ -686,7 +689,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
     applier.busyWaitMs = 30;
     const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
     try {
-      const opId = await queuePanel();
+      const opId = await queuePanel(busyNight(31));
       await app.outboxWorker.processPendingOnce();
 
       expect((await panelOps()).map((o) => o.status)).toEqual(["failed"]);
@@ -705,7 +708,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
     applier.busyWaitMs = 30;
     const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
     try {
-      const opId = await queuePanel();
+      const opId = await queuePanel(busyNight(32));
       await app.outboxWorker.processPendingOnce();
 
       const starts = calls.flatMap((c) => (c.action === "panelStart" ? [c.jobId] : []));
