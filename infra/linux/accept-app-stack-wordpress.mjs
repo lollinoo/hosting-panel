@@ -18,9 +18,10 @@
  * HP_ACCEPT_REGISTRY_CASES=1 it also asks the registry for those tags through the product (read-only, needs the network).
  *
  * The built-in run is made for the newest version of the template; HP_ACCEPT_WORDPRESS_VERSION=1 makes it for version 1,
- * where address-follows-host and uploads-limit fail: the reproduction of what version 2 fixes (a site that answers only
- * as the name it was installed on, uploads of up to 2 MB). no-redirect-loop is expected to fail there too, the login of
- * version 1 being on that first name.
+ * where address-follows-host, address-follows-https and uploads-limit fail: the reproduction of what version 2 fixes (a
+ * site that answers only as the name it was installed on, uploads of up to 2 MB). no-redirect-loop is expected to fail
+ * there too, the login of version 1 being on that first name. Version 2 without root: RESULT 25/25 passed, 1 skipped;
+ * version 1: 21/25.
  *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack id stk_swarmtest_<hex>_a, so every container, network and volume name
@@ -44,7 +45,8 @@
  *    object of another run; inspect/logs and the commands run inside a container only ever name this run's objects.
  *    The secrets are random values of this run that die with it; the login checks pass them as arguments.
  *  - uploads-limit writes one page of this run into this run's site volume (docker exec of php in this run's wordpress
- *    container) and removes it in the same step.
+ *    container) and removes it in the same step. address-follows-host and address-follows-https send requests from
+ *    inside that container to its own web server on 127.0.0.1.
  *  - Images: the digest-pinned refs of the wordpress-mariadb seed in APP_BUILT_IN_TEMPLATES (the imported draft pins
  *    the same two), pulled by the product through the gate when missing (offline run: docker pull each
  *    <repository>@sha256:<digest> first). traefik:v3.7 must be local.
@@ -55,8 +57,9 @@
  *  (version 1: HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs)
  * Steps: gate-self-test, preflight, snapshot-before, plan-compiles-from-seed, refused-before-docker,
  * deploy-creates-exact-set, container-standard-profile, secrets-reach-only-their-component, network-shape,
- * no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, no-redirect-loop,
- * uploads-limit (these three skipped with --imported: the administrator's draft sets neither), logs-mask-environment-secrets,
+ * no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, address-follows-https,
+ * no-redirect-loop, uploads-limit (these four skipped with --imported: the administrator's draft sets neither the address
+ * nor the uploads limit), logs-mask-environment-secrets,
  * data-survives-stop-and-start, idempotent-reapply, upgrade-keeps-data, recovery-reads-only, remove-keeps-volumes,
  * destroy-data-removes-volume, host-nft-metadata-drop-on-stack-net (root only: HP_ACCEPT_ROOT_CASES=1 as root),
  * gate-clean, nothing-left. With --imported: compose-imports-to-draft first, plan-compiles-from-draft in place of
@@ -555,6 +558,27 @@ const served = (hostname, urlPath, status, check = () => true, ms = 60_000) =>
     if (r.status === status && check(r)) return r;
     throw new Error(`${String(r.status)} ${r.location} ${r.body.replace(/\s+/g, " ").slice(0, 160)}`);
   });
+/** PHP that sends one HTTP/1.0 request to the web server of its own container: path, Host, X-Forwarded-Proto ("": none). */
+const HTTP_GET =
+  '$s = @fsockopen("127.0.0.1", 80, $e, $m, 5); if (!$s) exit(1); stream_set_timeout($s, 20); ' +
+  'fwrite($s, "GET $argv[1] HTTP/1.0\\r\\nHost: $argv[2]\\r\\n" . ($argv[3] === "" ? "" : "X-Forwarded-Proto: $argv[3]\\r\\n") . "\\r\\n"); ' +
+  "echo stream_get_contents($s);";
+/** A request from inside an own container, with a Host or X-Forwarded-Proto the throwaway proxy would not pass on. */
+async function fromInside(container, hostHeader, urlPath, proto = "") {
+  const raw = await docker(["exec", container, "php", "-r", HTTP_GET, "--", urlPath, hostHeader, proto], 30_000);
+  const cut = raw.indexOf("\r\n\r\n");
+  const head = cut < 0 ? raw : raw.slice(0, cut);
+  return {
+    status: Number(/^HTTP\/\S+ (\d{3})/.exec(head)?.[1] ?? 0),
+    location: /^location:\s*(.*)$/im.exec(head)?.[1]?.trim() ?? "",
+    body: cut < 0 ? "" : raw.slice(cut + 4),
+  };
+}
+/** The style and script addresses of a page. */
+const assetsOf = (body) => [...body.matchAll(/<(?:link|script)\b[^>]*\b(?:href|src)=["']([^"']+)["']/gi)].map((x) => x[1]);
+/** Where the login form of wp-login.php posts to ("" when there is none). */
+const loginActionOf = (body) =>
+  ((body.match(/<form\b[^>]*\bloginform\b[^>]*>/i)?.[0] ?? "").match(/\baction=["']([^"']+)["']/i)?.[1] ?? "").replaceAll("&amp;", "&");
 
 // ---- cleanup ----
 let adapter = null;
@@ -1077,7 +1101,7 @@ async function main() {
     });
 
     if (IMPORTED) {
-      for (const name of ["address-follows-host", "no-redirect-loop", "uploads-limit"]) {
+      for (const name of ["address-follows-host", "address-follows-https", "no-redirect-loop", "uploads-limit"]) {
         skip(name, "the imported draft is the administrator's file: it sets neither the address line nor the uploads limit of the built-in template");
       }
     } else {
@@ -1090,14 +1114,47 @@ async function main() {
           return res.status !== 0 && res.status !== 404 ? res : null;
         });
         assert(home.status === 200 && home.body.includes(TITLE), `${HOST2}/ answers the home page with 200, not a redirect to ${HOST1}`, `${String(home.status)} ${home.location}`);
-        const assets = [...home.body.matchAll(/<(?:link|script)\b[^>]*\b(?:href|src)=["']([^"']+)["']/gi)].map((x) => x[1]);
+        const assets = assetsOf(home.body);
         assert(assets.some((a) => a.includes(`//${HOST2}/`)), `the page's style and script addresses name ${HOST2}`, assets.slice(0, 5).join(" "));
         assert(!home.body.includes(HOST1), `the page names ${HOST1} nowhere`, assets.filter((a) => a.includes(HOST1)).slice(0, 3).join(" ") || "in its text");
         const login = await viaProxy(HOST2, "/wp-login.php");
-        const action = (login.body.match(/<form\b[^>]*\bloginform\b[^>]*>/i)?.[0] ?? "").match(/\baction=["']([^"']+)["']/i)?.[1] ?? "";
-        assert(login.status === 200 && action !== "" && new URL(action.replaceAll("&amp;", "&"), `http://${HOST2}/`).host === HOST2, `the login form of ${HOST2} posts to ${HOST2}`, `${String(login.status)} ${action}`);
+        const action = loginActionOf(login.body);
+        assert(login.status === 200 && action !== "" && new URL(action, `http://${HOST2}/`).host === HOST2, `the login form of ${HOST2} posts to ${HOST2}`, `${String(login.status)} ${action}`);
         const first = await viaProxy(HOST1, "/");
         assert(first.status === 200 && first.body.includes(`//${HOST1}/`) && !first.body.includes(HOST2), `${HOST1} still answers as itself`, String(first.status));
+        // The Host the site takes is lower-cased, and one that does not end with a letter or digit is not taken: the
+        // stored address is. Sent from inside the wordpress container, so that no proxy rewrites the Host.
+        const upper = await fromInside(WP, HOST2.toUpperCase(), "/");
+        const upperAssets = assetsOf(upper.body);
+        assert(
+          upper.status === 200 && upperAssets.some((a) => a.includes(`//${HOST2}/`)) && !upper.body.includes(HOST2.toUpperCase()),
+          `a Host in capitals gets the addresses of ${HOST2}, in lower case`,
+          `${String(upper.status)} ${upper.location} ${upperAssets.slice(0, 3).join(" ")}`,
+        );
+        const dotted = await fromInside(WP, `${HOST2}.`, "/wp-login.php");
+        const dottedAction = loginActionOf(dotted.body);
+        assert(
+          dotted.status === 200 && dottedAction !== "" && new URL(dottedAction, `http://${HOST1}/`).host === HOST1,
+          `a Host with a trailing dot gets the stored address: the login form posts to ${HOST1}`,
+          `${String(dotted.status)} ${dotted.location} ${dottedAction}`,
+        );
+      });
+
+      await step("address-follows-https", async () => {
+        // Behind a proxy that ends https, X-Forwarded-Proto says so and the image sets HTTPS=on before it runs the
+        // address line. Sent from inside the wordpress container: the throwaway proxy is plain http and sets that
+        // header itself.
+        const page = await fromInside(WP, HOST2, "/", "https");
+        const own = assetsOf(page.body).filter((a) => a.includes(`//${HOST2}/`));
+        assert(
+          page.status === 200 && own.length > 0 && own.every((a) => a.startsWith(`https://${HOST2}/`)),
+          `the page's style and script addresses begin https://${HOST2}/`,
+          `${String(page.status)} ${page.location} ${own.slice(0, 3).join(" ")}`,
+        );
+        assert(!page.body.includes(`http://${HOST2}`) && !page.body.includes(HOST1), `the page names neither http://${HOST2} nor ${HOST1}`, "found");
+        const login = await fromInside(WP, HOST2, "/wp-login.php", "https");
+        const action = loginActionOf(login.body);
+        assert(login.status === 200 && action.startsWith(`https://${HOST2}/`), `the login form posts to https://${HOST2}/`, `${String(login.status)} ${login.location} ${action}`);
       });
 
       await step("no-redirect-loop", async () => {
