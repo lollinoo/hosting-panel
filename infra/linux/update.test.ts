@@ -78,6 +78,8 @@ describe("update.sh downgrade gate (features in use)", () => {
   const BOTH = "manual-tls backup-targets";
   const gated = (featuresCmd: string, features = BOTH) => fixture("0.2.0", [], "", { features, featuresCmd });
   const old = () => makeArchive("0.1.0", "0.1.0", "", "");
+  // A release below 0.10.0 never counts as knowing the stacks (issue #169): these go back to 0.10.0, which does.
+  const gatedSince = (featuresCmd: string, features: string) => fixture("0.11.0", [], "", { features, featuresCmd });
   const asked = (f: { d: string }) => existsSync(join(f.d, "features.asked"));
 
   it("refuses a downgrade that drops a feature in use (exit 8) and installs nothing", () => {
@@ -104,22 +106,83 @@ describe("update.sh downgrade gate (features in use)", () => {
 
   it("refuses a downgrade to a release that knows the stacks but not their extended format (exit 8), naming only that feature", () => {
     const known = "manual-tls backup-targets site-templates app-stacks";
-    const f = gated("printf 'app-stacks\\napp-format-v2\\n'", `${known} app-format-v2`);
-    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    const f = gatedSince("printf 'app-stacks\\napp-format-v2\\n'", `${known} app-format-v2`);
+    const r = update(["--archive", makeArchive("0.10.0", "0.10.0", "", known), "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(8);
-    for (const t of ["0.1.0 does not know app-format-v2, which", "--allow-feature-loss", "extended application format"]) expect(r.err).toContain(t);
+    for (const t of ["0.10.0 does not know app-format-v2, which", "--allow-feature-loss", "extended application format"]) expect(r.err).toContain(t);
     for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks"]) expect(r.err).not.toContain(t);
-    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(cur(f.root)).toBe("releases/0.11.0");
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
   it("stacks of the first format only do not block a downgrade to a release that knows the stacks", () => {
     const known = "manual-tls backup-targets site-templates app-stacks";
-    const f = gated("echo app-stacks", `${known} app-format-v2`);
-    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    const f = gatedSince("echo app-stacks", `${known} app-format-v2`);
+    const r = update(["--archive", makeArchive("0.10.0", "0.10.0", "", known), "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(0);
     expect(asked(f)).toBe(true);
-    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(cur(f.root)).toBe("releases/0.10.0");
+  });
+
+  describe("a release below 0.10.0 lists app-stacks but has the applications switched off (issue #169)", () => {
+    const CURRENT = "manual-tls backup-targets site-templates app-stacks app-format-v2";
+    // What every 0.9 release lists in its RELEASE.json.
+    const NINE = "manual-tls backup-targets site-templates app-stacks";
+    const from = (featuresCmd: string, features = CURRENT) => fixture("0.16.0", [], "", { features, featuresCmd });
+    const nine = () => makeArchive("0.9.3", "0.9.3", "", NINE);
+
+    it("refuses it while a stack exists (exit 8), naming app-stacks, and installs nothing", () => {
+      const f = from("echo app-stacks");
+      const r = update(["--archive", nine(), "--allow-downgrade"], f.env);
+      expect(r.code, r.err).toBe(8);
+      for (const t of ["0.9.3 does not know app-stacks, which this panel uses", "--allow-feature-loss", "delete the application stacks"]) {
+        expect(r.err).toContain(t);
+      }
+      expect(r.err).toContain("below 0.10.0");
+      expect(cur(f.root)).toBe("releases/0.16.0");
+      expect(readFileSync(f.log, "utf8")).toBe("");
+      expect(existsSync(join(f.root, "releases/0.9.3"))).toBe(false);
+    });
+
+    it("--allow-feature-loss installs it anyway, with the warning", () => {
+      const f = from("echo app-stacks");
+      const r = update(["--archive", nine(), "--allow-downgrade", "--allow-feature-loss"], f.env);
+      expect(r.code, r.err).toBe(0);
+      expect(r.err).toContain("app-stacks stays unreachable");
+      expect(cur(f.root)).toBe("releases/0.9.3");
+    });
+
+    it("is allowed when no stack exists", () => {
+      const f = from("true");
+      const r = update(["--archive", nine(), "--allow-downgrade"], f.env);
+      expect(r.code, r.err).toBe(0);
+      expect(asked(f)).toBe(true);
+      expect(cur(f.root)).toBe("releases/0.9.3");
+    });
+
+    it("fails closed when the database cannot be asked", () => {
+      const f = from("exit 1");
+      const r = update(["--archive", nine(), "--allow-downgrade"], f.env);
+      expect(r.code, r.err).toBe(8);
+      expect(r.err).toContain("Cannot tell");
+      expect(cur(f.root)).toBe("releases/0.16.0");
+    });
+
+    it("0.10.0, which lists app-stacks, is not held back by a stack", () => {
+      const f = from("echo app-stacks");
+      const r = update(["--archive", makeArchive("0.10.0", "0.10.0", "", CURRENT), "--allow-downgrade"], f.env);
+      expect(r.code, r.err).toBe(0);
+      expect(asked(f)).toBe(false);
+      expect(cur(f.root)).toBe("releases/0.10.0");
+    });
+
+    it("changes nothing when the current release does not list app-stacks", () => {
+      const f = from("echo app-stacks", "manual-tls backup-targets site-templates");
+      const r = update(["--archive", nine(), "--allow-downgrade"], f.env);
+      expect(r.code, r.err).toBe(0);
+      expect(asked(f)).toBe(false);
+      expect(cur(f.root)).toBe("releases/0.9.3");
+    });
   });
 
   it("refuses a downgrade while an application address has routing options (exit 8), naming only that feature", () => {
@@ -154,10 +217,10 @@ describe("update.sh downgrade gate (features in use)", () => {
 
   it("a target that knows the backups of applications is not held back by them", () => {
     const all = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups";
-    const f = gated("echo app-stack-backups", all);
-    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", all), "--allow-downgrade"], f.env);
+    const f = gatedSince("echo app-stack-backups", all);
+    const r = update(["--archive", makeArchive("0.10.0", "0.10.0", "", all), "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(0);
-    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(cur(f.root)).toBe("releases/0.10.0");
     expect(asked(f)).toBe(false);
   });
 

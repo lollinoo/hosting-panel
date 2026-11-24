@@ -2,6 +2,7 @@ import { APP_IMAGE_ALLOWLIST, type ApprovedStackPlan } from "@hosting-panel/cont
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { describe, expect, it } from "vitest";
 import {
+  APP_STACK_CONTAINER_BODY_VERSION,
   APP_STACK_LOG_CONFIG,
   APP_STACK_RESTART_POLICY,
   APP_STACK_SCRATCH_TMPFS_OPTIONS,
@@ -48,6 +49,7 @@ function labels(key: string, startIndex: string, health: string) {
     "io.hostingpanel.app_revision_id": plan.revisionId,
     "io.hostingpanel.app_start_index": startIndex,
     "io.hostingpanel.app_health": health,
+    "io.hostingpanel.app_body_version": "1",
   };
 }
 
@@ -237,6 +239,18 @@ describe("assertAppStackPayloadHardening", () => {
     ["the site job role", mutate({}, { Labels: { ...body.Labels, "io.hostingpanel.role": "site_job" } })],
   ])("refuses %s", (_name, mutated) => {
     expect(() => assertAppStackPayloadHardening(mutated, ctx)).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
+  });
+
+  const BODY_VERSION = "io.hostingpanel.app_body_version";
+  it.each([
+    ["no body version label", Object.fromEntries(Object.entries(body.Labels).filter(([key]) => key !== BODY_VERSION))],
+    ["an older body version", { ...body.Labels, [BODY_VERSION]: String(APP_STACK_CONTAINER_BODY_VERSION - 1) }],
+    ["a newer body version", { ...body.Labels, [BODY_VERSION]: String(APP_STACK_CONTAINER_BODY_VERSION + 1) }],
+    ["a body version that is not a whole number", { ...body.Labels, [BODY_VERSION]: `${APP_STACK_CONTAINER_BODY_VERSION}.0` }],
+  ])("refuses a body with %s like a label outside the closed list", (_name, Labels) => {
+    expect(() => assertAppStackPayloadHardening(mutate({}, { Labels }), ctx)).toThrow(
+      expect.objectContaining({ code: "HOST_POLICY_DENIED", message: "The application container body breaks the Labels rule" }),
+    );
   });
 
   it("accepts /var/run and docker.sock text the plan schema accepts outside host paths", () => {

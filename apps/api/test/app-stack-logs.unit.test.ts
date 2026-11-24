@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
 import {
   appStackComponents,
+  appStackRevisions,
   appStacks,
   builtInAppTemplateItems,
   createDatabaseClient,
   DEMO_IDS,
   ensureBuiltInAppTemplates,
+  eq,
   newAppEntityId,
   seedPhase1Dataset,
   type DatabaseClient,
@@ -109,6 +111,39 @@ describe("readAppStackComponentLogs (RT8)", () => {
     expect(fake.calls.map((c) => c.request)).toEqual(
       [1, 500, 42, 200].map((tail) => ({ stackId: acmeStack, organizationId: ACME, componentKey: "web", tail })),
     );
+  });
+
+  it("forwards the read of an application whose stored plan does not parse, asking the stored plans nothing (BUG-43)", async () => {
+    // The executor learns which secret files a container holds from the container; the logs of an application whose
+    // plan no longer parses are the ones its administrator needs.
+    const [template] = builtInAppTemplateItems();
+    const stackId = newAppEntityId("stk");
+    await dbClient.db.insert(appStacks).values({
+      id: stackId,
+      organizationId: ACME,
+      hostAllocationId: DEMO_IDS.allocations.acme,
+      templateId: template!.templateId,
+      templateVersionId: template!.versionId,
+      name: stackId,
+      status: "running",
+    });
+    const broken = newAppEntityId("srev");
+    await dbClient.db.insert(appStackRevisions).values({
+      id: broken,
+      stackId,
+      organizationId: ACME,
+      revisionNumber: 1,
+      templateVersionId: template!.versionId,
+      plan: { schemaVersion: 1, components: [{ key: "web" }] },
+      planHash: "0".repeat(64),
+      componentCount: 1,
+      cpuMilli: 250,
+      memoryBytes: 134217728,
+    });
+    await dbClient.db.update(appStacks).set({ desiredRevisionId: broken, appliedRevisionId: broken }).where(eq(appStacks.id, stackId));
+    await dbClient.db.insert(appStackComponents).values({ stackId, organizationId: ACME, componentKey: "web", appliedRevisionId: broken });
+    await expect(read({ stackId, tail: 5 })).resolves.toEqual([]);
+    expect(fake.calls.map((c) => c.request)).toEqual([{ stackId, organizationId: ACME, componentKey: "web", tail: 5 }]);
   });
 
   it("returns the executor's lines and replaces any executor error with the fixed DOCKER_ENGINE_UNAVAILABLE sentence", async () => {

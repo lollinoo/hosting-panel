@@ -147,17 +147,19 @@ async function expectBuiltInsOnly(db: DatabaseClient["db"]): Promise<void> {
     ["atpl_mariadb", "mariadb", true, "atv_mariadb_1"],
     ["atpl_postgresql", "postgresql", true, "atv_postgresql_1"],
     ["atpl_valkey", "valkey", true, "atv_valkey_1"],
-    ["atpl_wordpress_mariadb", "wordpress-mariadb", true, "atv_wordpress_mariadb_1"],
+    ["atpl_wordpress_mariadb", "wordpress-mariadb", true, "atv_wordpress_mariadb_2"],
     ["atpl_worker_storage", "worker-storage", true, "atv_worker_storage_1"],
   ]);
   const versions = await db.select().from(appTemplateVersions).orderBy(appTemplateVersions.id);
   const source = (slug: string) => APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug)!.source;
+  const earlierSource = (slug: string) => APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug)!.previousVersions![0]!.source;
   expect(versions.map((v) => [v.id, v.templateId, v.versionNumber, v.source])).toEqual([
     ["atv_http_cache_1", "atpl_http_cache", 1, source("http-cache")],
     ["atv_mariadb_1", "atpl_mariadb", 1, source("mariadb")],
     ["atv_postgresql_1", "atpl_postgresql", 1, source("postgresql")],
     ["atv_valkey_1", "atpl_valkey", 1, source("valkey")],
-    ["atv_wordpress_mariadb_1", "atpl_wordpress_mariadb", 1, source("wordpress-mariadb")],
+    ["atv_wordpress_mariadb_1", "atpl_wordpress_mariadb", 1, earlierSource("wordpress-mariadb")],
+    ["atv_wordpress_mariadb_2", "atpl_wordpress_mariadb", 2, source("wordpress-mariadb")],
     ["atv_worker_storage_1", "atpl_worker_storage", 1, source("worker-storage")],
   ]);
 }
@@ -223,7 +225,7 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       await ensureBuiltInAppTemplates(db, builtInAppTemplateItems());
       const after = [await db.select().from(appTemplates).orderBy(appTemplates.id), await db.select().from(appTemplateVersions).orderBy(appTemplateVersions.id)];
       expect(after[0]).toHaveLength(6);
-      expect(after[1]).toHaveLength(6);
+      expect(after[1]).toHaveLength(7);
       expect(after).toEqual(before);
     });
 

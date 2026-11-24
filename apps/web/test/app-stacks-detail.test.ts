@@ -63,6 +63,7 @@ import {
   AppStackSettings,
 } from "@/components/app-stacks/app-stack-sections";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
+import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
 import { APP_STACK_LOG_TAIL, AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
@@ -101,6 +102,8 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
+  outcomeUnknown: false,
   revisionNumber: 3,
   installed: null,
   components: [
@@ -296,8 +299,100 @@ describe("detail page", () => {
   it("the delete button is offered only while a delete may be queued", async () => {
     const open = new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${en.apps.delete.open}<`);
     expect(await page()).not.toMatch(open);
-    answer({ [UP]: ok({ ...DETAIL, status: "deleting" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "deleting", allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     expect(await page()).toMatch(open);
+    // The list decides, not the status: a degraded application held by an operation offers no delete.
+    answer({ [UP]: ok({ ...DETAIL, allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).toMatch(open);
+  });
+
+  it("issue #106: a crashed application reads «Non riuscita» and offers restart, never a start the API refuses", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // What the API answers for a component that crashed: shown failed, the stored running's actions.
+      answer({ [UP]: ok({ ...DETAIL, status: "failed" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const h = await page();
+      expect(h).toContain(m.apps.status.failed);
+      expect(h).toMatch(disabled(m.apps.actions.start));
+      expect(h).toContain(`>${m.apps.actions.restart}<`);
+      expect(h).not.toMatch(disabled(m.apps.actions.restart));
+      expect(h).not.toContain(m.apps.detail.unknownBody);
+    }
+  });
+
+  it("issue #106: «to be verified» from a stale reading says the state could not be read, not that an outcome is unknown", async () => {
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const stale = await page();
+      expect(stale).toContain(m.apps.detail.staleBody);
+      expect(stale).not.toContain(m.apps.detail.unknownBody);
+      // The badge too: no recent reading, never «outcome to be verified».
+      expect(stale).toContain(`>${m.apps.detail.staleBadge}<`);
+      expect(stale).not.toContain(m.apps.status.unknown);
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const doubt = await page();
+      expect(doubt).toContain(m.apps.detail.unknownBody);
+      expect(doubt).not.toContain(m.apps.detail.staleBody);
+      expect(doubt).toContain(`>${m.apps.status.unknown}<`);
+      expect(doubt).not.toContain(m.apps.detail.staleBadge);
+    }
+    for (const m of [en, itMsgs]) {
+      expect(m.apps.detail.staleBody).not.toBe(m.apps.detail.unknownBody);
+      expect(m.apps.detail.staleBadge).not.toBe(m.apps.status.unknown);
+    }
+  });
+
+  it("issue #106: the backups section follows the list, not the status shown", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      const t = m.apps.backups;
+      // A stale reading shows unknown while the stored running takes a backup and a restore.
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), ...routes });
+      const stale = await page();
+      expect(stale).toContain(`>${t.create}<`);
+      expect(stale).not.toMatch(disabled(t.create));
+      expect(stale).not.toMatch(disabled(t.restore));
+      // An operation of the customer holds the application: the list is empty, and the line says it is busy.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_1", allowedActions: [] }), ...routes });
+      const held = await page();
+      expect(held).toMatch(disabled(t.create));
+      expect(held).toMatch(disabled(t.restore));
+      expect(held).toContain(t.busy);
+    }
+  });
+
+  it("issue #106: a task run that waits is followed while every listed action stays offered, with no busy line", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // The run waits under a lock of its own (ADR-0042): the detail names it and lists what the stored running allows.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_9" }), ...routes });
+      const h = await page();
+      expect(h).toContain(m.apps.progress.title.deploy);
+      for (const label of [m.apps.actions.stop, m.apps.actions.restart, m.apps.actions.reinstall, m.apps.backups.create, m.apps.backups.restore, m.apps.delete.open]) {
+        expect(h, label).toContain(`>${label}<`);
+        expect(h, label).not.toMatch(disabled(label));
+      }
+      expect(h).not.toContain(m.apps.backups.busy);
+      expect(h).not.toContain(m.apps.backups.notAllowed);
+    }
+  });
+
+  it("issue #106: a detail without the list (an API older than the page) renders with every action off", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const { allowedActions: _, ...older } = DETAIL;
+    answer({ [UP]: ok(older), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) });
+    const h = await page();
+    expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
+    for (const label of [en.apps.actions.start, en.apps.actions.stop, en.apps.actions.restart, en.apps.actions.reinstall, en.apps.backups.create, en.apps.backups.restore, en.apps.delete.open]) {
+      expect(h, label).toMatch(disabled(label));
+    }
+    expect(h).toContain(en.apps.backups.notAllowed);
   });
 
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
@@ -333,7 +428,7 @@ describe("detail page", () => {
 
   it("unknown reads «Esito da verificare» and never «Non riuscita»; a draft explains what to do", async () => {
     loc.value = "it";
-    answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     const h = await page();
     expect(h).toContain("Esito da verificare");
     expect(h).toContain(itMsgs.apps.detail.unknownBody);
@@ -603,6 +698,30 @@ describe("private values", () => {
     const shown = html(callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD", 2: text }).out);
     expect(shown).toMatch(/<input[^>]*aria-invalid="true"/);
     expect(shown).toContain(text);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: a value shorter than six characters is an error on the field that states the minimum, and sends nothing (BUG-43)", async (_n, m) => {
+    const text = format(m.apps.reasons.value_too_short, { min: 6 });
+    expect(text).toContain("6");
+    expect(text).not.toContain("{");
+    expect(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")).toBe(text);
+    const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+    const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: "Zq9ab" };
+    await submit(out);
+    expect(keyedSend).not.toHaveBeenCalled();
+    expect(sets).toContainEqual([2, text]);
+    expect(ref.current.value).toBe("Zq9ab"); // kept, so the customer can lengthen it
+    // Six are enough; a refusal by the same reason (from an older page) is still a field error.
+    ref.current = { value: "Zq9abc" };
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_short" });
+    await submit(out);
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(sets.filter(([k, v]) => k === 2 && v === text)).toHaveLength(2);
+    expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
   });
 
   it.each([

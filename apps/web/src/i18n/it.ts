@@ -3331,6 +3331,8 @@ x-hp-ingress:
       notInstalledLine: "La versione {version} (rilascio n. {release}) non è stata installata.",
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
+      staleBody: "Il pannello non è riuscito a leggere di recente lo stato dell'applicazione: quello che questa pagina mostra potrebbe non essere aggiornato.",
+      staleBadge: "Stato non aggiornato",
       platformWork: {
         backups_cleanup:
           "Il pannello sta togliendo i backup scaduti di questa applicazione: finché non ha finito, nessuna azione su di lei si può avviare. Di solito bastano pochi minuti.",
@@ -3383,6 +3385,8 @@ x-hp-ingress:
     backups: {
       intro: "Un backup è una copia dei dati dell'applicazione a cui puoi tornare. Non viene fatto da solo: lo crei tu da qui.",
       stopNote: "Durante la copia l'applicazione viene fermata e i suoi indirizzi web non rispondono; alla fine riparte da sola.",
+      busy: "Non è possibile adesso: l'applicazione è occupata da un'altra operazione. Attendi che finisca.",
+      notAllowed: "Al momento il tuo account non può creare o ripristinare i backup di questa applicazione.",
       keptNote:
         "Restano i {kept} backup fatti a mano più recenti e i {safety} più recenti fatti prima di un ripristino: quelli più vecchi vengono tolti durante la notte.",
       none: "Nessun backup finora.",
@@ -3679,6 +3683,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Controlla le impostazioni evidenziate.",
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
+      notNow: "Questa azione non è disponibile in questo momento. Ricarica la pagina per vedere le azioni che puoi usare ora.",
       stop_unfinished: "L'applicazione non si è arrestata del tutto: premi di nuovo Arresta, oppure Riavvia, poi riprova.",
       task_running: "Un'attività dell'applicazione è in corso: riprova fra qualche minuto.",
       confirmation_mismatch: "Il nome scritto non corrisponde.",
@@ -3699,6 +3704,7 @@ x-hp-ingress:
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
       path_target_removed: "Un percorso di un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima il percorso.",
       value_too_long: "Il valore è troppo lungo: questa applicazione accetta al massimo {max} caratteri, meno se contiene lettere accentate o simboli.",
+      value_too_short: "Il valore è troppo corto: servono almeno {min} caratteri.",
       value_too_long_store: "Il valore è troppo lungo per essere conservato: accorcialo.",
       secret_not_needed: "L'aggiornamento non ha bisogno di questo valore: impostalo tra i valori riservati dell'applicazione.",
       database_as_application: "Un database non si collega a un altro database.",

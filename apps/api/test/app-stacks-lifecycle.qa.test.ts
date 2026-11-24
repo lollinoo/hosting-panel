@@ -145,9 +145,12 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
       expect(volumesBefore).toEqual([["data", "retain"]]);
       // A refused delete must never mark data for removal: ask for it every time it is refused.
       const destroyData = target === null || index % 2 === 0;
+      const label = `${kind} from ${status}`;
+      // Issue #106: the detail offers the kind exactly when the request below is accepted.
+      const listed = status === "deleted" ? null : ((await h.call(h.a.token, "GET", `${root()}/${stack.id}`)).body.data.allowedActions as string[]);
+      if (listed !== null) expect([label, listed.includes(kind)]).toEqual([label, target !== null]);
       const before = await h.counts();
       const res = await requestOf(kind, stack, destroyData);
-      const label = `${kind} from ${status}`;
       if (status === "deleted") {
         // A deleted stack no longer exists for the customer: not found, not a conflict.
         expect([label, res.status, res.body.error?.code]).toEqual([label, 404, "NOT_FOUND"]);
@@ -189,10 +192,14 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
     for (const status of APP_STACK_STATUSES) {
       await seed(stack.id, status);
       const target = expectedTarget("stack.rollback", status);
+      const label = `rollback from ${status}`;
+      if (status !== "deleted") {
+        const listed = (await h.call(h.a.token, "GET", `${root()}/${stack.id}`)).body.data.allowedActions as string[];
+        expect([label, listed.includes("stack.rollback")]).toEqual([label, target !== null]);
+      }
       const before = await h.counts();
       const revisionsBefore = (await revisionsOf(stack.id)).length;
       const res = await send("POST", stack.id, "/rollback", { revisionId: rev1!.id, planHash: rev1!.planHash });
-      const label = `rollback from ${status}`;
       if (status === "deleted") {
         expect([label, res.status, res.body.error?.code]).toEqual([label, 404, "NOT_FOUND"]);
         expect(await h.counts(), label).toEqual(before);
@@ -227,6 +234,8 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
     expect((await send("POST", stack.id, "/stop", {})).status).toBe(202);
     for (const status of ["stopping", "running"] as const) {
       await h.dbClient.db.update(appStacks).set({ status }).where(eq(appStacks.id, stack.id));
+      // Issue #106: while the lock is held the detail offers nothing, whatever the status.
+      expect((await h.call(h.a.token, "GET", `${root()}/${stack.id}`)).body.data.allowedActions, status).toEqual([]);
       const before = await h.counts();
       for (const [name, method, suffix, body] of attempts) {
         const res = await send(method, stack.id, suffix, body);

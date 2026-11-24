@@ -181,11 +181,13 @@ const cases: Case[] = [
     idempotency: false,
     status: 200,
     timeoutMs: 8_000,
-    okBodies: [{ parameterKey: "admin_password", value: "s".repeat(16_384) }],
+    okBodies: [{ parameterKey: "admin_password", value: "s".repeat(16_384) }, { parameterKey: "admin_password", value: "Zq9abc" }],
     badBodies: [
       { value: SECRET },
       { parameterKey: "admin_password" },
       { parameterKey: "admin_password", value: "" },
+      // Shorter than the log reader masks (BUG-43).
+      { parameterKey: "admin_password", value: "Zq9ab" },
       { parameterKey: "admin_password", value: "s".repeat(16_385) },
       { parameterKey: "hp_x", value: SECRET },
       { parameterKey: "admin_password", value: SECRET, version: 2 },

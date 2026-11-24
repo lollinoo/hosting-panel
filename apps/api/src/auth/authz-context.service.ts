@@ -392,6 +392,11 @@ export class AuthzContextService {
     return decision;
   }
 
+  /** The decision requireOrgPermission takes, with no audit row and no error: what a page may offer this caller. */
+  public allowsOrgPermission(auth: AuthenticatedRequestContext, organizationId: string, permission: PermissionKey): boolean {
+    return evaluatePolicy({ principal: auth.principal, permission, organizationId, now: new Date() }).allowed;
+  }
+
   public async recordDeniedAudit(
     auth: AuthenticatedRequestContext,
     req: FastifyRequest,

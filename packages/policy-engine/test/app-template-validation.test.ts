@@ -65,6 +65,16 @@ describe("validateAppTemplateSource on the notes-demo fixture", () => {
       ["services.cache.image", "IMAGE_NOT_ALLOWLISTED", "STACK_IMAGE_NOT_ALLOWED"],
     ]);
   });
+
+  it("refuses an allowlisted image of a private registry in a new version only, at its line", () => {
+    const source = SOURCE.replace("registry.example.invalid/demo/app:", "10.0.0.5:5000/demo/app:");
+    const allowlist = [{ ...ALLOWLIST[0]!, repository: "10.0.0.5:5000/demo/app" }, ALLOWLIST[1]!];
+    expect(validateAppTemplateSource(source, { allowlist }).ok).toBe(true);
+    const result = validateAppTemplateSource(source, { allowlist, newVersion: true });
+    expect(result.ok ? [] : result.errors.map((issue) => [issue.path, issue.code, issue.reason, issue.line, issue.column])).toEqual([
+      ["services.app.image", "IMAGE_REGISTRY_NOT_PUBLIC", "STACK_IMAGE_NOT_ALLOWED", 21, 12],
+    ]);
+  });
 });
 
 describe("issue positions", () => {

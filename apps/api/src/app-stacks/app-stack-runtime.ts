@@ -491,7 +491,9 @@ export class AppStackRuntime {
         // A first deploy keeps every container so its logs stay readable.
         return settle({ stackStatus: "failed", ...(deploy && st.created !== null ? { appliedRevisionId: plan.revisionId } : {}) }, ctx.lastHealth);
       }
-      // A new revision failed after create: remove only the containers it created or replaced; volumes stay.
+      // A new revision failed after create: remove only the containers it created or replaced for a changed hash;
+      // volumes stay. A container replaced only for its body version carries the applied hash and stays (a rollback
+      // reuses it), created and not running when the start stopped before it.
       const observed = await this.#status(ctx);
       const cleanup = observed
         ? appStackReplacedComponents(st.previous, plan).filter(

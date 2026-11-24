@@ -137,7 +137,8 @@ describe("application stacks: secrets through the runtime (QA M4: A8 runtime par
   }
 
   /** Everything a customer or an operator could read once the runtime has run, searched for the value. */
-  async function expectNowhere(canary: string, stackId: string, c: HarnessCustomer, replies: Reply[] = []): Promise<void> {
+  /** `unstarted`: the deploy stopped before web's secret file was written, so its log read is refused (BUG-43). */
+  async function expectNowhere(canary: string, stackId: string, c: HarnessCustomer, replies: Reply[] = [], unstarted = false): Promise<void> {
     const db = h.dbClient.db;
     const ops = await db.select().from(operations).where(eq(operations.resourceId, stackId));
     expect(ops.length, "the stack has an operation").toBeGreaterThan(0);
@@ -162,7 +163,8 @@ describe("application stacks: secrets through the runtime (QA M4: A8 runtime par
     ];
     for (const path of reads) {
       const res = await h.call(c.token, "GET", path);
-      expect(res.status, `${path}: ${res.raw}`).toBeLessThan(500);
+      if (unstarted && path.endsWith("/logs")) expect([res.status, res.body.error?.code], `${path}: ${res.raw}`).toEqual([503, "DOCKER_ENGINE_UNAVAILABLE"]);
+      else expect(res.status, `${path}: ${res.raw}`).toBeLessThan(500);
       expectNoCanary(res.raw, canary, `GET ${path}`);
     }
     for (const res of replies) expectNoCanary(res.raw, canary, "a reply");
@@ -219,7 +221,7 @@ describe("application stacks: secrets through the runtime (QA M4: A8 runtime par
     expect(op!.errorMessage ?? "").not.toContain("cannot start");
     const steps = await h.dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, op!.id));
     for (const step of steps) expect(step.message ?? "", `step ${step.key}`).not.toContain("cannot start");
-    await expectNowhere(canary, stackId, h.a, [queued]);
+    await expectNowhere(canary, stackId, h.a, [queued], true);
   }, 60_000);
 
   it("a status read that fails with the value in its message leaves no trace either", async () => {
@@ -232,7 +234,7 @@ describe("application stacks: secrets through the runtime (QA M4: A8 runtime par
     const queued = await deploy(h.a, stackId);
     expect(queued.status, queued.raw).toBe(202);
     await drain(stackId);
-    await expectNowhere(canary, stackId, h.a, [queued]);
+    await expectNowhere(canary, stackId, h.a, [queued], true);
   }, 60_000);
 
   describe("logs of a running stack", () => {

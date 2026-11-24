@@ -4,7 +4,13 @@ import * as React from "react";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_STACK_PROCESS_MARKS, APP_STACK_SECRET_ENV_LIMITS, type AppTemplateParameter, type CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import {
+  APP_STACK_PROCESS_MARKS,
+  APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
+  type AppTemplateParameter,
+  type CustomerAppTemplateDto,
+} from "@hosting-panel/contracts";
 
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
 const fetchUpstream = vi.hoisted(() => vi.fn());
@@ -341,6 +347,17 @@ describe("AppWizard markup", () => {
     }
   });
 
+  it("Next refuses a private value shorter than the log reader masks and says so at its field (BUG-43)", () => {
+    const short = "Zq9ab";
+    expect(short).toHaveLength(APP_STACK_SECRET_MIN_LENGTH - 1);
+    const values = secretsRef({ admin_password: short, api_token: `${short}c` });
+    const refused = wizard({ 1: "team-notes", 3: ["admin_password", "api_token"] }, { 0: values });
+    click(refused.tree, t.next);
+    for (const m of [en, itMsgs]) expect(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")).toContain(String(APP_STACK_SECRET_MIN_LENGTH));
+    expect(refused.sets).toEqual([[5, { "param:admin_password": appStackRefusalText(en, "VALIDATION_ERROR", "value_too_short") }]]);
+    expect(JSON.stringify(refused.sets)).not.toContain(short);
+  });
+
   it("Next accepts text that only looks like a mark: PHP settings, other HP_ text", () => {
     const values = secretsRef({ admin_password: "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\n", api_token: "SHP_X=1 HP_HOME=/x" });
     for (const title of ["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "ends with HP_TERMINAL_"]) {
@@ -620,13 +637,13 @@ describe("AppWizard after the application is created", () => {
     const retyped = { current: new Map<string, string>() };
     const again = wizard(failed, { 0: values, 2: retyped });
     const input = els(again.tree).find((e) => e.props.id === "app-param-api_token")!;
-    (input.props.onChange as (e: unknown) => void)({ target: { value: "short" } });
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "a shorter one" } });
     expect(again.sets).toEqual([]);
-    expect(retyped.current.get("api_token")).toBe("short");
+    expect(retyped.current.get("api_token")).toBe("a shorter one");
     fetchMock.mockReset();
     answer({ [`${AT}/secrets`]: [secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
     await click(again.tree, t.retry);
-    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "api_token", value: "short" }, {}]);
+    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "api_token", value: "a shorter one" }, {}]);
     expect(values.current.size).toBe(0);
     expect(retyped.current.size).toBe(0);
     expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
@@ -690,6 +707,23 @@ describe("AppWizard after the application is created", () => {
     const out = html(wizard({ ...state, 5: { "param:api_token": t.valueReserved } }, { 0: values, 2: retyped }).tree);
     expect(out).toContain(`id="app-param-api_token-note" class="text-xs text-destructive">${t.valueReserved}<`);
     expect(actions(wizard(state, { 0: values, 2: retyped }).tree)).toEqual([t.openApp, t.retry]);
+  });
+
+  it("a private value typed again shorter than the log reader masks is not sent: its field says why, as on the first step (BUG-43)", async () => {
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const retyped = { current: new Map<string, string>() };
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const { tree, sets } = wizard(state, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "Zq9ab" } });
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()).toEqual([]);
+    expect(sets).toContainEqual([5, { "param:api_token": appStackRefusalText(en, "VALIDATION_ERROR", "value_too_short") }]);
+    expect(sets).toContainEqual([6, t.secretFailed]);
+    expect(sets).toContainEqual([7, false]);
+    expect(JSON.stringify(sets)).not.toContain("Zq9ab");
+    expect(router.push).not.toHaveBeenCalled();
   });
 
   it("while a request runs the private values left cannot be typed into: a value typed meanwhile would be sent half-typed", () => {

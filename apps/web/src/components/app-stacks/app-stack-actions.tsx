@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   APP_STACK_PROCESS_MARK_PATTERN,
+  APP_STACK_SECRET_MIN_LENGTH,
   SetAppStackSecretInputSchema,
-  appStackEnqueueTarget,
+  type AppStackAllowedAction,
   type AppStackDetailDto,
   type AppStackPlanDiffDto,
   type AppStackStatus,
@@ -29,8 +30,10 @@ type PlanTarget = { templateVersionId: string } | { revisionId: string };
 type TypedSecret = { parameterKey: string; value: string };
 const SECRET_FIELD = "secrets.";
 
-export function stackActionEnabled(action: QueuedAction, status: AppStackStatus): boolean {
-  return appStackEnqueueTarget(`stack.${action}`, status) !== null;
+/** From the detail's `allowedActions`, never from the status shown: a crash shows failed but leaves the stored status the API decides with. */
+export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackAllowedAction[] | undefined): boolean {
+  // No list (an API older than the page): nothing is offered.
+  return (actions ?? []).includes(`stack.${action}`);
 }
 
 export function AppStackActions({
@@ -38,6 +41,7 @@ export function AppStackActions({
   stackId,
   csrfToken,
   status,
+  actions,
   upgrade,
   rollback,
 }: {
@@ -45,6 +49,7 @@ export function AppStackActions({
   stackId: string;
   csrfToken: string;
   status: AppStackStatus;
+  actions?: readonly AppStackAllowedAction[];
   upgrade: AppStackDetailDto["upgrade"];
   rollback: AppStackDetailDto["rollback"];
 }) {
@@ -86,7 +91,7 @@ export function AppStackActions({
   }
 
   const button = (action: QueuedAction, label: string, onClick: () => unknown) => (
-    <Button type="button" variant="outline" disabled={busy !== null || !stackActionEnabled(action, status)} onClick={onClick}>
+    <Button type="button" variant="outline" disabled={busy !== null || !stackActionEnabled(action, actions)} onClick={onClick}>
       {label}
     </Button>
   );
@@ -205,13 +210,16 @@ function PlanDialog({
   async function confirm() {
     if (!diff) return;
     const secrets = asked.map((wanted) => ({ parameterKey: wanted.key, value: inputs.current.get(wanted.key)?.value ?? "" }));
-    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041).
+    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041),
+    // and one shorter than the log reader masks (BUG-43), as the server would.
     const problems = secrets.flatMap((typed): [string, string][] =>
       !typed.value
         ? [[typed.parameterKey, m.apps.wizard.required]]
-        : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
-          ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
-          : [],
+        : typed.value.length < APP_STACK_SECRET_MIN_LENGTH
+          ? [[typed.parameterKey, appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")]]
+          : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
+            ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
+            : [],
     );
     if (problems.length > 0) return setFieldErrors(Object.fromEntries(problems));
     setFieldErrors({});

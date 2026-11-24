@@ -1,14 +1,21 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { APP_STACK_KEY_PATTERN, APP_STACK_SECRET_CONTENT_MAX_CHARS } from "@hosting-panel/contracts";
+import {
+  APP_STACK_KEY_PATTERN,
+  APP_STACK_SECRET_CONTENT_MAX_CHARS,
+  APP_STACK_SECRET_DIR,
+  APP_STACK_SECRET_MIN_LENGTH,
+  appStackSecretFilePath,
+} from "@hosting-panel/contracts";
 import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 import { purgeServiceSecrets, writeServiceSecrets } from "../docker-engine-adapter.js";
 import { ExecutorCodedError } from "../traefik-config.js";
-import { decodeAppStackSecretEnvLabel } from "./container-payload.js";
+import { APP_STACK_SECRET_BIND_PATTERN, decodeAppStackSecretEnvLabel } from "./container-payload.js";
 import { APP_STACK_LABELS, appStackSecretDirKey } from "./names.js";
 
 export const APP_STACK_LOG_MASK = "[REDACTED]";
-export const APP_STACK_LOG_MASK_MIN_LENGTH = 6;
+/** The panel refuses a new secret value shorter than this, so every value it masks is at least this long. */
+export const APP_STACK_LOG_MASK_MIN_LENGTH = APP_STACK_SECRET_MIN_LENGTH;
 
 /** Non-additive: files of keys the component no longer mounts are zero-overwritten and unlinked; a root-owned dir is set aside. */
 export async function writeAppStackComponentSecrets(
@@ -42,6 +49,76 @@ export async function purgeAppStackSecrets(secretsRootDir: string, stackId: stri
   }
 }
 
+/** The component's secret folder, resolved the way `assertAppStackPayloadHardening` resolves it for the binds. */
+function appStackComponentSecretDir(secretsRootDir: string, stackId: string, componentKey: string): string {
+  return path.join(path.resolve(secretsRootDir), appStackSecretDirKey(stackId, componentKey));
+}
+
+/** Whether a bind to this target gives the container something under `/run/secrets`: that folder, a path under it, or a
+ *  folder holding it (`/run`, `/`), however the target is spelled. */
+function holdsAppStackSecretDir(target: string): boolean {
+  const seen = path.posix.normalize(`${target}/`); // one trailing slash: "/run/secrets/k/", "/run/", "/"
+  const dir = `${APP_STACK_SECRET_DIR}/`;
+  return seen.startsWith(dir) || dir.startsWith(seen);
+}
+
+/** The names of the secret files a container was given, from the `HostConfig` of its inspect. A secret file is known by
+ *  where the container sees it, not by where it comes from: every bind whose target holds `/run/secrets` (see
+ *  `holdsAppStackSecretDir`) must be exactly the bind the executor makes, `<component folder>/<key>:/run/secrets/<key>:ro`
+ *  (the folder derived here), and gives the name <key>. A bind to any other target is not a secret file: it does not
+ *  count. No path taken from a bind is ever opened. Binds null or absent is a container created with none (Docker's
+ *  answer then). null when the binds cannot tell, or tell of a file the executor cannot name: no HostConfig, Binds not
+ *  a list, an entry that is not a `source:target[:mode]` bind, or a bind to `/run/secrets` that is not the executor's
+ *  own (from another folder, such as an earlier secrets root, the folder itself, a nested path, writable, the target
+ *  spelled otherwise). */
+export function appStackContainerSecretFileNames(secretsRootDir: string, stackId: string, componentKey: string, hostConfig: unknown): string[] | null {
+  if (typeof hostConfig !== "object" || hostConfig === null) return null;
+  const binds: unknown = (hostConfig as { readonly Binds?: unknown }).Binds ?? [];
+  if (!Array.isArray(binds)) return null;
+  const dir = appStackComponentSecretDir(secretsRootDir, stackId, componentKey);
+  const names: string[] = [];
+  for (const bind of binds as unknown[]) {
+    if (typeof bind !== "string") return null;
+    // Docker splits a bind at every colon, so neither its source nor its target holds one.
+    const parts = bind.split(":");
+    const [source = "", target = ""] = parts;
+    if (parts.length < 2 || parts.length > 3 || source === "" || target === "") return null;
+    if (!holdsAppStackSecretDir(target)) continue;
+    const name = APP_STACK_SECRET_BIND_PATTERN.exec(bind)?.[1];
+    if (name === undefined || bind !== `${path.join(dir, name)}:${appStackSecretFilePath(name)}:ro`) return null;
+    names.push(name);
+  }
+  return names;
+}
+
+/** Contents of the regular files of the component's secret folder, which also holds the values of its environment
+ *  secrets. null when one of `expected` (the secret files its container was given) is not in the folder as a regular
+ *  file (a host reboot empties the tmpfs, and Docker then recreates a missing bind source as a directory), when the
+ *  folder cannot be read while a file is expected, or when a file cannot be read. With no file expected, a folder
+ *  that cannot be read gives [] (a component without secrets has none). */
+export async function readAppStackComponentSecretFiles(
+  secretsRootDir: string,
+  stackId: string,
+  componentKey: string,
+  expected: readonly string[],
+): Promise<string[] | null> {
+  const dir = appStackComponentSecretDir(secretsRootDir, stackId, componentKey);
+  let names: string[];
+  try {
+    names = (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name);
+  } catch {
+    return expected.length === 0 ? [] : null;
+  }
+  if (expected.some((name) => !names.includes(name))) return null;
+  try {
+    const values: string[] = [];
+    for (const name of names) values.push((await readFile(path.join(dir, name), "utf8")).slice(0, APP_STACK_SECRET_CONTENT_MAX_CHARS));
+    return values;
+  } catch {
+    return null;
+  }
+}
+
 /** Best effort: contents of the regular files of the component dir; [] on any error. */
 export async function readAppStackComponentSecretValues(
   secretsRootDir: string,
@@ -49,15 +126,32 @@ export async function readAppStackComponentSecretValues(
   componentKey: string,
 ): Promise<string[]> {
   try {
-    const dir = path.join(secretsRootDir, appStackSecretDirKey(stackId, componentKey));
-    const values: string[] = [];
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.isFile()) values.push((await readFile(path.join(dir, entry.name), "utf8")).slice(0, APP_STACK_SECRET_CONTENT_MAX_CHARS));
-    }
-    return values;
+    return (await readAppStackComponentSecretFiles(secretsRootDir, stackId, componentKey, [])) ?? [];
   } catch {
-    return [];
+    return []; // an identifier the folder name refuses
   }
+}
+
+/** What a reader of a component's output needs from its inspected container. */
+export interface AppStackInspectedContainer {
+  readonly labels: Readonly<Record<string, string>> | null | undefined;
+  readonly env: readonly string[] | null | undefined;
+  /** The `HostConfig` of the inspect, as it came. */
+  readonly hostConfig: unknown;
+}
+
+/** The values a reader of a component's output masks, from its inspected container alone: every secret file it was
+ *  given must be bound from the component's folder and be a regular file there (see `appStackContainerSecretFileNames`),
+ *  else, like any value that cannot be established, it throws "cannot be masked" before a line is read. A container with
+ *  no secret bind needs no folder. */
+export async function appStackContainerMaskValues(
+  secretsRootDir: string,
+  ref: { readonly stackId: string; readonly componentKey: string },
+  container: AppStackInspectedContainer,
+): Promise<string[]> {
+  const expected = appStackContainerSecretFileNames(secretsRootDir, ref.stackId, ref.componentKey, container.hostConfig);
+  const files = expected === null ? null : await readAppStackComponentSecretFiles(secretsRootDir, ref.stackId, ref.componentKey, expected);
+  return appStackLogMaskValues(ref.componentKey, container, files);
 }
 
 /** The secrets inside one environment value, by its pieces (template text, null = a secret): null when the value does
@@ -97,29 +191,35 @@ function splitAppStackSecretValue(value: string, pieces: readonly (string | null
   return starts.map((start, i) => value.slice(start, ends[i]));
 }
 
-/** The values the log reader masks: the component's secret files (`fileValues`) and the environment secrets its
- *  container holds, which its label names and its own Config.Env gives, so they outlive the tmpfs (a reboot). Throws,
- *  before any log is read, when they cannot be established: a label that is not the executor's, a name that is not
- *  once in the environment, a value without the label's text, or a value only the files can split and no file. */
+/** The values the log reader masks: the component's secret files (`fileValues`, null when they cannot be established:
+ *  see `readAppStackComponentSecretFiles`) and the environment secrets its container holds, which its label names and
+ *  its own Config.Env gives, so they outlive the tmpfs (a reboot). Throws, before any log is read, when they cannot be
+ *  established: no file values, a label that is not the executor's, a name that is not once in the environment, a
+ *  value without the label's text, a value only the files can split and no file, or a value too short to mask (stored
+ *  before the panel's minimum). */
 export function appStackLogMaskValues(
   componentKey: string,
   container: { readonly labels: Readonly<Record<string, string>> | null | undefined; readonly env: readonly string[] | null | undefined },
-  fileValues: readonly string[],
+  fileValues: readonly string[] | null,
 ): string[] {
   const unmaskable = () => new ExecutorCodedError(`The logs of component ${componentKey} cannot be masked`, "DOCKER_ENGINE_UNAVAILABLE");
-  const label = container.labels?.[APP_STACK_LABELS.secretEnvironment];
-  if (label === undefined) return [...fileValues];
-  const entries = decodeAppStackSecretEnvLabel(label);
-  const env = container.env;
-  if (entries === null || !Array.isArray(env)) throw unmaskable();
+  if (fileValues === null) throw unmaskable();
   const values = [...fileValues];
-  for (const { name, pieces } of entries) {
-    const found = env.filter((entry) => typeof entry === "string" && entry.startsWith(`${name}=`));
-    if (found.length !== 1) throw unmaskable();
-    const parts = splitAppStackSecretValue((found[0] ?? "").slice(name.length + 1), pieces);
-    if (parts === null || (parts === "ambiguous" && fileValues.length === 0)) throw unmaskable();
-    if (parts !== "ambiguous") values.push(...parts);
+  const label = container.labels?.[APP_STACK_LABELS.secretEnvironment];
+  if (label !== undefined) {
+    const entries = decodeAppStackSecretEnvLabel(label);
+    const env = container.env;
+    if (entries === null || !Array.isArray(env)) throw unmaskable();
+    for (const { name, pieces } of entries) {
+      const found = env.filter((entry) => typeof entry === "string" && entry.startsWith(`${name}=`));
+      if (found.length !== 1) throw unmaskable();
+      const parts = splitAppStackSecretValue((found[0] ?? "").slice(name.length + 1), pieces);
+      if (parts === null || (parts === "ambiguous" && fileValues.length === 0)) throw unmaskable();
+      if (parts !== "ambiguous") values.push(...parts);
+    }
   }
+  // maskAppStackLogLines skips a shorter value, which the lines would then show as it is.
+  if (values.some((value) => value.length < APP_STACK_LOG_MASK_MIN_LENGTH)) throw unmaskable();
   return values;
 }
 
@@ -173,13 +273,28 @@ function buildAutomaton(needles: readonly string[]): Automaton {
   return automaton;
 }
 
-/** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]", and so
- *  does a line end of >= 6 characters that starts a value or a line start that ends one (a value whose other part is
- *  in a frame the read did not return); overlapping matches are merged first, so no part of either value stays
- *  visible. Pure; one pass over each line in each direction, whatever the values. */
+/** A value as written, and as a URL (percent-encoded) or a form (a space as +) writes it, when that differs. */
+function appStackLogValueForms(value: string): string[] {
+  let encoded: string;
+  try {
+    encoded = encodeURIComponent(value);
+  } catch {
+    // An unpaired surrogate cannot be percent-encoded, so no URL carries the value encoded.
+    return [value];
+  }
+  return [value, encoded, encoded.replace(/%20/g, "+")];
+}
+
+/** Every match of each value (and of each line of a multi-line value, and of its percent-encoded forms) of length >= 6
+ *  becomes "[REDACTED]", and so does a line end of >= 6 characters that starts a value or a line start that ends one
+ *  (a value whose other part is in a frame the read did not return); overlapping matches are merged first, so a longer
+ *  form and the value inside it become one mask and no part of either stays visible. Pure; one pass over each line in
+ *  each direction, whatever the values. */
 export function maskAppStackLogLines(lines: readonly ServiceLogLine[], values: readonly string[]): ServiceLogLine[] {
   const min = APP_STACK_LOG_MASK_MIN_LENGTH;
-  const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter((needle) => needle.length >= min);
+  const needles = [...new Set(values.flatMap(appStackLogValueForms).flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter(
+    (needle) => needle.length >= min,
+  );
   const forward = buildAutomaton(needles);
   const backward = buildAutomaton(needles.map((needle) => needle.split("").reverse().join("")));
   const longest = needles.reduce((max, needle) => Math.max(max, needle.length), 0);

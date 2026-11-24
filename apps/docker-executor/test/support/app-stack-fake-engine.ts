@@ -22,6 +22,11 @@ export interface FakeVolume {
   Labels: Labels;
   Options: Record<string, string> | null;
 }
+
+export interface FakeHostConfig {
+  Binds?: string[] | null;
+}
+
 export interface FakeContainer {
   Id: string;
   Name: string;
@@ -29,6 +34,8 @@ export interface FakeContainer {
   Labels: Labels;
   /** Config.Env of an inspect: the create body's Env. */
   Env: string[];
+  /** HostConfig of an inspect: the create body's Binds, as given (null when it gave none); null = an inspect without one. */
+  HostConfig: FakeHostConfig | null;
   body: unknown;
   State: {
     Status: string;
@@ -240,7 +247,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
         const name = url.searchParams.get("name") ?? "";
         if (containers.has(name)) return reply(409, { message: `Conflict. The container name "/${name}" is already in use` });
         if (!images.has(String(input.Image))) return reply(404, { message: "No such image" });
-        const host = (input.HostConfig ?? {}) as { NetworkMode?: string; Mounts?: Array<{ Source: string }> };
+        const host = (input.HostConfig ?? {}) as { NetworkMode?: string; Mounts?: Array<{ Source: string }>; Binds?: string[] };
         const endpoints = Object.keys(
           ((input.NetworkingConfig as { EndpointsConfig?: Record<string, unknown> } | undefined)?.EndpointsConfig) ?? {},
         );
@@ -254,6 +261,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           Image: String(input.Image),
           Labels: { ...((input.Labels as Labels | undefined) ?? {}) },
           Env: [...((input.Env as string[] | undefined) ?? [])],
+          HostConfig: { Binds: host.Binds === undefined ? null : [...host.Binds] },
           body,
           State: { Status: "created", Running: false, Restarting: false, ExitCode: 0, OOMKilled: false, StartedAt: "0001-01-01T00:00:00Z" },
           RestartCount: 0,
@@ -275,6 +283,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           Id: container.Id,
           Name: `/${container.Name}`,
           Config: { Image: container.Image, Labels: container.Labels, Env: container.Env },
+          ...(container.HostConfig === null ? {} : { HostConfig: container.HostConfig }),
           State: container.State,
           RestartCount: container.RestartCount,
           NetworkSettings: {

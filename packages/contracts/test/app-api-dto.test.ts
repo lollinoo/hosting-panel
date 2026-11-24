@@ -45,7 +45,8 @@ import {
   SetAppStackSecretInputSchema,
   UpgradeAppStackInputSchema,
 } from "../src/app-templates/stack-dto.js";
-import { AppStackSecretFileContentSchema } from "../src/app-templates/stack-ipc.js";
+import { APP_SECRET_GENERATE_BOUNDS } from "../src/app-templates/limits.js";
+import { APP_STACK_SECRET_MIN_LENGTH, AppStackSecretFileContentSchema } from "../src/app-templates/stack-ipc.js";
 import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys } from "../src/resources.js";
 
 const fixture = (name: string): unknown =>
@@ -147,6 +148,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDetailDtoSchema,
     {
       ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, platformWork: "backups_cleanup", revisionNumber: 1,
+      allowedActions: ["stack.stop", "stack.restart"], outcomeUnknown: false,
       installed: null,
       components: [{ key: "app", health: "healthy", healthObservedAt: AT, dependsOn: ["cache"], ingress: true, cpuMilli: 1000, memoryBytes: "536870912" }],
       parameters: [{ key: "workers", label: "Workers", value: 2 }],
@@ -198,7 +200,7 @@ defaultVersionNumber installations componentCount hasIngress hasVolumes updatedA
 versionId created templateId source stacks organizationId organizationName status truncated cpuMilli memoryBytes volumeCount templates
 categories ingress components key componentKey port hostname templateVersionId domains deploy revisionId planHash confirmName
 destroyData parameterKey value limit cursor tail stackId operationId deploymentId links stack operation templateName
-templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork revisionNumber health healthObservedAt dependsOn label
+templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork allowedActions outcomeUnknown revisionNumber health healthObservedAt dependsOn label
 secretParameters required isSet version setAt volumes retentionPolicy upgrade rollback kind problem startedAt endedAt certificateStatus
 certificateProblem certificateExpiresAt checkedAt fromRevisionId fromVersionNumber toTemplateVersionId toVersionNumber newRevision
 change restart downtime dataRisk lines at stream text observedAt stale newSecrets secrets`.split(/\s+/);
@@ -232,7 +234,7 @@ const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["upgrade", UpgradeAppStackInputSchema, { templateVersionId: "atv_demo_2", planHash: HASH }, true],
   ["rollback", RollbackAppStackInputSchema, { revisionId: "astr_1", planHash: HASH }, true],
   ["delete", DeleteAppStackInputSchema, { confirmName: "My notes", destroyData: false }, true],
-  ["secret", SetAppStackSecretInputSchema, { parameterKey: "app_secret", value: "v" }, true],
+  ["secret", SetAppStackSecretInputSchema, { parameterKey: "app_secret", value: "v4lue6" }, true],
   ["add domain", AddAppStackDomainInputSchema, { hostname: "notes.example.com", componentKey: "app", port: 8080 }, true],
   ["stack list query", AppStackListQuerySchema, { limit: "10" }, false],
   ["logs query", AppStackLogsQuerySchema, { tail: "10" }, false],
@@ -255,6 +257,14 @@ describe("a new web address and compression (ADR-0037)", () => {
       domains: [{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }],
     });
     expect(made.domains).toEqual([{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }]);
+  });
+});
+
+describe("the actions a detail offers (issue #106)", () => {
+  it("take the backup and the restore of the backups section, never work of the platform", () => {
+    const offered = AppStackDetailDtoSchema.shape.allowedActions;
+    expect(offered.safeParse(["stack.restart", "stack.backup", "stack.restore"]).success).toBe(true);
+    expect(offered.safeParse(["stack.prune"]).success).toBe(false);
   });
 });
 
@@ -311,15 +321,16 @@ describe("app API input schemas", () => {
   it("an upgrade carries each private value once, under the rule of the private values route", () => {
     const base = { templateVersionId: "atv_demo_2", planHash: HASH };
     const parse = (secrets: unknown): boolean => UpgradeAppStackInputSchema.safeParse({ ...base, secrets }).success;
-    expect(parse([{ parameterKey: "mail_password", value: "v" }])).toBe(true);
+    const v = "v4lue6";
+    expect(parse([{ parameterKey: "mail_password", value: v }])).toBe(true);
     expect(parse([])).toBe(true);
-    expect(parse([{ parameterKey: "mail_password", value: "v" }, { parameterKey: "mail_password", value: "w" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: v }, { parameterKey: "mail_password", value: "w4lue6" }])).toBe(false);
     expect(parse([{ parameterKey: "mail_password", value: "" }])).toBe(false);
-    expect(parse([{ parameterKey: "mail_password", value: "a\u0000b" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "a\u0000bcdef" }])).toBe(false);
     expect(parse([{ parameterKey: "mail_password", value: "v".repeat(16_385) }])).toBe(false);
-    expect(parse([{ parameterKey: "hp_reserved", value: "v" }])).toBe(false);
-    expect(parse([{ parameterKey: "mail_password", value: "v", version: 1 }])).toBe(false);
-    expect(parse(Array.from({ length: 9 }, (_, i) => ({ parameterKey: `k${String(i)}`, value: "v" })))).toBe(false);
+    expect(parse([{ parameterKey: "hp_reserved", value: v }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: v, version: 1 }])).toBe(false);
+    expect(parse(Array.from({ length: 9 }, (_, i) => ({ parameterKey: `k${String(i)}`, value: v })))).toBe(false);
   });
 
   it("a plan previews a version or a revision, and a rollback takes no parameters", () => {
@@ -370,15 +381,44 @@ describe("app API input schemas", () => {
   it("a secret value refuses C0 controls but tab and line breaks, and unpaired surrogates, with the executor's rule", () => {
     const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
     for (let unit = 0; unit < 0x20; unit += 1) {
-      expect(parse(`Zq9${String.fromCharCode(unit)}`).success, String(unit)).toBe([0x09, 0x0a, 0x0d].includes(unit));
+      expect(parse(`Zq9abc${String.fromCharCode(unit)}`).success, String(unit)).toBe([0x09, 0x0a, 0x0d].includes(unit));
     }
-    for (const value of ["Zq9\ud800", "\udfffZq9", "Zq9\udc00\ud800"]) {
+    for (const value of ["Zq9abc\ud800", "\udfffZq9abc", "Zq9abc\udc00\ud800"]) {
       const refused = parse(value);
       expect(refused.success).toBe(false);
       expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
     }
     expect(parse("line 1\r\nline 2\u007f\u0085 \u{1f511}").success).toBe(true);
-    expect(SetAppStackSecretInputSchema.shape.value).toBe(AppStackSecretFileContentSchema.shape.content);
+    for (const content of ["Zq9abc\u0000", "Zq9abc\ud800"]) {
+      expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "app_secret", version: 1, content }).success).toBe(false);
+    }
+  });
+
+  it("a new secret value has at least six characters, the shortest the log reader masks; a stored shorter one still starts", () => {
+    const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
+    expect(APP_STACK_SECRET_MIN_LENGTH).toBe(6);
+    expect(parse("Zq9abc").success).toBe(true);
+    for (const value of ["Zq9ab", "Zq9", ""]) {
+      const refused = parse(value);
+      expect(refused.success, value).toBe(false);
+      expect(refused.error?.issues[0]).toMatchObject({ path: ["value"], code: "too_small" });
+      if (value !== "") expect(JSON.stringify(refused.error?.issues)).not.toContain(value);
+    }
+    // An upgrade is the other request that stores a new value: the same minimum, on that entry's value.
+    const upgrade = (value: string) =>
+      UpgradeAppStackInputSchema.safeParse({ templateVersionId: "atv_demo_2", planHash: HASH, secrets: [{ parameterKey: "app_secret", value }] });
+    expect(upgrade("Zq9abc").success).toBe(true);
+    for (const value of ["Zq9ab", "Zq9", ""]) {
+      const refused = upgrade(value);
+      expect(refused.success, value).toBe(false);
+      expect(refused.error?.issues[0]).toMatchObject({ path: ["secrets", 0, "value"], code: "too_small" });
+      if (value !== "") expect(JSON.stringify(refused.error?.issues)).not.toContain(value);
+    }
+    // The executor's schema of the values sent at a start is not held to it: a value stored before the minimum is read.
+    expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "app_secret", version: 1, content: "Z" }).success).toBe(true);
+    expect(SetAppStackSecretInputSchema.shape.value.maxLength).toBe(AppStackSecretFileContentSchema.shape.content.maxLength);
+    // A generated value is never shorter either.
+    for (const [kind, { min }] of Object.entries(APP_SECRET_GENERATE_BOUNDS)) expect(min, kind).toBeGreaterThanOrEqual(APP_STACK_SECRET_MIN_LENGTH);
   });
 
   it("a secret value never carries the mark of a platform process: an image may put the file's content in its environment", () => {
