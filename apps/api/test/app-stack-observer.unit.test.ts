@@ -5,6 +5,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackLinks,
   appStackRevisions,
   appStacks,
   appTemplates,
@@ -23,6 +24,7 @@ import {
 } from "@hosting-panel/database";
 import { APP_STACK_EXECUTOR_METHODS, type CertificateStatusReport, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { APP_STACK_LINK_RETRY_BATCH, AppStackLinksApplier } from "../src/app-stacks/app-stack-links-applier.js";
 import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.service.js";
 import {
   APP_STACK_OBSERVE_BATCH,
@@ -102,6 +104,13 @@ describe("AppStackObserverService (PGlite)", () => {
         const read = () => (failing.has(req.stackId) ? Promise.reject(new Error("engine down")) : Promise.resolve(observation(req.stackId)));
         return held ? held.then(read) : read();
       },
+      isRuntimeAvailable: true,
+      // Only an applier given to the test asks it: every link is attached.
+      syncAppStackLinks: (req: { stackId: string; consumerStackIds: string[] }) => {
+        calls.push({ method: "syncAppStackLinks", stackId: req.stackId });
+        const links = req.consumerStackIds.map((consumerStackId) => ({ consumerStackId, outcome: "connected" }));
+        return Promise.resolve({ container: true, links, disconnected: [] });
+      },
       getCertificateStatus: () => {
         calls.push({ method: "getCertificateStatus" });
         return reportFails ? Promise.reject(new Error("proxy down")) : Promise.resolve(report);
@@ -134,11 +143,15 @@ describe("AppStackObserverService (PGlite)", () => {
     desiredDiffers?: boolean;
     routesHash?: string | null;
     domains?: readonly Partial<typeof appStackDomains.$inferInsert>[];
+    /** Keeps only this component of the fixture plan, with no volume and no address: a database that can be linked. */
+    only?: string;
   }): Promise<Seeded> {
     counter += 1;
     const id = `stk_obs_${String(counter).padStart(3, "0")}`;
     const revisionId = `astr_obs_${String(counter)}`;
-    const plan: ApprovedStackPlan = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
+    const full: ApprovedStackPlan = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
+    const plan: ApprovedStackPlan =
+      input.only === undefined ? full : { ...full, components: full.components.filter((c) => c.key === input.only), volumes: [], ingress: [] };
     await db()
       .insert(appStacks)
       .values({
@@ -412,6 +425,34 @@ describe("AppStackObserverService (PGlite)", () => {
       expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([null, null]);
       expect((await domainRow("off.example.com")).dnsStatus).toBe("unchecked");
       expect(await db().select().from(operations)).toEqual([]);
+    });
+  });
+
+  describe("links pass", () => {
+    it("a database whose version cannot be linked moves behind the others, so a full batch of them never hides one that can", async () => {
+      const application = await seedStack({ status: "running" });
+      // The fixture plan has two components: nothing can be attached, the executor is not asked.
+      const unusable: string[] = [];
+      for (let i = 0; i < APP_STACK_LINK_RETRY_BATCH; i += 1) unusable.push((await seedStack({ status: "running" })).id);
+      const linkable = await seedStack({ status: "running", only: "cache" });
+      // The two-component databases waited longest, and fill the batch; one of them is also shown as connected elsewhere.
+      const link = (i: number, consumerStackId: string, providerStackId: string, state: "pending" | "active") =>
+        db()
+          .insert(appStackLinks)
+          .values({ id: `slnk_obs_${String(i)}`, organizationId: ORG, consumerStackId, providerStackId, state, updatedAt: at(-60 + i) });
+      for (const [i, providerStackId] of [...unusable, linkable.id].entries()) await link(i, application.id, providerStackId, "pending");
+      await link(99, (await seedStack({ status: "running" })).id, unusable[0]!, "active");
+      const links = new AppStackLinksApplier(client, executor(), { runtimeBackend: "local-simulator" } as ControlPlaneRuntimeConfig);
+
+      await links.retry();
+      await links.retry();
+
+      expect(calls.filter((c) => c.method === "syncAppStackLinks").map((c) => c.stackId)).toEqual([linkable.id]);
+      const rows = await db().select().from(appStackLinks);
+      expect(rows.filter((row) => row.providerStackId === linkable.id).map((row) => row.state)).toEqual(["active"]);
+      // Reported as a link the server could not be asked for: waiting, not connected.
+      const waiting = rows.filter((row) => unusable.includes(row.providerStackId)).map((row) => row.state);
+      expect(waiting).toEqual(Array.from({ length: APP_STACK_LINK_RETRY_BATCH + 1 }, () => "pending"));
     });
   });
 

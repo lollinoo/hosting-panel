@@ -83,8 +83,9 @@ export class AppStackLinksApplier {
 
   /**
    * The observer's pass: databases with a link still to attach or to detach, the one that waited longest first, within
-   * APP_STACK_LINK_RETRY_BUDGET_MS. A database the server was asked for has its rows touched (settle or unsettle), so it
-   * moves behind every one this pass did not reach, and the next pass begins with those. Never throws.
+   * APP_STACK_LINK_RETRY_BUDGET_MS. A database this pass reached has its rows touched (settle or unsettle, also when its
+   * version cannot be asked for), so it moves behind every one this pass did not reach, and the next pass begins with
+   * those. Never throws.
    */
   public async retry(): Promise<void> {
     try {
@@ -131,8 +132,11 @@ export class AppStackLinksApplier {
     const components = rollout?.components ?? (await this.#components(provider, revisionId));
     const [only, ...others] = components ?? [];
     const port = this.#port();
-    // More than one component, a stored version that cannot be read, or no server to ask: the rows stay as they are.
-    if (only === undefined || others.length > 0 || port === null) return;
+    // No server to ask: the rows stay as they are.
+    if (port === null) return;
+    // More than one component, or a stored version that cannot be read: the server cannot be asked. As when it does not
+    // answer, nothing is known, and the touch moves the database behind the others in the retry order.
+    if (only === undefined || others.length > 0) return unsettleAppStackLinks(db, providerStackId);
 
     let result: AppStackLinksIpcResult;
     try {
