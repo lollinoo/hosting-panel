@@ -48,6 +48,10 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
     # a stack that is not deleted (draft included): an older release has no code for it
     out="$(_hp_features_psql "${pw}" "select 'app-stacks' where exists (select 1 from public.app_stacks where deleted_at is null)")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
+    # a stack that is not deleted and is on a template version of the extended format (HCP-STACK/v2), or keeps a
+    # revision written in it: a release that knows only the first format cannot read that plan (ADR-0036)
+    out="$(_hp_features_psql "${pw}" "select 'app-format-v2' where exists (select 1 from public.app_stacks s where s.deleted_at is null and (exists (select 1 from public.app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from public.app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1')))")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
   fi
   return 0
 }

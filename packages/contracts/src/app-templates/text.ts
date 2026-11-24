@@ -99,6 +99,12 @@ export function appStackSecretEnvNameProblem(name: string): "invalid" | null {
   return base === "" || isReservedEnvName(name) || isReservedEnvName(base) ? "invalid" : null;
 }
 
+/** Environment secret (v2): the name of a variable that carries a secret value. Same rule as a value name; it may
+ *  look like a secret, which is its purpose. A name ending in "_FILE" is a secret file, not an environment secret. */
+export function appStackSecretEnvironmentNameProblem(name: string): "invalid" | "reserved" | null {
+  return appStackEnvValueNameProblem(name);
+}
+
 export function appStackHealthPathProblem(path: string): "invalid" | null {
   return !APP_STACK_HEALTH_PATH_PATTERN.test(path) || path.includes("//") || hasDotSegment(path) ? "invalid" : null;
 }

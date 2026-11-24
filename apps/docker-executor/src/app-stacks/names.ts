@@ -6,7 +6,7 @@ import {
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { ExecutorCodedError, assertSafeIdentifier } from "../traefik-config.js";
-import { encodeAppStackHealthLabel } from "./container-payload.js";
+import { encodeAppStackHealthLabel, encodeAppStackSecretEnvLabel } from "./container-payload.js";
 
 function checked(value: string, pattern: RegExp, fieldName: string): string {
   if (typeof value !== "string" || !pattern.test(value)) {
@@ -53,6 +53,8 @@ export const APP_STACK_LABELS = Object.freeze({
   revisionId: "io.hostingpanel.app_revision_id",
   startIndex: "io.hostingpanel.app_start_index",
   health: "io.hostingpanel.app_health",
+  /** Only on a component with environment secrets (v2): their names and template text, never a value. */
+  secretEnvironment: "io.hostingpanel.app_secret_env",
   volumeKey: "io.hostingpanel.app_volume_key",
 } as const);
 export const APP_STACK_COMPONENT_ROLE = "app_component" as const;
@@ -61,6 +63,7 @@ export function appStackComponentLabels(plan: ApprovedStackPlan, componentKey: s
   const index = plan.components.findIndex((component) => component.key === componentKey);
   const component = plan.components[index];
   if (component === undefined) throw new RangeError(`Unknown stack component: ${componentKey}`);
+  const secretEnvironment = encodeAppStackSecretEnvLabel(component);
   return Object.freeze({
     [APP_STACK_LABELS.managed]: "true",
     [APP_STACK_LABELS.role]: APP_STACK_COMPONENT_ROLE,
@@ -71,6 +74,7 @@ export function appStackComponentLabels(plan: ApprovedStackPlan, componentKey: s
     [APP_STACK_LABELS.revisionId]: plan.revisionId,
     [APP_STACK_LABELS.startIndex]: String(index),
     [APP_STACK_LABELS.health]: encodeAppStackHealthLabel(component.healthcheck),
+    ...(secretEnvironment === null ? {} : { [APP_STACK_LABELS.secretEnvironment]: secretEnvironment }),
   });
 }
 

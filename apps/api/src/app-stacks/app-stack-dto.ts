@@ -117,8 +117,9 @@ export function appStackDetailDto(input: {
         return label === undefined ? [] : [{ key: row.parameterKey, label, value: row.publicValue }];
       })
       .sort((a, b) => byText(a.key, b.key)),
+    // A secret the platform generated and the customer may not replace (ADR-0036) is not listed.
     secretParameters: spec.parameters.flatMap((p) => {
-      if (p.type !== "secret") return [];
+      if (p.type !== "secret" || !p.customer) return [];
       const meta = latestSecrets.get(p.key);
       return [
         {

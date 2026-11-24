@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Extended application format, Compose importer and WordPress from the catalog (2026-11-24)
+*hosting-panel v0.10.0*
+
+**New Features**
+- **apps**: Extended application format, Compose importer and WordPress from the catalog
+
+---
+
 ### Show a refused save inside the site template details dialog (2026-11-24)
 *hosting-panel v0.9.3*
 

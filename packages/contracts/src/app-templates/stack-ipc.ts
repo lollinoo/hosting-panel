@@ -1,8 +1,15 @@
 import { z } from "zod";
 import type { ErrorCode } from "../errors.js";
 import { SiteHostRouteSchema } from "../ipc-schemas.js";
-import { APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
-import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema, AppStackPortSchema, AppTemplateParameterKeySchema } from "./limits.js";
+import { APP_STACK_IMAGE_LOOKUP_MAX_LENGTH, APP_STACK_IMAGE_LOOKUP_PATTERN, APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
+import {
+  APP_STACK_DIGEST_PATTERN,
+  APP_STACK_HASH_PATTERN,
+  APP_TEMPLATE_LIMITS,
+  AppStackKeySchema,
+  AppStackPortSchema,
+  AppTemplateParameterKeySchema,
+} from "./limits.js";
 import { ApprovedStackPlanSchema } from "./plan.js";
 import { AppEntityIdSchema, AppForeignIdSchema } from "./stack-ids.js";
 import { MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
@@ -62,7 +69,7 @@ export const AppStackSecretFileContentSchema = z
   })
   .strict();
 export type AppStackSecretFileContent = z.infer<typeof AppStackSecretFileContentSchema>;
-/** Transient: start/restart only; never persisted, logged or echoed. */
+/** Transient: start/restart, and create for environment secrets; never persisted, logged or echoed. */
 export const AppStackSecretFileContentsSchema = z
   .array(AppStackSecretFileContentSchema)
   .max(APP_TEMPLATE_LIMITS.secretParameters)
@@ -74,9 +81,28 @@ export const AppStackSecretFileContentsSchema = z
     });
   });
 
-/** prepare, create. */
+/** prepare. */
 export const AppStackPlanIpcRequestSchema = z.object({ plan: ApprovedStackPlanSchema }).strict();
 export type AppStackPlanIpcRequest = z.infer<typeof AppStackPlanIpcRequestSchema>;
+/** create. `secretContents` is sent only for a plan with environment secrets (version 2): one entry per secret the
+ *  environment of some component references. Transient like `secretFileContents`: never persisted, logged or echoed. */
+export const AppStackCreateIpcRequestSchema = z
+  .object({ plan: ApprovedStackPlanSchema, secretContents: AppStackSecretFileContentsSchema.optional() })
+  .strict();
+export type AppStackCreateIpcRequest = z.infer<typeof AppStackCreateIpcRequestSchema>;
+/** Tag to digest for the Compose importer: "[registry/]repository[:tag]", no digest, no credentials. */
+export const AppStackImageResolveIpcRequestSchema = z
+  .object({ image: z.string().min(1).max(APP_STACK_IMAGE_LOOKUP_MAX_LENGTH).regex(APP_STACK_IMAGE_LOOKUP_PATTERN) })
+  .strict();
+export type AppStackImageResolveIpcRequest = z.infer<typeof AppStackImageResolveIpcRequestSchema>;
+export const AppStackImageResolveIpcResultSchema = z
+  .object({
+    image: z.string().min(1).max(APP_STACK_IMAGE_LOOKUP_MAX_LENGTH).regex(APP_STACK_IMAGE_LOOKUP_PATTERN),
+    /** The registry's digest of that reference (the index digest of a multi-platform image). */
+    digest: z.string().regex(APP_STACK_DIGEST_PATTERN),
+  })
+  .strict();
+export type AppStackImageResolveIpcResult = z.infer<typeof AppStackImageResolveIpcResultSchema>;
 export const AppStackPullIpcRequestSchema = z
   .object({ plan: ApprovedStackPlanSchema, image: z.string().regex(APP_STACK_PLAN_IMAGE_PATTERN) })
   .strict();

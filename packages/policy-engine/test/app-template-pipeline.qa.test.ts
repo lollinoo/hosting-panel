@@ -479,9 +479,10 @@ describe("every generated source goes through validate → compile → hash", ()
   it("changes the hash when the plan is edited after the fact, and with the template version only among the ids", () => {
     for (const c of CASES.slice(0, 60)) {
       const plan = planOf(c);
-      const first = plan.components[0];
+      const tampered = structuredClone(plan);
+      const first = tampered.components[0];
       if (first === undefined) throw new Error("a plan has at least one component");
-      const tampered: ApprovedStackPlan = { ...plan, components: [{ ...first, image: first.image.replace(/.$/, (digit) => (digit === "0" ? "1" : "0")) }, ...plan.components.slice(1)] };
+      first.image = first.image.replace(/.$/, (digit) => (digit === "0" ? "1" : "0"));
       expect(verifyAppStackPlanHash(tampered), `seed ${c.seed}`).toBe(false);
       expect(verifyAppStackPlanHash({ ...plan, planHash: "0".repeat(64) })).toBe(false);
       const otherIds = planOf(c, { ids: { ...IDS, stackId: "stk_other", organizationId: "org_other", hostAllocationId: "alloc_other", revisionId: "astr_other" } });

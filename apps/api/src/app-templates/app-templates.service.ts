@@ -2,8 +2,8 @@ import { Inject, Injectable } from "@nestjs/common";
 import {
   ADMIN_APP_STACKS_MAX,
   ADMIN_APP_TEMPLATE_USAGE_MAX,
-  APP_TEMPLATE_SPEC_VERSION,
   AppTemplateSpecSchema,
+  appTemplateInstallParameters,
   appTemplateState,
   type AddAppTemplateVersionInput,
   type AdminAppStacksDto,
@@ -123,7 +123,7 @@ function customerSummaryOf(row: AppTemplateRow, version: AppTemplateVersionRow, 
 
 const versionOf = (source: string, spec: AppTemplateSpec): NewAppTemplateVersion => ({
   source,
-  specVersion: APP_TEMPLATE_SPEC_VERSION,
+  specVersion: spec.schemaVersion,
   compiledSchema: spec as unknown as Record<string, unknown>,
   specHash: computeAppTemplateSpecHash(spec),
 });
@@ -398,7 +398,7 @@ export class AppTemplatesService {
     const { spec, summary } = offer;
     return {
       ...summary,
-      parameters: spec.parameters.filter((parameter) => parameter.customer),
+      parameters: appTemplateInstallParameters(spec.parameters),
       ingress: spec.ingress
         .map(({ service, port }) => ({ componentKey: service, port }))
         .sort((a, b) => byText(a.componentKey, b.componentKey) || a.port - b.port),

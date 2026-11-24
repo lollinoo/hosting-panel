@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type ApprovedStackPlan } from "@hosting-panel/contracts";
+import { type ApprovedStackPlan, type ApprovedStackPlanV1 } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppStackEngine, appStackNetworkLabels, type AppStackHealthProbe } from "../src/app-stacks/index.js";
 import type { AppStackRouteEntry } from "../src/traefik-config.js";
@@ -311,7 +311,7 @@ describe("A18: remove keeps the named volumes unless asked", () => {
 });
 
 describe("A19 (executor half): a changed component hash replaces only that component", () => {
-  const edit = (plan: ApprovedStackPlan, key: string, patch: object) =>
+  const edit = (plan: ApprovedStackPlanV1, key: string, patch: object) =>
     rehash({ ...plan, components: plan.components.map((c) => (c.key === key ? { ...c, ...patch } : c)) });
 
   it.each([
