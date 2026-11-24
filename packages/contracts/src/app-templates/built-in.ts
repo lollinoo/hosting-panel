@@ -461,7 +461,7 @@ const valkey: AppBuiltInTemplate = Object.freeze({
   description: VALKEY_DESCRIPTION,
   descriptionEn:
     "A Valkey key-value store, compatible with Redis, that keeps its data on disk. It holds up to 256 MB: when it is full it refuses new writes and keeps what it holds. Only your applications that you connect to it reach it, at the name and port its page shows; it cannot be reached from outside the server. It has no password.",
-  // The ceiling (256 MB) is unchanged and now told to the customer; the limit is twice it, so the process, its buffers and
+  // The ceiling (256 MB) is unchanged and now told to the customer; the limit is twice it, so the server, its buffers and
   // the copy of a snapshot or of an append-only rewrite fit above what the store may hold (swap is off: memory is all).
   source: valkeySource(VALKEY_DESCRIPTION, "512M"),
   // Version 1 as it shipped: the stores installed on it are offered version 2.
