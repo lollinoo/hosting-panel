@@ -412,18 +412,10 @@ names only the key of a task, and the command is read from the template version 
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`;
    the databases script uses the same prefix for a temp folder and `/dev/shm/<prefix>-secrets` only: it starts no
    proxy and creates no edge network), never prune, and clean up at the end, also on Ctrl-C.
-   One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
-   is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
-   it (in Docker that label has another value, which the script's gate translates in both directions). The engine
-   script and the HTTP cache script do not yet: when such a check falls inside their run, the server's proxy joins
-   the run's edge network, the removal steps fail with "A stack network is still used by another container" and
-   `nothing-left` reports a network. The server's proxy keeps serving and is not restarted. Repair: find the
-   network the run left (its name contains `swarmtest_<hex>`), detach the server's proxy from it, remove it:
-   ```bash
-   sudo docker network ls --filter name=swarmtest_
-   sudo docker network disconnect <network> hp_ingress_proxy
-   sudo docker network rm <network>
-   ```
+   The executor of the server's own panel attaches its proxy to every network whose role label is `app_edge`, whoever
+   created it, so every script that creates an edge network (the engine, HTTP cache and WordPress scripts) hides it:
+   in Docker that label has another value, which the script's gate translates in both directions, and the server's
+   proxy never joins a run's network.
    The backups script uses `hp_swarmtest_<hex>` too; its job containers are named `hp_bk_op_<hex>…`, plus one
    `hp_bk_test_<16 hex>` for the destination test. It gives its application no address, so it creates no edge network.
    Its job containers carry the role of the panel's own jobs (`site_job`), and `hp-docker-executor` removes such
