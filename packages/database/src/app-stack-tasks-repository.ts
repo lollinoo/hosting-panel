@@ -224,11 +224,14 @@ async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueA
         .where(and(eq(appStackTaskSchedules.stackId, stack.id), eq(appStackTaskSchedules.taskKey, input.taskKey)));
     }
     // The last runs of the task stay; a run that has not ended is the newest one (the locks allow one at a time).
+    // A run requested later than `now` was stamped by a clock that ran ahead: it is set aside, neither dropped nor
+    // counted, until real time reaches it, so the time it served is found by its run and not run a second time.
+    const asOf = sql`${now.toISOString()}::timestamptz`;
     await tx.execute(sql`
       DELETE FROM app_stack_task_runs
-      WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND ended_at IS NOT NULL AND id IN (
+      WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND ended_at IS NOT NULL AND requested_at <= ${asOf} AND id IN (
         SELECT id FROM app_stack_task_runs
-        WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey}
+        WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND requested_at <= ${asOf}
         ORDER BY requested_at DESC, id DESC
         OFFSET ${APP_STACK_TASK_LIMITS.runsKept}
       )`);
