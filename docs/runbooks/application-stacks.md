@@ -104,7 +104,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    The page enables only the buttons that the stored status, the stack's lock and the reader's permissions allow at
    that moment: `allowedActions` of `GET /v1/organizations/<orgId>/app-stacks/<stackId>`, never the status shown. It
    covers the backup and the restore of the **Backup** section too. While an operation holds the stack the list is
-   empty. An enabled button can still be refused for a reason of its own, and the page shows that refusal: a database
+   empty. A run of a task that waits for its turn does not change the list (the page follows it and every action stays
+   offered); once it runs it holds the stack like any operation. An enabled button can still be refused for a reason of its own, and the page shows that refusal: a database
    that applications still use, the hourly limit of backups and restores, a plan that no longer validates, or what the
    **Backup** section already names (backups not available on this server, no destination, no data). Two cases read
    differently on the page than in the database:

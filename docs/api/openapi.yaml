@@ -14771,9 +14771,11 @@ components:
                 it), else those the stored status allows (the transition table; a backup and a restore from `running`,
                 `degraded`, `failed` or `stopped`), kept to the ones the caller's permissions allow (`app.control` for
                 deploy, start, stop, restart, backup and restore, `app.update` for upgrade and rollback, `app.delete` for
-                delete; none for a suspended organisation). The `status` shown here also reflects the health of the
-                components (a crashed essential component reads `failed`, a stale reading `unknown`) and never changes
-                this list: an application that crashed keeps its stored `running` or `degraded`, so it offers
+                delete; none for a suspended organisation). A run of a task that waits for its turn (ADR-0042) holds a
+                lock of its own and does not change this list, though `activeOperationId` names it; once it runs it holds
+                the application like any operation, and the list is empty. The `status` shown here also reflects the
+                health of the components (a crashed essential component reads `failed`, a stale reading `unknown`) and
+                never changes this list: an application that crashed keeps its stored `running` or `degraded`, so it offers
                 `stack.restart`, not `stack.start`. Upgrade and rollback also need their target (`upgrade`, `rollback`).
                 A listed action can still be refused for a reason of its own, which its answer gives: a database that
                 applications still use (`VALIDATION_ERROR`, reason `database_in_use`), the hourly limit of backups and
