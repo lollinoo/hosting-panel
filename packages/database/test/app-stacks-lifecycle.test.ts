@@ -517,6 +517,69 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect((await listAppStackComponents(db(), scope)).map((c) => c.componentKey)).toEqual(["api", "cache", "web"]);
   });
 
+  it("a take-back counts the addresses being removed like live ones; one removed before the request never stops it (issue #112)", async () => {
+    const t = await template("sl-restore-removing");
+    const created = await create(orgA, { templateVersionId: t.versionId });
+    const scope = { organizationId: orgA, stackId: created.stack.id };
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: created.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: null,
+      appliedRevisionId: created.revision!.id,
+      appliedRoutesHash: hex("routes removing"),
+      appliedAddressesHash: hex("addresses removing"),
+    });
+    let stack = await ready(created.stack.id);
+    const v2 = await addAppTemplateVersion(db(), {
+      templateId: t.templateId,
+      createdBy: null,
+      version: { source: "source removing v2", specVersion: 1, compiledSchema: {}, specHash: hex("removing v2") },
+    });
+    await updateAppTemplate(db(), { templateId: t.templateId, defaultVersionId: v2.version.id });
+    const withApi: PlanOptions = {
+      templateVersionId: v2.version.id,
+      components: ["web", "cache", "api"],
+      ingress: [
+        { componentKey: "web", port: 8080 },
+        { componentKey: "api", port: 9000 },
+      ],
+    };
+    const failed = (write: AppStackWriteResult) =>
+      updateAppStackDeploymentTransactional(db(), {
+        ...scope,
+        deploymentId: write.deployment!.id,
+        deploymentStatus: "failed",
+        problem: "STACK_IMAGE_PULL_FAILED",
+        stackStatus: "failed",
+        restoreReplaced: true,
+      });
+    const removing = async () =>
+      (await listAppStackDomains(db(), { ...scope, includeRemoving: true }))
+        .filter((d) => d.removalRequestedAt !== null)
+        .map((d) => d.hostname)
+        .sort();
+
+    // Marked while nothing ran, as the API allows it: its pair is one of the revision the request replaces.
+    const [kept] = await domain(stack, "kept.takeback.example", "web", 8080);
+    expect(await removeAppStackDomainTransactional(db(), { ...scope, domainId: kept!.id })).toBe(true);
+    const first = await enqueue(stack, "stack.upgrade", { plan: withApi });
+    expect(await failed(first)).toMatchObject({ desiredRevisionId: created.revision!.id, templateVersionId: t.versionId });
+    expect((await listAppStackComponents(db(), scope)).map((c) => c.componentKey)).toEqual(["cache", "web"]);
+    expect(await removing()).toEqual(["kept.takeback.example"]);
+
+    // An address on a part only the new revision has, marked while the request ran (the API refuses that removal until
+    // the request settles): it still references that part, so the target stays, as for a live one.
+    stack = await ready(stack.id);
+    const second = await enqueue(stack, "stack.upgrade", { plan: withApi });
+    const [api] = await domain(stack, "api.takeback.example", "api", 9000);
+    await db().update(appStackDomains).set({ removalRequestedAt: new Date() }).where(eq(appStackDomains.id, api!.id));
+    expect(await failed(second)).toMatchObject({ desiredRevisionId: second.revision!.id, templateVersionId: v2.version.id });
+    expect((await listAppStackComponents(db(), scope)).map((c) => c.componentKey)).toEqual(["api", "cache", "web"]);
+    expect(await removing()).toEqual(["api.takeback.example", "kept.takeback.example"]);
+  });
+
   it("a take-back puts back the target the request replaced, not the applied one, and gives back only what the request charged", async () => {
     await organization("org_sl_replaced", true);
     const t = await template("sl-replaced");

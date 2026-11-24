@@ -298,7 +298,8 @@ const planKeys = (plan: Readonly<Record<string, unknown>>) => planList(plan, "co
  * Takes back what enqueueing an upgrade or a rollback wrote, to the desired revision that request replaced: parameters,
  * component rows and quota (the caller writes desired_revision_id and template_version_id). Null, and nothing written,
  * when the deployment replaced no revision, when its revision is no longer the desired one, or when a web address or one
- * of its paths now targets a pair only the desired plan has.
+ * of its paths now targets a pair only the desired plan has. An address being removed counts (issue #112): its row still
+ * references its component, and none is marked while the request runs, so one marked before targets the replaced plan.
  */
 async function restoreReplacedRevision(
   db: DatabaseExecutor,
