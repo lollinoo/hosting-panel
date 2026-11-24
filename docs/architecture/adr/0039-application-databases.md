@@ -217,6 +217,6 @@ Non provato:
 Punti aperti:
 
 - Le credenziali sono scritte a mano dal cliente e Valkey non ha password (#68).
-- Un avvio rifiutato per un attacco verso una rete che non esiste più dice «Component db is not created», che non è la causa (#69). Dalle operazioni del pannello il caso non si presenta, perché il passaggio dei collegamenti viene prima dell'avvio.
+- Un avvio rifiutato per un attacco verso una rete che non esiste più dice «Component db is attached to a network that is missing» (#69): l'esecutore rilegge il container dopo il `404` dell'avvio e, se c'è ancora, nomina la causa, senza il nome della rete né un id; «Component db is not created» resta per un container che manca davvero. Il motivo è sempre `STACK_COMPONENT_NOT_READY`. Dalle operazioni del pannello il caso non si presenta, perché il passaggio dei collegamenti viene prima dell'avvio.
 - Quando il pannello non ha un server a cui chiedere, un collegamento `active` resta scritto così fino al primo passaggio che raggiunge l'esecutore.
 - Un collegamento creato mentre la versione applicata del database ha ancora più di un componente aspetta l'installazione della versione collegabile.
