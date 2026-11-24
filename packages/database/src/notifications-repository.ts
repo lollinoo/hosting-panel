@@ -372,6 +372,19 @@ export async function listDueNotificationDeliveries(
   return rows.map((row) => ({ delivery: toDelivery(row.delivery), channel: toChannel(row.channel) }));
 }
 
+/** One message, only while it is still waiting, with its channel as it is now. null: no longer waiting, or gone. */
+export async function getWaitingNotificationDelivery(
+  db: DatabaseExecutor,
+  deliveryId: string,
+): Promise<{ delivery: NotificationDeliveryRecord; channel: NotificationChannelRecord } | null> {
+  const [row] = await db
+    .select({ delivery: notificationDeliveries, channel: notificationChannels })
+    .from(notificationDeliveries)
+    .innerJoin(notificationChannels, eq(notificationChannels.id, notificationDeliveries.channelId))
+    .where(and(eq(notificationDeliveries.id, deliveryId), eq(notificationDeliveries.status, "pending")));
+  return row ? { delivery: toDelivery(row.delivery), channel: toChannel(row.channel) } : null;
+}
+
 /** What became of a waiting message. `retry`: an attempt failed and another one follows. */
 export type NotificationDeliveryOutcome =
   | NotificationDeliveryEnd

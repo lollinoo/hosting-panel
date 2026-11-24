@@ -64,6 +64,8 @@ class FakeOutbound implements OutboundHttpPort {
   public readonly calls: Array<{ url: string; raw: string; body: Json; headers: Record<string, string> }> = [];
   public readonly refused = new Map<string, OutboundProblem>();
   public answer: OutboundResult = { problem: null, httpStatus: 200 };
+  /** Runs once, during the next send: what a person changes while a send takes its seconds. */
+  public duringSend: ((url: string) => Promise<void>) | null = null;
 
   public async check(url: string): Promise<OutboundProblem | null> {
     return this.refused.get(url) ?? null;
@@ -71,6 +73,9 @@ class FakeOutbound implements OutboundHttpPort {
 
   public async postJson(url: string, raw: string, headers: Readonly<Record<string, string>> = {}): Promise<OutboundResult> {
     this.calls.push({ url, raw, body: JSON.parse(raw) as Json, headers: { ...headers } });
+    const change = this.duringSend;
+    this.duringSend = null;
+    await change?.(url);
     return this.answer;
   }
 
@@ -527,6 +532,38 @@ describe("notifications (ADR-0040)", () => {
       expect(outbound.calls.map((c) => c.url).sort()).toEqual([ADMIN_HOOK, TELEGRAM_URL].sort());
       expect(eventsOf(outbound.to(ADMIN_HOOK)[0]!)).toEqual([["disk_high", "opened"]]);
       expect(outbound.to(TELEGRAM_URL)[0]!.body["text"]).toContain("95");
+    });
+
+    it("a channel turned off while an earlier message of the pass is being sent gets nothing from that pass", async () => {
+      await start();
+      await adminWebhook();
+      expect((await save(ADMIN_BASE, adminToken, "telegram", { enabled: true, groups: SERVER_GROUPS, botToken: BOT_TOKEN, chat: CHAT })).status).toBe(200);
+      seen.alerts = [disk()];
+      await tick(at(0));
+      // Which message goes first depends on the ids: the other channel is turned off while it goes.
+      outbound.duringSend = async (url) => {
+        const off = url === ADMIN_HOOK ? "telegram" : "webhook";
+        const body = off === "webhook" ? { enabled: false, groups: SERVER_GROUPS } : { enabled: false, groups: SERVER_GROUPS, chat: CHAT };
+        expect((await save(ADMIN_BASE, adminToken, off, body)).status).toBe(200);
+      };
+      await tick(at(2));
+      expect(outbound.calls).toHaveLength(1);
+      expect((await deliveries()).map((d) => [d.status, d.problem]).sort()).toEqual([["failed", "channel_changed"], ["sent", null]]);
+    });
+
+    it("a retry whose group was turned off meanwhile is not sent", async () => {
+      await start();
+      await adminWebhook({ groups: ["server", "backups"] });
+      seen.alerts = [backupFailed("site_a")];
+      outbound.answer = { problem: "server_error", httpStatus: 503 };
+      await tick(at(0));
+      await tick(at(2));
+      expect((await deliveries()).map((d) => [d.status, d.nextAttemptAt?.toISOString() ?? null])).toEqual([["pending", at(4).toISOString()]]);
+      await adminWebhook({ groups: ["server"] });
+      outbound.answer = { problem: null, httpStatus: 200 };
+      await tick(at(4));
+      expect(outbound.calls).toHaveLength(1);
+      expect((await deliveries()).map((d) => [d.status, d.attempts, d.problem])).toEqual([["failed", 1, "channel_changed"]]);
     });
 
     it("tries a message again after two, ten and thirty minutes, then it is not delivered", async () => {

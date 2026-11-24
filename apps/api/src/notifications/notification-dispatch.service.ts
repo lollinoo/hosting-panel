@@ -19,6 +19,7 @@ import {
   createNotificationDelivery,
   deleteNotificationChannelAlerts,
   expireNotificationDeliveries,
+  getWaitingNotificationDelivery,
   inArray,
   listDueNotificationDeliveries,
   listEnabledNotificationChannels,
@@ -124,11 +125,18 @@ export class NotificationDispatchService {
     }
 
     await expireNotificationDeliveries(db, new Date(now.getTime() - NOTIFICATION_GIVE_UP_AFTER_MS), now);
-    for (const { delivery, channel } of await listDueNotificationDeliveries(db, now, NOTIFICATION_SENDS_PER_PASS)) {
+    for (const due of await listDueNotificationDeliveries(db, now, NOTIFICATION_SENDS_PER_PASS)) {
       if (this.#stopped) return;
-      // The channel as it is now: a message never goes where its channel no longer points.
+      // Read again right before the send, outside any transaction: the sends before it may have taken seconds. A message
+      // a save has settled meanwhile, or whose channel is gone, is left as it is.
+      const current = await getWaitingNotificationDelivery(db, due.delivery.id);
+      if (current === null) continue;
+      const { delivery, channel } = current;
+      // The channel as it is now: a message never goes where its channel no longer points, nor for groups turned off.
+      const groups = new Set(channel.groups);
       const stillWanted =
         channel.enabled &&
+        delivery.events.some((event) => groups.has(NOTIFICATION_GROUP_OF[event.kind])) &&
         (channel.kind !== "email" || (await notificationMailRecipients(db, channel)).some((r) => r.email === delivery.recipient));
       if (!stillWanted) {
         await recordNotificationDelivery(db, delivery.id, { status: "dropped", problem: "channel_changed" }, now);
