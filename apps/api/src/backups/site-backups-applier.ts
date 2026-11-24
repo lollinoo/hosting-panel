@@ -215,7 +215,7 @@ export class SiteBackupsApplier {
    */
   public async recover(op: BackupOperationRef, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
-      return this.#restore.recover(op);
+      return this.#restore.recover(op, reads);
     }
     if (op.kind === "panel.backups.create") {
       return this.panel.recover(op);
