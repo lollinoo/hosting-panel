@@ -26,6 +26,7 @@ import {
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import { and, asc, desc, eq, exists, inArray, isNull, lt, max, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { deleteRemovedAppStackDomains } from "./app-stack-domains-repository.js";
 import { AppStackQuotaError, chargeAppStackQuota, lockAppStackLimitUsage } from "./app-stack-limit.js";
 import { getAppTemplateVersion, getPublishedAppTemplateVersion } from "./app-templates-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
@@ -789,6 +790,11 @@ export async function updateAppStackDeploymentTransactional(
       })
       .where(eq(appStackVolumes.stackId, stack.id));
     await db.delete(appStackComponents).where(eq(appStackComponents.stackId, stack.id));
+  }
+  // Issue #112: routes published from the addresses of their fingerprint (those being removed are never among them),
+  // or no route file at all, hold no name being removed any more.
+  if (input.appliedRoutesHash === null || (input.appliedRoutesHash !== undefined && input.appliedAddressesHash !== undefined)) {
+    await deleteRemovedAppStackDomains(db, stack.id);
   }
   const [updated] = await db
     .update(appStacks)

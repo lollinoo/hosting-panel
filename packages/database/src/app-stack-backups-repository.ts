@@ -15,6 +15,7 @@ import {
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, or, sql } from "drizzle-orm";
+import { deleteRemovedAppStackDomains } from "./app-stack-domains-repository.js";
 import { AppStackRepositoryError, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
 import { resolveAppStackBackupTargets } from "./backup-targets-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
@@ -297,6 +298,8 @@ export async function settleAppStackBackupStopTransactional(
       .set({ health: "stopped", healthObservedAt: now, updatedAt: now })
       .where(eq(appStackComponents.stackId, stack.id));
   }
+  // No route file holds a name being removed any more (issue #112).
+  if (input.routesWithdrawn) await deleteRemovedAppStackDomains(db, stack.id);
   const [updated] = await db
     .update(appStacks)
     // Withdrawn routes take the fingerprint of their addresses with them: nothing published, nothing pending (ADR-0037).

@@ -7,6 +7,7 @@ import {
 } from "@hosting-panel/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  addAppStackDomainsTransactional,
   AppStackBackupRepositoryError,
   AppStackRepositoryError,
   appStackBackupCopies,
@@ -38,12 +39,14 @@ import {
   listAppStackBackupRetentionScopes,
   listAppStackBackups,
   listAppStackBackupsForRetention,
+  listAppStackDomains,
   newAppEntityId,
   operations,
   operationSteps,
   organizations,
   outboxEvents,
   platformInstallations,
+  removeAppStackDomainTransactional,
   setAppStackVolumeStatusTransactional,
   setPolicyTargets,
   settleAppStackBackupAggregate,
@@ -814,6 +817,22 @@ describe("@hosting-panel/database — application backups", () => {
       expect(await settleAppStackBackupStopTransactional(db(), { organizationId: orgA, stackId: stack.id, to: "stopped", routesWithdrawn: true })).toMatchObject({
         status: "stopped",
       });
+    });
+
+    it("withdrawn routes hold no name being removed: those addresses are deleted, unless the routes stayed (issue #112)", async () => {
+      const stack = await installed();
+      const scope = { organizationId: orgA, stackId: stack.id };
+      const [kept, gone] = await addAppStackDomainsTransactional(db(), {
+        ...scope,
+        entries: ["a.stop.example", "b.stop.example"].map((hostname) => ({ hostname, componentKey: "web", internalPort: 8080 })),
+      });
+      await removeAppStackDomainTransactional(db(), { ...scope, domainId: gone!.id });
+      await request(stack);
+      const names = async () => (await listAppStackDomains(db(), { ...scope, includeRemoving: true })).map((r) => r.hostname);
+      await settleAppStackBackupStopTransactional(db(), { ...scope, to: "stopped", routesWithdrawn: false });
+      expect(await names()).toEqual([kept!.hostname, gone!.hostname]);
+      await settleAppStackBackupStopTransactional(db(), { ...scope, to: "stopped", routesWithdrawn: true });
+      expect(await names()).toEqual([kept!.hostname]);
     });
 
     it("degraded when the stop failed for certain; the routes are kept unless they were withdrawn", async () => {

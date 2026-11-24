@@ -35,6 +35,7 @@ import {
   hosts,
   listAppStackComponents,
   listAppStackDeployments,
+  listAppStackDomains,
   listAppStackLinksOfProvider,
   listAppStackParameters,
   listAppStackRevisions,
@@ -48,6 +49,7 @@ import {
   organizations,
   platformInstallations,
   recordAppStackComponentHealthTransactional,
+  removeAppStackDomainTransactional,
   repairOrphanedAppStackStatusesTransactional,
   resourceQuotas,
   setAppStackSecretTransactional,
@@ -834,6 +836,29 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     // A stop or a recovery writes the routes hash alone: what the addresses were is not known any more.
     await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "succeeded", appliedRoutesHash: null });
     expect(await stored()).toMatchObject({ appliedRoutesHash: null, appliedAddressesHash: null });
+  });
+
+  it("a settle that records routes published with their fingerprint, or no route file, deletes the addresses being removed (issue #112)", async () => {
+    const { stack, deployment } = await create();
+    const scope = { organizationId: orgA, stackId: stack.id, deploymentId: deployment!.id, problem: null, stackStatus: null };
+    const ref = { organizationId: orgA, stackId: stack.id };
+    await db().update(appStacks).set({ appliedRoutesHash: hex("routes") }).where(eq(appStacks.id, stack.id));
+    const [kept] = await domain(stack, "kept.settle.example", "web", 8080);
+    const [gone] = await domain(stack, "gone.settle.example", "web", 8080);
+    await removeAppStackDomainTransactional(db(), { ...ref, domainId: gone!.id });
+    const names = async () => (await listAppStackDomains(db(), { ...ref, includeRemoving: true })).map((r) => r.hostname);
+    // Neither a write without routes nor routes whose addresses are not known (a recovery) says what the file holds.
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running" });
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running", appliedRoutesHash: hex("unconfirmed") });
+    expect(await names()).toEqual(["gone.settle.example", "kept.settle.example"]);
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running", appliedRoutesHash: hex("routes 2"), appliedAddressesHash: hex("addresses") });
+    expect(await names()).toEqual(["kept.settle.example"]);
+    await domain(await create(orgB).then((c) => c.stack), "gone.settle.example", "web", 8080);
+
+    await removeAppStackDomainTransactional(db(), { ...ref, domainId: kept!.id });
+    expect(await names()).toEqual(["kept.settle.example"]);
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "succeeded", appliedRoutesHash: null });
+    expect(await names()).toEqual([]);
   });
 
   it("finalises a delete: quota released, domains and components gone, volumes retained, secrets kept, name reusable", async () => {
