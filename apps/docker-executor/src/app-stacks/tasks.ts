@@ -408,8 +408,10 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     const state = await inspectExecState(this.target, exec.execId).catch(() => undefined);
     const raw = state?.exitCode ?? null;
     const exitCode = raw !== null && Number.isInteger(raw) && raw >= 0 && raw <= 255 ? raw : null;
-    // No process (pid 0), or an exec the engine dropped (it drops one that never ran when its container stops): the
-    // command never started, and what came back is the engine's own text, which can carry a Docker id.
+    // No process (pid 0), or an exec the engine no longer knows: taken as a command that never started, and what came
+    // back as the engine's own text, which can carry a Docker id. The engine drops an exec that never ran when its
+    // container stops, but it also forgets every exec when it restarts: a command that did run then loses its output
+    // and its exit code (ADR-0042 §7).
     const started = state !== null && state?.pid !== 0;
     return this.finished(req, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
   }

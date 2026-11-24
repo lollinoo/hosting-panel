@@ -305,7 +305,7 @@ export interface DockerExecState {
 
 /**
  * How an exec ended, waiting a moment while the engine still calls it running. null when the engine does not know the
- * exec (404): it drops one that never ran when its container stops.
+ * exec (404): it drops one that never ran when its container stops, and forgets them all when it restarts.
  */
 export async function inspectExecState(
   target: DockerExecTarget,
