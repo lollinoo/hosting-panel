@@ -328,6 +328,10 @@ approval.
    while it runs the application page says that its expired backups are being removed and every action on it answers
    `409 RESOURCE_LOCKED`. A destination that fails keeps the rows, and the next night finishes the work.
    On a server with no usable destination the nightly run does nothing, and no backup of an application is removed.
+   The executor runs two backup jobs at a time: the panel's own nightly copy, queued in the same run, may find them
+   taken by a clean-up and an application's backup. It then asks again every minute, under the same operation, for
+   at most two hours (meanwhile the sites' backups and restores wait in the same worker lane), and only then fails;
+   each night has at most one panel copy.
 8. **Where the copies are** (server administrator). One encrypted repository per application per destination, next to
    the sites' ones and with their key: on a local destination the folder `stacks/<stackId>` under that destination's
    folder (`/var/lib/hosting-panel/local-repos/<targetId>` unless `HP_BACKUP_LOCAL_ROOT` says otherwise), on S3 the

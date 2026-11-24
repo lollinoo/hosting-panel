@@ -43,7 +43,7 @@ import { AppModule } from "../src/app.module.js";
 import { BackupPoliciesService } from "../src/backups/backup-policies.service.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
-import { PANEL_BACKUP_STEPS } from "../src/backups/panel-backup-applier.js";
+import { PANEL_BACKUP_STEPS, PANEL_BUSY_RETRY_MS, PANEL_BUSY_WAIT_MS } from "../src/backups/panel-backup-applier.js";
 import { PanelDumpError, type PanelDumpCommand } from "../src/backups/panel-dump.js";
 import { BACKUP_POLL_DEADLINE_MS, SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
 import { setupInstallation } from "../src/cli/accounts.js";
@@ -237,6 +237,8 @@ describe("nightly panel copy (panel.backups.create)", () => {
     applier.pollGiveUpMs = 0;
     applier.pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
     applier.panel.dump = fakeDump;
+    applier.panel.busyRetryMs = PANEL_BUSY_RETRY_MS;
+    applier.panel.busyWaitMs = PANEL_BUSY_WAIT_MS;
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(outboxEvents);
     await dbClient.db.delete(operationSteps);
@@ -634,6 +636,61 @@ describe("nightly panel copy (panel.backups.create)", () => {
     ]);
     expect(await dumpFiles()).toEqual([]);
     await expectNoSecrets();
+  });
+
+  /** The next `count` panelStart requests are refused as the executor refuses one while its two job slots are full. */
+  function refuseAsBusy(count: number): () => void {
+    let left = count;
+    const original = sim.backups;
+    sim.backups = (async (req: BackupsIpcRequest) => {
+      if (req.action === "panelStart" && left > 0) {
+        left -= 1;
+        calls.push(req);
+        throw Object.assign(new Error("Another backup job is already in progress"), { code: "RESOURCE_LOCKED" });
+      }
+      return original(req);
+    }) as typeof sim.backups;
+    return () => {
+      sim.backups = original;
+    };
+  }
+
+  it("Busy: a copy refused while the executor runs two jobs already is asked again the same night, under the same operation", async () => {
+    applier.panel.busyRetryMs = 1;
+    const restore = refuseAsBusy(2);
+    try {
+      const opId = await queuePanel();
+      await app.outboxWorker.processPendingOnce();
+
+      expect((await panelOps()).map((o) => o.status)).toEqual(["succeeded"]);
+      expect(calls.filter((c) => c.action === "panelStart").map((c) => c.jobId)).toEqual([opId, opId, opId]);
+      expect(dumps).toHaveLength(1);
+      expect(await panelCopies(opId)).toEqual([expect.objectContaining({ status: "succeeded", problem: null })]);
+      expect((await panelAudits()).map((a) => a.action)).toEqual(["panel.backups.succeeded"]);
+      expect(await dumpFiles()).toEqual([]);
+      // One copy per date: a later tick of the same night queues nothing.
+      await scheduler.tick(new Date(NIGHT.getTime() + 3_600_000));
+      expect(await panelOps()).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("Busy: a copy still refused when the wait is over fails like any other refusal", async () => {
+    applier.panel.busyRetryMs = 1;
+    applier.panel.busyWaitMs = 30;
+    const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
+    try {
+      const opId = await queuePanel();
+      await app.outboxWorker.processPendingOnce();
+
+      expect((await panelOps()).map((o) => o.status)).toEqual(["failed"]);
+      expect(calls.filter((c) => c.action === "panelStart").length).toBeGreaterThan(1);
+      expect(await panelCopies(opId)).toEqual([expect.objectContaining({ status: "failed", problem: "other" })]);
+      expect(await dumpFiles()).toEqual([]);
+    } finally {
+      restore();
+    }
   });
 
   /** Runs the copy until the poll gives up, leaving the operation unknown and the job held. */

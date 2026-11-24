@@ -1,11 +1,13 @@
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Logger } from "@nestjs/common";
 import {
   DEFAULT_BACKUP_RETENTION_DAYS,
   canTransitionOperation,
   isTerminalOperationStatus,
   type BackupJobStatus,
+  type BackupsIpcRequest,
   type BackupProblem,
   type ErrorCode,
 } from "@hosting-panel/contracts";
@@ -35,6 +37,7 @@ import { ControlPlaneError } from "../common/control-plane.error.js";
 import type { ControlPlaneRuntimeConfig } from "../tokens.js";
 import { PanelDumpError, buildPanelDumpCommand, runPanelDump, type PanelDumpCommand } from "./panel-dump.js";
 import {
+  extractKnownErrorCode,
   isAmbiguousError,
   isTerminalStepStatus,
   normalizeBackupProblem,
@@ -47,6 +50,15 @@ export const PANEL_BACKUP_STEPS = [
   { key: "dump", label: "Copy the panel database" },
   { key: "upload", label: "Send the copy to the backup storage" },
 ] as const satisfies readonly { key: string; label: string }[];
+
+/**
+ * The executor runs two backup jobs at a time: the nightly clean-ups of applications, queued in the same run, and a
+ * customer's application backup can hold both. A copy refused as busy is asked again this often, under the same
+ * operation, so the date keeps its one panel copy (ADR-0038)...
+ */
+export const PANEL_BUSY_RETRY_MS = 60_000;
+/** ...for at most this long after its first refusal; then it fails like any other refusal. */
+export const PANEL_BUSY_WAIT_MS = 2 * 3_600_000;
 
 const DUMP_FILE = /^(op_[0-9a-f]{32})\.dump$/;
 const FAILED_MSG = "Panel copy did not finish.";
@@ -63,6 +75,8 @@ export class PanelBackupApplier {
   readonly #logger = new Logger(PanelBackupApplier.name);
   /** Replaceable by tests: no test needs pg_dump on the machine. */
   public dump: (cmd: PanelDumpCommand) => Promise<void> = (cmd) => runPanelDump(cmd);
+  public busyRetryMs = PANEL_BUSY_RETRY_MS;
+  public busyWaitMs = PANEL_BUSY_WAIT_MS;
 
   public constructor(
     private readonly parent: SiteBackupsApplier,
@@ -119,7 +133,7 @@ export class PanelBackupApplier {
             await this.#settleCopy(copy, "failed", "other");
             continue;
           }
-          const startRes = await this.dockerExecutor.backups({
+          const startRes = await this.#startWhenFree(op.id, {
             action: "panelStart",
             jobId,
             ...(jobId === op.id ? {} : { dumpId: op.id }),
@@ -211,6 +225,20 @@ export class PanelBackupApplier {
       if (!row || !(ACTIVE_OPERATION_LOCK_STATUSES as readonly string[]).includes(row.status)) {
         await rm(join(dir, name), { force: true });
       }
+    }
+  }
+
+  /** panelStart, asked again under a renewed lease while the executor refuses it as busy, up to busyWaitMs. */
+  async #startWhenFree(operationId: string, req: Extract<BackupsIpcRequest, { action: "panelStart" }>): Promise<BackupJobStatus> {
+    const until = Date.now() + this.busyWaitMs;
+    for (;;) {
+      try {
+        return await this.dockerExecutor.backups(req);
+      } catch (err) {
+        if (extractKnownErrorCode(err) !== "RESOURCE_LOCKED" || Date.now() >= until) throw err;
+      }
+      await renewOperationLease(this.dbClient.db, operationId, this.parent.leaseMs);
+      await sleep(this.busyRetryMs);
     }
   }
 

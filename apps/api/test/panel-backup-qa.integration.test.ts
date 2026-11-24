@@ -45,6 +45,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
+import { PANEL_BUSY_WAIT_MS } from "../src/backups/panel-backup-applier.js";
 import { PG_DUMP_PATH, runPanelDump, type PanelDumpCommand } from "../src/backups/panel-dump.js";
 import { SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
@@ -444,6 +445,7 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     };
     applier.pollMs = 0;
     applier.pollGiveUpMs = 120_000;
+    applier.panel.busyWaitMs = PANEL_BUSY_WAIT_MS;
     useRunner();
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(outboxEvents);
@@ -748,6 +750,8 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
 
   it("Two destinations: a start refused for the second copy settles it failed and fails the op, the first stays", async () => {
     await addSecondPanelTarget();
+    // No wait for a free job slot: the refusal stands at once (the wait is in panel-backup.integration.test.ts).
+    applier.panel.busyWaitMs = 0;
     const opId = await queuePanel();
     hook = (req) =>
       req.action === "panelStart" && req.jobId !== opId
