@@ -75,9 +75,10 @@ describe("the site pages ask the site type", () => {
     expect(html).toContain('href="http://wp-a.example.test/wp-admin/"');
   });
 
-  it("a site without a type gets no type tab and no header button, and keeps its visit link", async () => {
+  it("a site without a type gets only the overview tab and no header button, and keeps its visit link (L49)", async () => {
+    // The managed-site routes behind the other tabs answer 404 for it (ADR 0029 §2).
     const { html, tabs } = await layoutOf({ ...SITE, siteType: null }, true);
-    expect(tabs).toEqual(["/sites/site_t1", ...GENERAL]);
+    expect(tabs).toEqual(["/sites/site_t1"]);
     expect(html).not.toContain("/wp-admin/");
     expect(html).not.toContain(en.site.wpAdmin);
     expect(html).toContain('href="http://wp-a.example.test"');

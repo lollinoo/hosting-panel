@@ -112,7 +112,7 @@ import {
 } from "../common/control-plane.error.js";
 import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
-import { shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
+import { assertNewSiteAddressesFree, shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
 import { siteLimitError } from "../sites/site-limit.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
@@ -1016,6 +1016,8 @@ export class OrganizationsController {
       permission: "site.create",
       targetType: "site",
     });
+    // A site with no known type is a generic service (ADR 0029 §2): it is the server administrator's, as createService is.
+    await this.authzService.requirePlatformPermission(auth, req, "platform.users.manage", "site", null);
 
     const body = CreateSiteInputSchema.parse(rawBody ?? {});
 
@@ -1035,17 +1037,9 @@ export class OrganizationsController {
       throw new ControlPlaneError("NOT_FOUND", `Host allocation '${body.hostAllocationId}' not found.`);
     }
 
-    // Check domain uniqueness if initialDomain provided
+    // The schema normalised it as the typed route's domain; the same check against other sites and the servers follows.
     if (body.initialDomain) {
-      const [existingDom] = await this.dbClient.db
-        .select()
-        .from(domains)
-        .where(eq(domains.hostname, body.initialDomain))
-        .limit(1);
-
-      if (existingDom) {
-        throw new ControlPlaneError("DOMAIN_CONFLICT", `Domain '${body.initialDomain}' is already in use.`);
-      }
+      await assertNewSiteAddressesFree(this.dbClient.db, [body.initialDomain]);
     }
 
     const result = await createSiteTransactional(this.dbClient.db, {

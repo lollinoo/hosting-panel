@@ -144,6 +144,28 @@ export async function stoppedSiteIds(db: HostingPanelDatabase, siteIds: readonly
   return new Set(rows.map((r) => r.siteId));
 }
 
+/** A new site's addresses, already normalised, are no other site's and no server's name or address (the panel's included). */
+export async function assertNewSiteAddressesFree(db: HostingPanelDatabase, names: string[]): Promise<void> {
+  const [usedDomain] = await db
+    .select({ id: domains.id })
+    .from(domains)
+    .where(inArray(domains.hostname, names))
+    .limit(1);
+  const [panelHost] = await db
+    .select({ id: hosts.id })
+    .from(hosts)
+    .where(
+      or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
+    )
+    .limit(1);
+  if (usedDomain || panelHost) {
+    throw new ControlPlaneError(
+      "DOMAIN_CONFLICT",
+      "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
+    );
+  }
+}
+
 function slugify(name: string): string {
   const base =
     name
@@ -191,25 +213,7 @@ export class ManagedSitesService {
     const phpVersion = Object.hasOwn(values, PHP_VERSION_PARAMETER_KEY) ? (values[PHP_VERSION_PARAMETER_KEY] as PhpVersion) : null;
 
     const partner = body.includeWww ? wwwPartner(body.domain) : null;
-    const names = partner ? [body.domain, partner] : [body.domain];
-    const [usedDomain] = await db
-      .select({ id: domains.id })
-      .from(domains)
-      .where(inArray(domains.hostname, names))
-      .limit(1);
-    const [panelHost] = await db
-      .select({ id: hosts.id })
-      .from(hosts)
-      .where(
-        or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
-      )
-      .limit(1);
-    if (usedDomain || panelHost) {
-      throw new ControlPlaneError(
-        "DOMAIN_CONFLICT",
-        "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
-      );
-    }
+    await assertNewSiteAddressesFree(db, partner ? [body.domain, partner] : [body.domain]);
 
     const [allocation] = await db
       .select()
