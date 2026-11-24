@@ -31,8 +31,8 @@
  *    an id the gate saw created), the create bodies keep the profile, a pull names a digest of the plan and a registry
  *    lookup a tag of the imported file (only with HP_ACCEPT_REGISTRY_CASES=1); list answers are filtered to this run's
  *    objects. A secret of the run may travel in one place only, the Env of a container of the application: anywhere
- *    else the gate denies the request. The gate-self-test step proves these denials. The script's own changes (proxy
- *    removal, cleanup) go through the same gate.
+ *    else the gate denies the request. The gate-self-test step proves these denials, and that hp_ inside a word
+ *    (php_value) is no name. The script's own changes (proxy removal, cleanup) go through the same gate.
  *  - Every adapter directory and name option points into the temp dir, /dev/shm/hp_swarmtest_stk_<hex>-secrets or a
  *    nonexistent own *_unused name. The only proxy is a throwaway one created through the ingressProxyContainerName /
  *    ingressNetworkName seams, published on 127.0.0.1:16780/16743 only; the gate denies a connect or disconnect of a
@@ -788,6 +788,8 @@ async function main() {
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ NetworkMode: "host" })],
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ PortBindings: { "80/tcp": [{ HostPort: "8080" }] } })],
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Image: TRAEFIK_IMAGE })],
+        // The body profile does not read VolumesFrom: only the hp_ name rule stops this one.
+        ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ VolumesFrom: [foreignName] })],
         ["POST", `/v1.45/containers/create?name=${proxyName}`, proxyBody({ Binds: ["/:/host"] })],
         ["POST", `/v1.45/containers/create?name=${proxyName}`, proxyBody({ PortBindings: { "80/tcp": [{ HostPort: "80" }] } })],
         ["POST", "/v1.45/networks/create", net(ownNet, "app_internal", { Options: { "com.docker.network.bridge.name": "x" } })],
@@ -809,7 +811,13 @@ async function main() {
       // Controls: the denials above are about what each case adds, not about the body they all share.
       const plain = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}));
       const withSecret = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Env: [`WORDPRESS_DB_PASSWORD=${DB_PASSWORD}`] }));
-      assert(plain.kind === "forward" && withSecret.kind === "forward", "judge() forwards the standard body, with a secret in Env too", `${plain.kind} ${withSecret.kind}`);
+      // A name begins with hp_: inside a word ("php_value" of version 2, or a foreign name glued to a letter) it is none.
+      const inWord = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Cmd: ["php_value x", `p${foreignName}`] }));
+      assert(
+        plain.kind === "forward" && withSecret.kind === "forward" && inWord.kind === "forward",
+        "judge() forwards the standard body, with a secret in Env, and with hp_ inside a word of Cmd too",
+        `${plain.kind} ${withSecret.kind} ${inWord.kind} ${inWord.why ?? ""}`,
+      );
       // Through the socket: read-only requests only, harmless even if the gate let them through.
       const denied = await viaGate("GET", `/v1.45/containers/hp_selftest_${hex}/json`);
       assert(denied.status === 403 && gateDenied.length === 1, "the socket answers 403 for a foreign name and records the denial", `${denied.status} ${gateDenied.length}`);
