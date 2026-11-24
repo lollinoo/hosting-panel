@@ -56,7 +56,8 @@ function isHostnameClaimViolation(err: unknown): boolean {
  * of such an address, as it ends by itself once their route is withdrawn.
  */
 export function addressRemovingInTheWay(): ControlPlaneError {
-  const message = "A web address this version no longer serves is still being removed. Try again in a few minutes.";
+  const message =
+    "A web address this version no longer serves is still being removed. Try again in a few minutes. If it is still not possible, restart the application, then try again.";
   return appRefusal("RESOURCE_LOCKED", message, { field: "domains", message, reason: "address_removing" }, false);
 }
 
