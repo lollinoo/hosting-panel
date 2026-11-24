@@ -1,6 +1,7 @@
 import {
   APP_STACK_REASONS,
   APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
   APP_STACK_STATUSES,
   type AppStackComponentHealth,
   type AppStackStatus,
@@ -44,6 +45,7 @@ export function appStackRefusalText(m: Messages, code: string, reason?: string, 
   const { reasons, codes } = m.apps;
   if (reason === "STACK_TEMPLATE_UNPUBLISHED" && status === "draft") return reasons.draftUnpublished;
   if (reason === "value_too_long") return format(reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
+  if (reason === "value_too_short") return format(reasons.value_too_short, { min: APP_STACK_SECRET_MIN_LENGTH });
   if (reason !== undefined && Object.hasOwn(reasons, reason)) return (reasons as Record<string, string>)[reason]!;
   if (isStatus(reason)) return format(reasons.status, { status: m.apps.status[reason] });
   if (Object.hasOwn(codes, code)) return (codes as Record<string, string>)[code]!;

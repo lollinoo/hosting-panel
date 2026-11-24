@@ -3617,6 +3617,7 @@ x-hp-ingress:
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
       path_target_removed: "Un percorso di un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima il percorso.",
       value_too_long: "Il valore è troppo lungo: questa applicazione accetta al massimo {max} caratteri, meno se contiene lettere accentate o simboli.",
+      value_too_short: "Il valore è troppo corto: servono almeno {min} caratteri.",
       database_as_application: "Un database non si collega a un altro database.",
       not_a_database: "Questa applicazione non è un database.",
       database_not_linkable: "Questo database non può essere collegato alle applicazioni.",

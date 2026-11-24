@@ -2,7 +2,12 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { APP_STACK_PROCESS_MARK_PATTERN, SetAppStackSecretInputSchema, type AppStackDetailDto } from "@hosting-panel/contracts";
+import {
+  APP_STACK_PROCESS_MARK_PATTERN,
+  APP_STACK_SECRET_MIN_LENGTH,
+  SetAppStackSecretInputSchema,
+  type AppStackDetailDto,
+} from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,6 +61,8 @@ export function AppStackSecrets({
     if (!value) return setFieldError(m.apps.wizard.required);
     // The server refuses such a value with no reason a page can show: say it here (ADR-0041).
     if (APP_STACK_PROCESS_MARK_PATTERN.test(value)) return setFieldError(m.apps.wizard.valueReserved);
+    // The proxy refuses a shorter value with no reason either; the log reader could not mask it (BUG-43).
+    if (value.length < APP_STACK_SECRET_MIN_LENGTH) return setFieldError(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short"));
     setBusy(true);
     setFieldError(null);
     setError(null);
@@ -69,7 +76,7 @@ export function AppStackSecrets({
       setEditing(null);
       setNotice(t.replaced);
       router.refresh();
-    } else if (sent.reason === "value_too_long") setFieldError(appStackRefusalText(m, sent.code, sent.reason));
+    } else if (sent.reason === "value_too_long" || sent.reason === "value_too_short") setFieldError(appStackRefusalText(m, sent.code, sent.reason));
     else setError(appStackRefusalText(m, sent.code, sent.reason));
   }
 

@@ -3588,6 +3588,7 @@ x-hp-ingress:
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
       path_target_removed: "A path of a web address points at a component the new version removes: remove the path first.",
       value_too_long: "This value is too long: this application accepts at most {max} characters, fewer if it contains accented letters or symbols.",
+      value_too_short: "This value is too short: it needs at least {min} characters.",
       database_as_application: "A database is not connected to another database.",
       not_a_database: "This application is not a database.",
       database_not_linkable: "This database cannot be connected to applications.",
