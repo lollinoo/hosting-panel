@@ -211,7 +211,7 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       components: d.components.map((c: Json) => c.key),
       cpuMilli: d.cpuMilli,
       memoryBytes: d.memoryBytes,
-      listed: { status: listed.status, version: listed.templateVersionNumber, components: listed.componentCount },
+      listed: { status: listed.status, version: listed.templateVersionNumber, installed: listed.installed, components: listed.componentCount },
     };
   };
   const componentRead = (stackId: string, key: string, read: "logs" | "health") =>
@@ -586,8 +586,32 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       expect(added.some((m) => m.startsWith("volume"))).toBe(false);
       expect(await stackRow(stackId)).toMatchObject({ status: "failed" });
       expectBystanderUntouched();
-      // Version 2 stays the target (a redeploy tries it again), but the page learns that version 1 is the one installed.
-      expect(await shown(stackId)).toMatchObject({ status: "failed", version: 2, revision: 2, installed: { revisionNumber: 1, templateVersionNumber: 1 } });
+      // Version 2 stays the target (a redeploy tries it again), but the page and the list learn that version 1 is the one
+      // installed.
+      const installed = { revisionNumber: 1, templateVersionNumber: 1 };
+      expect(await shown(stackId)).toMatchObject({ status: "failed", version: 2, revision: 2, installed, listed: { version: 2, installed } });
+    });
+
+    it("version 2 failed after create, then version 3 ran: the way back offers version 1, the last one that ran before", async () => {
+      const { templateId, stackId } = await install(BASE);
+      const [rev1] = await revisions(stackId);
+      const v2 = await addVersion(templateId, EXTRA_ADDED);
+      sim.appStacks.failNextAppStackStep("start", "engine_unavailable");
+      await upgradeTo(stackId, v2);
+      await drain(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev1!.id });
+
+      const v3 = await addVersion(templateId, WORKER_CHANGED);
+      await upgradeTo(stackId, v3);
+      await drain(stackId);
+      const [, , rev3] = await revisions(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev3!.id, desiredRevisionId: rev3!.id });
+      expect(await shown(stackId)).toMatchObject({
+        version: 3,
+        installed: null,
+        rollback: { revisionId: rev1!.id, revisionNumber: 1, templateVersionNumber: 1 },
+        listed: { version: 3, installed: null },
+      });
     });
   });
 });

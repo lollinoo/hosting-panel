@@ -70,7 +70,7 @@ const site = (id: string, name: string): SiteSummaryDto => ({
   id, organizationId: ORG, hostAllocationId: "al_1", name, slug: id, status: "ready", phpVersion: "8.3", siteType: "wordpress", createdAt: NOW, updatedAt: NOW,
 });
 const stack = (id: string, name: string): AppStackSummaryDto => ({
-  id, name, status: "running", templateId: "atpl_notes", templateName: "Notes", templateVersionNumber: 2, componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.test", updatedAt: NOW,
+  id, name, status: "running", templateId: "atpl_notes", templateName: "Notes", templateVersionNumber: 2, installed: null, componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.test", updatedAt: NOW,
 });
 const wpType = (id: string): CustomerSiteTypeDto => ({
   id, name: id, description: null, module: "wordpress", phpVersions: ["8.4"], defaultPhpVersion: "8.4", parameters: [],

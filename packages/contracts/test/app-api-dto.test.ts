@@ -69,7 +69,8 @@ const CUSTOMER_SUMMARY = {
 };
 const STACK_SUMMARY = {
   id: "ast_demo", name: "My notes", status: "running", templateId: "atpl_demo", templateName: "Notes", templateVersionNumber: 1,
-  componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com", updatedAt: AT,
+  installed: { revisionNumber: 1, templateVersionNumber: 1 }, componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com",
+  updatedAt: AT,
 };
 
 const NOTE = { level: "changed", code: "IMAGE_PINNED", path: "services.app.image", message: "The image is pinned to the digest its registry gave." };

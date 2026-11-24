@@ -150,7 +150,15 @@ const deployed = (components: AppStackComponentRow[], change: Partial<Parameters
 
 describe("appStackSummaryDto", () => {
   const summary = (components: AppStackComponentRow[], domains: AppStackDomainRow[] = []) =>
-    appStackSummaryDto({ stack: stackRow({ status: "running" }), templateName: "Notes Demo", templateVersionNumber: 2, components, domains, now: NOW });
+    appStackSummaryDto({
+      stack: stackRow({ status: "running" }),
+      templateName: "Notes Demo",
+      templateVersionNumber: 2,
+      installed: { revisionNumber: 4, templateVersionNumber: 1 },
+      components,
+      domains,
+      now: NOW,
+    });
 
   it("counts unhealthy and missing components; a stale observation reads unknown and is not counted", () => {
     const dto = summary([
@@ -160,7 +168,7 @@ describe("appStackSummaryDto", () => {
       component("web", "healthy", FRESH),
       component("never", "unhealthy", null),
     ]);
-    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2 });
+    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2, installed: { revisionNumber: 4, templateVersionNumber: 1 } });
     expect(AppStackSummaryDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 

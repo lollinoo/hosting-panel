@@ -135,6 +135,9 @@ export const AppStackSummaryDtoSchema = z.object({
   templateId: AppEntityIdSchema,
   templateName: z.string(),
   templateVersionNumber: z.number().int().positive(),
+  // the applied revision whenever it is not the desired one (a change running, a failure after create, a take-back
+  // declined, a deploy with new settings that failed before create); the detail's status follows its plan
+  installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   componentCount: z.number().int().nonnegative(),
   unhealthyCount: z.number().int().nonnegative(), // effective health unhealthy or missing (stale reads as unknown)
   primaryHostname: z.string().nullable(), // first active domain by hostname, else first domain, else null
@@ -146,9 +149,6 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   createdAt: IsoDateTimeSchema,
   activeOperationId: OperationIdSchema.nullable(),
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
-  // the applied revision whenever it is not the desired one (a change running, a failure after create, a take-back
-  // declined, a deploy with new settings that failed before create); the status follows its plan
-  installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   // desired plan order; a draft: spec services by key
   components: z.array(
     z.object({

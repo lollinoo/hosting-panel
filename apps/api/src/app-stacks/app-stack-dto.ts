@@ -37,6 +37,7 @@ export function appStackSummaryDto(input: {
   stack: AppStackRow;
   templateName: string;
   templateVersionNumber: number;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
   components: readonly AppStackComponentRow[];
   domains: readonly AppStackDomainRow[];
   now: Date;
@@ -50,6 +51,7 @@ export function appStackSummaryDto(input: {
     templateId: stack.templateId,
     templateName: input.templateName,
     templateVersionNumber: input.templateVersionNumber,
+    installed: input.installed,
     componentCount: components.length,
     unhealthyCount: components.filter((c) => ["unhealthy", "missing"].includes(componentHealth(c, now).health)).length,
     primaryHostname: (domains.find((d) => d.status === "active") ?? domains[0])?.hostname ?? null,
@@ -107,7 +109,6 @@ export function appStackDetailDto(input: {
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,
     revisionNumber: desired?.revision.revisionNumber ?? null,
-    installed: input.installed,
     components: components.map((c) => ({
       key: c.key,
       ...componentHealth(rows.get(c.key), now),

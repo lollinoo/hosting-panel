@@ -197,6 +197,7 @@ const STACK: AppStackSummaryDto = {
   templateId: "atpl_notes",
   templateName: "Notes",
   templateVersionNumber: 2,
+  installed: null,
   componentCount: 2,
   unhealthyCount: 1,
   primaryHostname: "notes.example.test",
@@ -212,7 +213,6 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   revisionNumber: 3,
-  installed: null,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
     { key: "cache", health: "unhealthy", healthObservedAt: null, dependsOn: [], ingress: false, cpuMilli: 250, memoryBytes: String(128 * MIB) },
