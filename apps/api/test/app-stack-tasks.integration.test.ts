@@ -537,6 +537,26 @@ describe("tasks of an application (ADR-0042)", () => {
       expect(taskCalls(stackId)).toHaveLength(1);
       expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
     });
+
+    it("does not move back a schedule saved a moment after the pass read the clock, nor run an hour that began before it", async () => {
+      const stackId = await alone();
+      const hour = new Date((Math.floor(Date.now() / HOUR) + 2) * HOUR);
+      const now = new Date(hour.getTime() - 20_000);
+      const saved = new Date(hour.getTime() + 10_000);
+      // The schedule is saved 30 seconds after the clock the pass read; the hour began between the two.
+      await h.dbClient.db
+        .update(appStackTaskSchedules)
+        .set({ changedAt: saved, servedSlotAt: null })
+        .where(eq(appStackTaskSchedules.stackId, stackId));
+
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ changedAt: saved });
+      expect(await scheduler.tick(new Date(hour.getTime() + 60_000))).toEqual(NONE);
+      expect(await scheduler.tick(new Date(hour.getTime() + 31 * 60_000))).toEqual(NONE);
+      expect(await runRows(stackId)).toHaveLength(0);
+      // The next hour is owed, as for any schedule.
+      expect(await scheduler.tick(new Date(hour.getTime() + HOUR + 60_000))).toEqual({ ...NONE, queued: 1 });
+    });
   });
 
   it("never starts again a run whose answer was lost: it asks the executor how it went", async () => {

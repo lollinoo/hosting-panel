@@ -490,15 +490,18 @@ export function listAppStackTaskSchedulesOfLiveStacks(db: DatabaseExecutor): Pro
 }
 
 /**
- * A schedule whose served time or change time is later than `now` was written by a clock that ran ahead (the clock is
- * the API's, and it has been set right): such a time would hide every time owed until real time passes it. The schedule
- * starts clean at `now`, like a changed one: the times before it are not owed. Returns how many schedules were reset.
+ * A schedule whose served time or change time is later than `now` (plus the tolerance of one pass: the clock was read
+ * before this runs, and a schedule saved since is a moment ahead of it) was written by a clock that ran ahead (the
+ * clock is the API's, and it has been set right): such a time would hide every time owed until real time passes it.
+ * The schedule starts clean at `now`, like a changed one: the times before it are not owed. Returns how many schedules
+ * were reset.
  */
 export async function repairAppStackTaskSchedulesAheadOfClock(db: DatabaseExecutor, now: Date): Promise<number> {
+  const limit = new Date(now.getTime() + APP_STACK_TASK_LIMITS.clockAheadToleranceMs);
   const repaired = await db
     .update(appStackTaskSchedules)
     .set({ servedSlotAt: null, changedAt: now })
-    .where(or(gt(appStackTaskSchedules.servedSlotAt, now), gt(appStackTaskSchedules.changedAt, now)))
+    .where(or(gt(appStackTaskSchedules.servedSlotAt, limit), gt(appStackTaskSchedules.changedAt, limit)))
     .returning({ taskKey: appStackTaskSchedules.taskKey });
   return repaired.length;
 }

@@ -137,6 +137,7 @@ describe("statuses of a run", () => {
       outputLineChars: 2_000,
       runsKept: 20,
       retryWindowMs: 1_800_000,
+      clockAheadToleranceMs: 60_000,
     });
   });
 });

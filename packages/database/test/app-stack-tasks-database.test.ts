@@ -932,6 +932,44 @@ describe("@hosting-panel/database — tasks of applications", () => {
     });
   });
 
+  describe("a time ahead of the clock by less than a minute", () => {
+    const STACK = "stk_tk_tolerance";
+    // Later than the times of the cases above, so that the repair reads only this describe's rows as ahead.
+    const NOW = at("2032-01-10T10:20:00.000Z");
+    const after = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+    const rowOf = async (taskKey: string) => (await scheduleOf(STACK, taskKey))!;
+    async function written(taskKey: string, changedAt: Date, served: Date | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: changedAt,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    it("is left alone, because the clock read before the repair may be a moment behind a schedule saved since", async () => {
+      await stack(STACK);
+      await written("changed30", after(30), null);
+      await written("served30", at("2032-01-09T10:20:00.000Z"), after(30));
+      await written("edge", after(60), after(60));
+      await written("changed61", after(61), null);
+      await written("served61", at("2032-01-09T10:20:00.000Z"), after(61));
+      const kept = [await rowOf("changed30"), await rowOf("served30"), await rowOf("edge")];
+
+      await repairAppStackTaskSchedulesAheadOfClock(db(), NOW);
+      expect([await rowOf("changed30"), await rowOf("served30"), await rowOf("edge")]).toEqual(kept);
+      // A minute and a millisecond ahead is a clock that ran ahead.
+      expect(await rowOf("changed61")).toMatchObject({ servedSlotAt: null, changedAt: NOW });
+      expect(await rowOf("served61")).toMatchObject({ servedSlotAt: null, changedAt: NOW });
+    });
+  });
+
   describe("a time that already has a run", () => {
     const STACK = "stk_tk_ran";
     const scope = { organizationId: orgA, stackId: STACK, taskKey: "cleanup" };
