@@ -474,6 +474,36 @@ describe("application stacks HTTP API (H5)", () => {
     expectRefusal(await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/nope/health`), 404, "NOT_FOUND");
   });
 
+  it("issue #151: the count of components refuses nothing; the processor and the memory refuse each with its own sentence", async () => {
+    const quotaRow = async () => (await h.dbClient.db.select().from(resourceQuotas).where(eq(resourceQuotas.organizationId, h.a.orgId)))[0]!;
+    const setQuota = (values: Partial<typeof resourceQuotas.$inferInsert>) =>
+      h.dbClient.db.update(resourceQuotas).set(values).where(eq(resourceQuotas.organizationId, h.a.orgId));
+    const roomFor = { maxServices: 1000, maxCpuMilli: 1_000_000, maxMemoryBytes: String(2 ** 50) };
+    try {
+      // The count already passes max_services: the application is accepted and the count keeps going up.
+      const used = (await quotaRow()).usedServices;
+      expect(used).toBeGreaterThan(1);
+      await setQuota({ maxServices: 1 });
+      const accepted = await create(h.a, { templateVersionId: web, name: `qa-count-${randomUUID().slice(0, 6)}`, deploy: true });
+      expect(accepted.status, accepted.raw).toBe(202);
+      expect((await quotaRow()).usedServices).toBeGreaterThan(used);
+
+      const before = await h.counts();
+      const full = await quotaRow();
+      await setQuota({ ...roomFor, maxCpuMilli: full.usedCpuMilli });
+      const cpu = await create(h.a, { templateVersionId: web, name: `qa-cpu-${randomUUID().slice(0, 6)}`, deploy: true });
+      expectRefusal(cpu, 409, "QUOTA_EXCEEDED", { field: "cpuMilli", reason: "cpu_limit_reached" });
+      expect(cpu.body.error.message).toContain("more processor than");
+      await setQuota({ ...roomFor, maxMemoryBytes: full.usedMemoryBytes });
+      const memory = await create(h.a, { templateVersionId: web, name: `qa-memory-${randomUUID().slice(0, 6)}`, deploy: true });
+      expectRefusal(memory, 409, "QUOTA_EXCEEDED", { field: "memoryBytes", reason: "memory_limit_reached" });
+      expect(memory.body.error.message).toContain("more memory than");
+      expect(await h.counts()).toEqual(before);
+    } finally {
+      await setQuota(roomFor);
+    }
+  });
+
   // Last: it leaves organisation B at its limit.
   it("B2: two creates at a limit of one: one is accepted, the other is QUOTA_EXCEEDED", async () => {
     const limit = await h.call(h.adminToken, "PATCH", `/v1/admin/organizations/${h.b.orgId}/app-stack-limit`, { maxAppStacks: 1 });

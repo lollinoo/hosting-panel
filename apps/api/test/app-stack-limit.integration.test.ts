@@ -159,6 +159,18 @@ describe("per-customer application limit", () => {
       expect((mapped as ControlPlaneError).details).toHaveLength(1);
     });
 
+    it.each([
+      ["appStacks", "STACK_QUOTA_EXCEEDED", /application limit/],
+      ["cpuMilli", "cpu_limit_reached", /more processor than/],
+      ["memoryBytes", "memory_limit_reached", /more memory than/],
+    ] as const)("keeps one detail for %s and names its own reason (issue #151)", (field, reason, text) => {
+      const mapped = appStackQuotaError(new AppStackQuotaError(field, 7, 9)) as ControlPlaneError;
+      expect(mapped).toBeInstanceOf(ControlPlaneError);
+      expect(mapped.code).toBe("QUOTA_EXCEEDED");
+      expect(mapped.message).toMatch(text);
+      expect(mapped.details).toEqual([{ field, reason, message: "7 of 9 in use." }]);
+    });
+
     it("passes any other error through", () => {
       const other = new Error("boom");
       expect(appStackQuotaError(other)).toBe(other);
