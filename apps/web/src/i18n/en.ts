@@ -3569,6 +3569,7 @@ x-hp-ingress:
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
       stop_unfinished: "The application did not stop completely: press Stop again, or Restart, then try again.",
+      task_running: "A task of the application is running: try again in a few minutes.",
       confirmation_mismatch: "The typed name does not match.",
       no_data: "This application has no data to save.",
       no_destination:

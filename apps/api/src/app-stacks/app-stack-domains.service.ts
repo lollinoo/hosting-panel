@@ -4,12 +4,14 @@ import {
   APP_STACK_RESOURCE_TYPE,
   APP_STACK_TASK_KIND,
   ApprovedStackPlanSchema,
+  appStackLockKey,
   type AppStackDomainDto,
   type AppStackDomainEntry,
   type AppStackDomainPathRoute,
   type UpdateAppStackDomainInput,
 } from "@hosting-panel/contracts";
 import {
+  ACTIVE_OPERATION_LOCK_STATUSES,
   addAppStackDomainsTransactional,
   and,
   desc,
@@ -17,6 +19,7 @@ import {
   getAppStack,
   getAppStackRevision,
   getAppTemplateVersion,
+  inArray,
   listAppStackDomains,
   lockAppStackLimitUsage,
   not,
@@ -94,7 +97,7 @@ export class AppStackDomainsService {
             details: assignedAddressDetails(row),
           });
         }
-        return { inserted: rows, queued: rows.length > 0 && (await this.#queueRefresh(t, locked)) };
+        return { inserted: rows, queued: rows.length > 0 && (await this.#queueRefresh(t, locked, "wait")) };
       }),
     );
     if (inserted.length > 0) await this.#reconcile(stack, inserted.map((row) => row.id), false, queued);
@@ -150,7 +153,7 @@ export class AppStackDomainsService {
             pathRoutes: after.pathRoutes,
           },
         });
-        return { applies: when, queued: when === "shortly" && (await this.#queueRefresh(t, locked)) };
+        return { applies: when, queued: when === "shortly" && (await this.#queueRefresh(t, locked, "refuse")) };
       }),
     );
     await this.#reconcile(stack, [], true, queued);
@@ -179,7 +182,7 @@ export class AppStackDomainsService {
           targetId: stack.id,
           details: { domainId, hostname: row.hostname },
         });
-        return this.#queueRefresh(t, locked);
+        return this.#queueRefresh(t, locked, "refuse");
       }),
     );
     await this.#reconcile(stack, [], false, queued);
@@ -249,11 +252,20 @@ export class AppStackDomainsService {
 
   /**
    * ADR-0037: the route refresh, in the caller's transaction, when the routes of the stack follow its addresses now:
-   * no action can then be queued before the change reaches the route file.
+   * no action can then be queued before the change reaches the route file. ADR-0042: while a run of a task holds the
+   * stack (at most its time limit) none can be queued; a new address waits for the observer's first free pass, and a
+   * change or a removal, which must reach the route file now, is refused with a reason of its own.
    */
-  async #queueRefresh(t: HostingPanelDatabase, locked: AppStackRow): Promise<boolean> {
+  async #queueRefresh(t: HostingPanelDatabase, locked: AppStackRow, whileTaskRuns: "wait" | "refuse"): Promise<boolean> {
     if (!appStackRoutesFollowAddresses(locked, await lastOperation(t, locked.id))) return false;
-    return (await this.observer?.queueRoutesRefresh(t, locked, new Date())) ?? false;
+    try {
+      return (await this.observer?.queueRoutesRefresh(t, locked, new Date())) ?? false;
+    } catch (err) {
+      if ((err as { code?: unknown } | null)?.code !== "RESOURCE_LOCKED" || !(await taskRunHoldsStack(t, locked.id))) throw err;
+      if (whileTaskRuns === "wait") return false;
+      const message = "A task of the application is running. Try again in a few minutes.";
+      throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: "task_running" }, true);
+    }
   }
 
   /** Best effort: the change is committed and the observer's loop retries. */
@@ -294,4 +306,14 @@ async function lastOperation(db: DatabaseExecutor, stackId: string) {
     .orderBy(desc(operations.submittedAt))
     .limit(1);
   return last;
+}
+
+/** Whether the operation that holds the stack's lock is a run of a task: one takes it only while it executes. */
+async function taskRunHoldsStack(db: DatabaseExecutor, stackId: string): Promise<boolean> {
+  const [holder] = await db
+    .select({ kind: operations.kind })
+    .from(operations)
+    .where(and(eq(operations.lockKey, appStackLockKey(stackId)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
+    .limit(1);
+  return holder?.kind === APP_STACK_TASK_KIND;
 }
