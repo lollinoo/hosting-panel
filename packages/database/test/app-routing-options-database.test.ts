@@ -171,7 +171,9 @@ describe("0026 app_routing_options migration", () => {
 
     it("declares exactly the columns of app_stack_domains", () => {
       const present = colsAfter.filter((c) => c.table_name === "app_stack_domains").map((c) => c.column_name);
-      expect(config.columns.map((c) => c.name).sort()).toEqual(present.sort());
+      // 0033 adds removal_requested_at, checked with its migration in app-stacks-database.test.ts.
+      const declared = config.columns.map((c) => c.name).filter((name) => name !== "removal_requested_at");
+      expect(declared.sort()).toEqual(present.sort());
     });
 
     it("names the unique and the foreign key the migration creates, on the same columns", () => {

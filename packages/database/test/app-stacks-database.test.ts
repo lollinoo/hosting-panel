@@ -651,3 +651,57 @@ describe("0032 the revision and the status a deployment's request replaced", () 
     ]);
   });
 });
+
+describe("0033 an address being removed keeps its host name until a route file without it is published", () => {
+  const M0033 = "0033_app_stack_domain_removal.sql";
+  let pg: PGlite;
+  const COLUMNS = `SELECT table_name, column_name, data_type, is_nullable, column_default
+    FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, column_name`;
+  const claim = { code: "23505" };
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0033);
+    await pg.exec(SEED_0024);
+    await pg.exec(FIXTURES);
+    await pg.exec(insert("app_stack_domains", { id: "'sdom_old'", hostname: "'old.example'" }));
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  async function refused(statement: string): Promise<unknown> {
+    await pg.exec("BEGIN");
+    try {
+      return await pg.exec(statement).then(
+        () => null,
+        (err: unknown) => err,
+      );
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  }
+
+  it("adds one nullable column, leaves every existing address live, and runs again unchanged", async () => {
+    const colsBefore = await rows<Record<string, unknown>>(pg, COLUMNS);
+    await pg.exec(read(M0033));
+    const colsAfter = await rows<Record<string, unknown>>(pg, COLUMNS);
+    const text = (r: Record<string, unknown>) => JSON.stringify(r);
+    expect(colsAfter.filter((c) => !colsBefore.map(text).includes(text(c)))).toEqual([
+      { table_name: "app_stack_domains", column_name: "removal_requested_at", data_type: "timestamp with time zone", is_nullable: "YES", column_default: null },
+    ]);
+    expect(colsBefore.filter((c) => !colsAfter.map(text).includes(text(c)))).toEqual([]);
+    expect(await rows(pg, "SELECT id, removal_requested_at FROM app_stack_domains")).toEqual([{ id: "sdom_old", removal_requested_at: null }]);
+    await pg.exec(read(M0033));
+    expect(await rows(pg, COLUMNS)).toEqual(colsAfter);
+  });
+
+  it("an address marked as being removed still holds its host name against a site and another application", async () => {
+    await pg.exec("UPDATE app_stack_domains SET removal_requested_at = NOW() WHERE id = 'sdom_old'");
+    expect(await refused("INSERT INTO domains (id, site_id, organization_id, hostname) VALUES ('d_old','s1','o','old.example')")).toMatchObject(claim);
+    expect(
+      await refused(insert("app_stack_domains", { id: "'sdom_b'", stack_id: "'stk_b'", organization_id: "'o2'", hostname: "'old.example'" })),
+    ).toMatchObject(claim);
+  });
+});

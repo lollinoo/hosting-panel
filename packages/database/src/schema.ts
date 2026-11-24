@@ -576,6 +576,8 @@ export const appStackDomains = pgTable(
     pathRoutes: jsonb("path_routes").$type<AppStackDomainPathRoute[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // 0033: set while the published route file may still hold the name; the row is deleted once a file without it is.
+    removalRequestedAt: timestamp("removal_requested_at", { withTimezone: true }),
   },
   (t) => [
     unique("uq_app_stack_domains_hostname").on(t.hostname),
