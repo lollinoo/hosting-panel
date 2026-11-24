@@ -573,7 +573,9 @@ approval.
    when a link is created or removed, at every installation, start or restart of the database or of an application
    linked to it, and about once a minute for whatever still waits (at most 20 databases per pass, and no new database
    after 45 seconds of the pass: the next pass begins with the databases it did not reach). There is no button to
-   retry, and none is needed.
+   retry, and none is needed. A backup of a database (procedure 11) stops it for the copy: the applications linked to
+   it cannot reach it until it runs again. Its links stay as they are (an attachment outlives a stop, and a link
+   call never starts a container), and the start that follows the backup applies them before the database runs.
 5. **A link that stays `pending`** is waiting for one of these: the database or the application has never been
    installed (the database has no container, or the application has no private network yet); one of the two is in the
    middle of an operation; the executor did not answer; the installed version of the database has more than one
