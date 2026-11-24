@@ -258,8 +258,10 @@ export class SimulatedAppStacks implements StackExecutorPort {
         throw new AppStackExecutorError("STACK_IMAGE_PULL_FAILED", "Could not download the software of the application");
       }
       if (this.images.has(req.image)) return { image: req.image, pulled: false };
-      if (appStackImageRegistryProblem(req.image) !== null) {
-        throw new AppStackExecutorError("STACK_IMAGE_MISSING", "The image is not available on this server");
+      const registry = appStackImageRegistryProblem(req.image);
+      if (registry !== null) {
+        const owner = plan.components.find((c) => c.image === req.image)?.key ?? "";
+        throw new AppStackExecutorError("STACK_IMAGE_NOT_ALLOWED", `The image of component ${owner} is not allowed (${registry})`);
       }
       this.images.add(req.image);
       this.mutate("pull", req.image);

@@ -44,7 +44,7 @@ export const AppStackExecutorReasonSchema = z.enum(APP_STACK_EXECUTOR_REASONS);
 export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorReason, ErrorCode>> = Object.freeze({
   STACK_PLAN_INVALID: "VALIDATION_ERROR", // schema/refine failure, image or entry not in the plan, route not in plan.ingress
   STACK_PLAN_HASH_MISMATCH: "HOST_POLICY_DENIED", // computeAppStackPlanHash(plan) !== plan.planHash
-  STACK_IMAGE_NOT_ALLOWED: "HOST_POLICY_DENIED", // appStackPlanImageProblems non-empty, before any Engine call
+  STACK_IMAGE_NOT_ALLOWED: "HOST_POLICY_DENIED", // appStackPlanImageProblems non-empty, or a missing image's registry not public
   STACK_IMAGE_PULL_FAILED: "DOCKER_ENGINE_UNAVAILABLE", // pull HTTP error or "error" line in the 200 stream
   STACK_IMAGE_DIGEST_MISMATCH: "HOST_POLICY_DENIED", // local image has no RepoDigests entry for the plan digest
   STACK_IMAGE_MISSING: "NOT_FOUND", // image not local (create, or pull with pullMissingImages false)

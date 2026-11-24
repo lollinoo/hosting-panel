@@ -330,7 +330,12 @@ export class AppStackEngine implements StackExecutorPort {
       if (found === null) {
         if (!this.deps.pullMissingImages) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
         // Never ask the Engine to reach this server or a private network (ADR-0036); an image already here still runs.
-        if (appStackImageRegistryProblem(image) !== null) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
+        // A permanent refusal, worded like the plan check's for an image it does not accept: trying again cannot help.
+        const registry = appStackImageRegistryProblem(image);
+        if (registry !== null) {
+          const owner = plan.components.find((c) => c.image === image)?.key ?? "";
+          refuse("STACK_IMAGE_NOT_ALLOWED", `The image of component ${owner} is not allowed (${registry})`);
+        }
         const res = await this.deps.request("POST", `/images/create?fromImage=${enc(image)}`, undefined, {
           timeoutMs: APP_STACK_PULL_ENGINE_TIMEOUT_MS,
         });

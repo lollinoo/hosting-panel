@@ -35,7 +35,12 @@ const PRIVATE = [
   "0x7f.0.0.1/x",
 ];
 const notValid = { reason: "STACK_PLAN_INVALID", code: "VALIDATION_ERROR", message: "The image reference is not valid" };
-const notHere = { reason: "STACK_IMAGE_MISSING", code: "NOT_FOUND", message: "The image is not available on this server" };
+/** A permanent refusal (the customer is sent to the administrator), not a missing image to try again later. */
+const notAllowed = {
+  reason: "STACK_IMAGE_NOT_ALLOWED",
+  code: "HOST_POLICY_DENIED",
+  message: "The image of component web is not allowed (registry_not_public)",
+};
 
 /** The version 2 test plan whose web component runs `image`. */
 function planWith(image: string): ApprovedStackPlanV2 {
@@ -103,7 +108,7 @@ describe("the pull of an image of a private registry", () => {
     const plan = planWith(image);
     const h = await setup([]);
     h.fake.pullable.add(image);
-    await expect(h.engine.pullAppStackImage({ plan, image })).rejects.toMatchObject(notHere);
+    await expect(h.engine.pullAppStackImage({ plan, image })).rejects.toMatchObject(notAllowed);
     expect(h.fake.log).toEqual([`GET /images/${enc(image)}/json`]);
     expect(h.request).toHaveBeenCalledOnce();
   });
@@ -139,7 +144,7 @@ describe("the simulator with an image of a private registry", () => {
     const image = `${name}@${DIGEST}`;
     const plan = planWith(image);
     const sim = simulator();
-    await expect(sim.pullAppStackImage({ plan, image })).rejects.toMatchObject(notHere);
+    await expect(sim.pullAppStackImage({ plan, image })).rejects.toMatchObject(notAllowed);
     expect(sim.appStacks.appStackMutations).toEqual([]);
 
     sim.appStacks.loadAppStackImage(image);

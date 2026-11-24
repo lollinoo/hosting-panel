@@ -125,20 +125,21 @@ describe("an image of a registry on this server or a private network", () => {
     expect(res.body.data.preview).not.toBeNull();
   });
 
-  it("an install whose image is not on the server fails at the download, before anything is created, and downloads nothing", async () => {
+  it("an install whose image is not on the server is refused for good at the download, before anything is created, and downloads nothing", async () => {
     const stackId = await install("private-missing");
     expect(await stackRow(stackId)).toMatchObject({ status: "failed" });
     const [op] = await opsOf(stackId);
+    // Not "try again": the customer is sent to the administrator.
     expect(op).toMatchObject({
       kind: "stack.deploy",
       status: "failed",
-      errorCode: "DOCKER_ENGINE_UNAVAILABLE",
-      errorMessage: "The server could not finish this action. Try again in a few minutes.",
+      errorCode: "HOST_POLICY_DENIED",
+      errorMessage: "The application uses software this server does not allow. Ask the administrator for help.",
     });
     const steps = await h.dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, op!.id));
     expect(steps.filter((s) => s.status === "failed").map((s) => s.key)).toEqual(["pull"]);
     const [deployment] = await h.dbClient.db.select().from(appStackDeployments).where(eq(appStackDeployments.stackId, stackId));
-    expect(deployment).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+    expect(deployment).toMatchObject({ status: "failed", problem: "STACK_IMAGE_NOT_ALLOWED" });
     expect(h.sim.appStacks.getAppStackSnapshot(stackId)).toBeNull();
     expect(pulls()).not.toContain(IMAGE);
   });
