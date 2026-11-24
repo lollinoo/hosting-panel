@@ -74,8 +74,9 @@ export function evaluateQuotaAdmission(
     };
   }
 
+  // Only a demand for services is refused here: the components of applications may leave usedServices above the maximum.
   const totalServices = quota.usedServices + pendingServices + requestedServices;
-  if (totalServices > quota.maxServices) {
+  if (requestedServices > 0 && totalServices > quota.maxServices) {
     return {
       admitted: false,
       errorCode: "QUOTA_EXCEEDED",
