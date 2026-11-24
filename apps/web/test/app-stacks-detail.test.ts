@@ -364,6 +364,24 @@ describe("detail page", () => {
     }
   });
 
+  it("issue #106: a task run that waits is followed while every listed action stays offered, with no busy line", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // The run waits under a lock of its own (ADR-0042): the detail names it and lists what the stored running allows.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_9" }), ...routes });
+      const h = await page();
+      expect(h).toContain(m.apps.progress.title.deploy);
+      for (const label of [m.apps.actions.stop, m.apps.actions.restart, m.apps.actions.reinstall, m.apps.backups.create, m.apps.backups.restore, m.apps.delete.open]) {
+        expect(h, label).toContain(`>${label}<`);
+        expect(h, label).not.toMatch(disabled(label));
+      }
+      expect(h).not.toContain(m.apps.backups.busy);
+      expect(h).not.toContain(m.apps.backups.notAllowed);
+    }
+  });
+
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
     const h = await page();
     expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`, `${UP}/tasks`]);
