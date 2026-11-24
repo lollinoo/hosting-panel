@@ -39,7 +39,7 @@ Un'importazione è **una** operazione recuperabile (`site.wordpress.import`) con
 
 Non esiste un'operazione `import.cleanup`. La pulizia prima dello scambio usa la stessa coppia dell'annullamento (`§2.2`).
 
-**Mai inviate una seconda volta, una volta partite:** `import.unpack`, `db.import{prepare}`, `db.import-load`, `import.switch`, `db.import{switch}`, `wordpress.import-finalize`. Se la loro fine non è nota, il pannello non le ripete: annulla.
+**Mai inviate una seconda volta, una volta partite:** `import.unpack`, `db.import{prepare}`, `db.import-load`, `import.switch`, `db.import{switch}`, `wordpress.import-finalize`. Se la loro fine non è nota, il pannello non le ripete: annulla. Una risposta dell'executor che il pannello non riesce a leggere (corpo non JSON o fuori schema, `5xx` senza la busta d'errore) è una fine non nota, per questi passi come per ogni altra chiamata `import.*` che cambia i file (issue #182).
 
 **Ripetibili senza danno (`R151`):** `import.stat`, `db.import{undo}`, `import.undo`, `import.finish`, `db.import{finish}`.
 
