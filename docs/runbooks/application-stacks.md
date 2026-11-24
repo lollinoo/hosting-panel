@@ -108,11 +108,15 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    one `operation.recovered.unconfirmed` row with the minutes waited and the kind of failure. An action on the
    containers leaves the stack `unknown`; a delete leaves it `delete_failed`, whose only action is **Elimina
    l'applicazione** again (it removes whatever is left, and passes over what is already gone); a backup, restore or
-   task leaves its copies, restore or run interrupted and starts nothing. Nothing was sent to the executor again: check the components on the
-   application page (and the containers on the host) before anyone acts again. An executor that cannot be reached, or
-   that answers `OPERATION_AMBIGUOUS` or `RESOURCE_LOCKED`, never closes an operation this way, and an API restart
-   starts the 30 minutes again. To close it earlier, `sudo hp-break-glass unlock --operation-id <id> --reason
-   "<reason>"` marks it failed by hand and leaves the stack as it is. A backup of a site or of the panel, and a deploy,
+   task leaves its copies, restore or run interrupted and starts nothing. Nothing was sent to the executor again:
+   check the components on the application page (and the containers on the host) before anyone acts again. An
+   executor that cannot be reached, or that answers `OPERATION_AMBIGUOUS` or `RESOURCE_LOCKED`, never closes an
+   operation this way, and an API restart starts the 30 minutes again. The executor also answers
+   `DOCKER_ENGINE_UNAVAILABLE` when Docker gives any answer other than success, or data the executor cannot read:
+   then the operation stays `unknown` with no end (its history line reads «Da verificare», and after 15 minutes the
+   admin **Stato** page shows the `operation_unknown` alert), and only the hand unlock below ends it. To close it
+   earlier, `sudo hp-break-glass unlock --operation-id <id> --reason "<reason>"` marks it failed by hand and leaves the
+   stack as it is. A backup of a site or of the panel, and a deploy,
    restart or stop of a site's container, are closed by the same rule; the container's wanted status and version stay
    as the request wrote them.
 4. **When to retry.** Only after the operation has settled (its line in the history no longer reads «Da verificare»):
