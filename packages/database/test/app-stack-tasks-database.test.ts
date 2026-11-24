@@ -8,12 +8,14 @@ import {
   APP_STACK_TASK_RUNNABLE_STATUSES,
   APP_STACK_TASK_STEPS,
   appStackLockKey,
+  appStackTaskQueueKey,
   type AppStackStatus,
 } from "@hosting-panel/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   appStackTaskRuns,
   appStackTaskScheduleOf,
+  beginAppStackTaskRunTransactional,
   appStackTaskSchedules,
   appStacks,
   closeAppStackTaskSlot,
@@ -36,6 +38,7 @@ import {
   organizations,
   outboxEvents,
   platformInstallations,
+  reopenAppStackTaskSlot,
   repairOrphanedAppStackTaskRunsTransactional,
   setAppStackTaskScheduleTransactional,
   sql,
@@ -270,7 +273,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
       ["an id that is too short", { id: "'srun_0123456789abcdef'" }, "23514"],
       ["an id with capitals", { id: "'srun_0123456789ABCDEF01234567'" }, "23514"],
       ["a status outside the list", { status: "'interrupted'", ended_at: "NOW()" }, "23514"],
-      ["a problem outside the list", { problem: "'busy'" }, "23514"],
+      ["a problem outside the list", { problem: "'stopped'" }, "23514"],
       ["exit code -1", { ...ENDED, exit_code: "-1" }, "23514"],
       ["exit code 256", { ...ENDED, exit_code: "256" }, "23514"],
       ["one byte too many", { ...ENDED, output: `repeat('x', ${String(APP_STACK_TASK_LIMITS.outputBytes + 1)})` }, "23514"],
@@ -473,7 +476,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
       await stack("stk_tk_run_b", orgB);
     });
 
-    it("queues one operation under the application's lock, one run row and nothing of the command", async () => {
+    it("queues one operation under the lock of the application's runs, one run row and nothing of the command", async () => {
       const result = await manual("stk_tk_run", "cleanup", { now: at("2026-11-23T10:00:00.000Z") });
       if (result.outcome !== "queued") throw new Error(result.outcome);
       expect(result.idempotentReplay).toBe(false);
@@ -503,7 +506,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
         kind: APP_STACK_TASK_KIND,
         resourceType: APP_STACK_RESOURCE_TYPE,
         resourceId: "stk_tk_run",
-        lockKey: appStackLockKey("stk_tk_run"),
+        lockKey: appStackTaskQueueKey("stk_tk_run"),
         status: "queued",
         requestedByUserId: USER,
       });
@@ -544,9 +547,21 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await runsOf("stk_tk_run2")).toEqual([]);
     });
 
-    it("refuses a second run, and a change of the application, while one is in progress", async () => {
+    it("refuses a second run while one waits, and a change of the application while one runs", async () => {
       expect(await manual("stk_tk_run", "report")).toEqual({ outcome: "refused", reason: "busy", status: "running" });
       expect(await manual("stk_tk_run", "cleanup")).toEqual({ outcome: "refused", reason: "busy", status: "running" });
+      // A run that waits does not hold the application (see "a run that waits for the lane of tasks"); this one begins.
+      const [waiting] = await runsOf("stk_tk_run");
+      expect(
+        await beginAppStackTaskRunTransactional(db(), {
+          runId: waiting!.id,
+          operationId: waiting!.operationId,
+          revisionId: "srev_stk_tk_run",
+          componentKey: "app",
+          startedAt: new Date(),
+        }),
+      ).toEqual({ outcome: "started" });
+      expect(await manual("stk_tk_run", "report")).toEqual({ outcome: "refused", reason: "busy", status: "running" });
       await expect(
         enqueueAppStackOperationTransactional(db(), {
           organizationId: orgA,
@@ -780,7 +795,7 @@ describe("@hosting-panel/database — tasks of applications", () => {
       if (result.outcome !== "queued") throw new Error(result.outcome);
       expect(result.run).toMatchObject({ trigger: "schedule", slotAt: S1, requestedBy: null, status: "queued", taskKey: "cleanup" });
       const [operation] = await db().select().from(operations).where(eq(operations.id, result.operationId));
-      expect(operation).toMatchObject({ kind: APP_STACK_TASK_KIND, idempotencyKey: null, requestedByUserId: null, lockKey: appStackLockKey("stk_tk_slot") });
+      expect(operation).toMatchObject({ kind: APP_STACK_TASK_KIND, idempotencyKey: null, requestedByUserId: null, lockKey: appStackTaskQueueKey("stk_tk_slot") });
       expect(await scheduleOf("stk_tk_slot", "cleanup")).toMatchObject({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null });
 
       await settle("stk_tk_slot");
@@ -849,6 +864,103 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T12:00:00Z"), row!.changedAt)).toMatchObject({ outcome: "queued" });
       expect(await scheduled("stk_tk_micro", "cleanup", at("2026-11-23T13:00:00Z"), at("2026-11-23T10:00:00.124Z"))).toEqual({ outcome: "stale" });
       await settle("stk_tk_micro");
+    });
+  });
+
+  describe("a run that waits for the lane of tasks", () => {
+    // The lane of tasks takes one run at a time for the whole server: A, B and C each have a run queued, and C's run
+    // waits behind the other two. Only a run that executes holds its application.
+    const [A, B, C] = ["stk_tk_wait_a", "stk_tk_wait_b", "stk_tk_wait_c"];
+    const stop = (stackId: string, key: string) =>
+      enqueueAppStackOperationTransactional(db(), {
+        organizationId: orgA,
+        stackId,
+        kind: "stack.stop",
+        requestedByUserId: null,
+        idempotencyKey: key,
+        requestHash: hex(key),
+        revision: null,
+        destroyData: false,
+      });
+    const begin = (stackId: string, run: { runId: string; operationId: string }, revisionId = `srev_${stackId}`) =>
+      beginAppStackTaskRunTransactional(db(), { ...run, revisionId, componentKey: "app", startedAt: at("2026-11-23T03:18:00.000Z") });
+    const lockOf = async (operationId: string) => (await db().select().from(operations).where(eq(operations.id, operationId)))[0]?.lockKey;
+    const end = (operationId: string) => db().update(operations).set({ status: "succeeded" }).where(eq(operations.id, operationId));
+    async function queuedRun(stackId: string): Promise<{ runId: string; operationId: string }> {
+      const result = await manual(stackId, "cleanup");
+      if (result.outcome !== "queued") throw new Error(`not queued: ${result.outcome}`);
+      return { runId: result.run.id, operationId: result.operationId };
+    }
+
+    beforeAll(async () => {
+      for (const id of [A, B, C, "stk_tk_wait_d"]) await stack(id);
+    });
+
+    it("does not hold its application: a stop is accepted, and the run then does not start", async () => {
+      const runs = { [A]: await queuedRun(A), [B]: await queuedRun(B), [C]: await queuedRun(C) };
+      // One run waiting or running per application stays the rule.
+      expect(await manual(C, "report")).toEqual({ outcome: "refused", reason: "busy", status: "running" });
+
+      // 03:05: the customer stops C while its run only waits.
+      const stopC = await stop(C, "tk-wait-stop-c");
+      expect(stopC.operation).toMatchObject({ kind: "stack.stop", status: "queued" });
+      expect(await lockOf(runs[C]!.operationId)).toBe(appStackTaskQueueKey(C));
+
+      // 03:00: A's run begins and from then on holds A like any operation of it.
+      expect(await begin(A, runs[A]!)).toEqual({ outcome: "started" });
+      expect(await lockOf(runs[A]!.operationId)).toBe(appStackLockKey(A));
+      expect(await getAppStackTaskRun(db(), { runId: runs[A]!.runId })).toMatchObject({ status: "running", startedAt: at("2026-11-23T03:18:00.000Z") });
+      await expect(stop(A, "tk-wait-stop-a")).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+      expect(await manual(A, "report")).toEqual({ outcome: "refused", reason: "busy", status: "running" });
+      expect(await begin(A, runs[A]!)).toEqual({ outcome: "gone" });
+      expect(await begin(B, runs[B]!)).toEqual({ outcome: "started" });
+
+      // 03:18: C's run reaches the front while the stop is in flight: it does not start and takes nothing.
+      expect(await begin(C, runs[C]!)).toEqual({ outcome: "refused", reason: "busy" });
+      expect(await lockOf(runs[C]!.operationId)).toBe(appStackTaskQueueKey(C));
+      expect(await getAppStackTaskRun(db(), { runId: runs[C]!.runId })).toMatchObject({ status: "queued", startedAt: null });
+      // Once stopped, the application is not running.
+      await end(stopC.operation!.id);
+      await status(C, "stopped");
+      expect(await begin(C, runs[C]!)).toEqual({ outcome: "refused", reason: "not_running" });
+      // An application changed since the run read its task is busy too.
+      await status(C, "running");
+      expect(await begin(C, runs[C]!, "srev_of_a_moment_ago")).toEqual({ outcome: "refused", reason: "busy" });
+      for (const id of [A, B, C]) await settle(id);
+      await status(C, "running");
+    });
+
+    it("gives a scheduled time back to its schedule when it could not start: it is tried again inside its window", async () => {
+      const D = "stk_tk_wait_d";
+      const T0 = at("2026-11-22T12:00:00.000Z");
+      const S = at("2026-11-23T03:00:00.000Z");
+      await setAppStackTaskScheduleTransactional(db(), { organizationId: orgA, stackId: D, taskKey: "cleanup", schedule: { frequency: "daily", hourUtc: 3 }, changedBy: USER, now: T0 });
+      const queued = await scheduled(D, "cleanup", S, T0);
+      if (queued.outcome !== "queued") throw new Error(queued.outcome);
+      const run = { runId: queued.run.id, operationId: queued.operationId };
+
+      const stopD = await stop(D, "tk-wait-stop-d");
+      expect(await begin(D, run)).toEqual({ outcome: "refused", reason: "busy" });
+      // The time is owed again with its reason, and its run that never started goes: a skipped time is not a run.
+      expect(await reopenAppStackTaskSlot(db(), { runId: run.runId, reason: "busy" })).toBe(true);
+      expect(await scheduleOf(D, "cleanup")).toMatchObject({ servedSlotAt: null, skippedSlotAt: S, skipReason: "busy" });
+      expect(await runsOf(D)).toEqual([]);
+      expect(await reopenAppStackTaskSlot(db(), { runId: run.runId, reason: "busy" })).toBe(false);
+
+      // The application is free again inside the window: the same time is queued once more, and runs.
+      await end(stopD.operation!.id);
+      await settle(D);
+      await status(D, "running");
+      const again = await scheduled(D, "cleanup", S, T0);
+      if (again.outcome !== "queued") throw new Error(again.outcome);
+      expect(again.run).toMatchObject({ slotAt: S, trigger: "schedule" });
+      const second = { runId: again.run.id, operationId: again.operationId };
+      expect(await begin(D, second)).toEqual({ outcome: "started" });
+      // A time that started is never given back.
+      expect(await reopenAppStackTaskSlot(db(), { runId: second.runId, reason: "busy" })).toBe(false);
+      expect(await scheduleOf(D, "cleanup")).toMatchObject({ servedSlotAt: S, skippedSlotAt: null, skipReason: null });
+      expect(await scheduled(D, "cleanup", S, T0)).toEqual({ outcome: "stale" });
+      await settle(D);
     });
   });
 

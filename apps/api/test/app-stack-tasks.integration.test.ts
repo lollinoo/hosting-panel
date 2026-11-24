@@ -185,7 +185,7 @@ describe("tasks of an application (ADR-0042)", () => {
       links: { runs: `${base(stackId)}/tasks/save/runs`, operation: `/v1/organizations/${h.a.orgId}/operations/${operationId}` },
     });
     expect(runId).toMatch(/^srun_[0-9a-f]{24}$/);
-    expect(await opRow(operationId)).toMatchObject({ kind: "stack.task", status: "queued", resourceId: stackId, lockKey: `stack:${stackId}` });
+    expect(await opRow(operationId)).toMatchObject({ kind: "stack.task", status: "queued", resourceId: stackId, lockKey: `stack:${stackId}:task` });
     // The operation and its outbox row carry the application and the run, never the command.
     const payloads = (await h.dbClient.db.select().from(outboxEvents).where(eq(outboxEvents.aggregateId, stackId))).map((e) => e.payload as Json);
     expect(payloads.find((p) => p.runId === runId)).toEqual({
@@ -327,12 +327,11 @@ describe("tasks of an application (ADR-0042)", () => {
 
   it("refuses a run while the application is being changed, while another task is queued and while it is stopped", async () => {
     const stackId = await running();
-    // One task at a time: the first is queued and holds the application.
+    // One task at a time: while the first is queued, a second one is refused. (A run that waits does not hold the
+    // application itself; one that runs does: see the two cases below and the lost answers.)
     const first = await run(stackId, "save");
     expect(first.status, first.raw).toBe(202);
     expectRefusal(await run(stackId, "count"), 409, "RESOURCE_LOCKED");
-    // And while a task is queued or running the application is not changed.
-    expectRefusal(await h.call(h.a.token, "POST", `${base(stackId)}/restart`, {}, idem()), 409, "RESOURCE_LOCKED");
     await worker.processPendingOnce();
 
     const restart = await h.call(h.a.token, "POST", `${base(stackId)}/restart`, {}, idem());
@@ -348,6 +347,29 @@ describe("tasks of an application (ADR-0042)", () => {
     expectRefusal(await run(stackId, "save"), 409, "RESOURCE_LOCKED", { field: "status", reason: "stopped" });
     expect(await runRows(stackId)).toHaveLength(1);
     expect(taskCalls(stackId)).toHaveLength(1);
+  });
+
+  it("a run that waits behind other applications' runs does not hold its application: a stop is accepted", async () => {
+    // A, B and C each run a task; the lane of tasks takes them one after the other, so C's run waits.
+    const [a, b, c] = [await running(), await running(), await running()];
+    for (const stackId of [a, b, c]) expect((await run(stackId, "save")).status).toBe(202);
+    // One run waiting or running per application stays the rule.
+    expectRefusal(await run(c, "count"), 409, "RESOURCE_LOCKED");
+    // The customer stops C while its run has not started.
+    const stop = await h.call(h.a.token, "POST", `${base(c)}/stop`, {}, idem());
+    expect(stop.status, stop.raw).toBe(202);
+    for (let round = 0; round < 10 && (await stackRow(c)).status !== "stopped"; round += 1) await worker.processPendingOnce();
+    expect((await stackRow(c)).status).toBe("stopped");
+    // C's run found its application busy (the stop in flight) or stopped: it did not start and nothing was sent.
+    const [left] = await runRows(c);
+    expect(left).toMatchObject({ status: "not_started", startedAt: null, exitCode: null });
+    expect(["busy", "component_not_running"]).toContain(left!.problem);
+    expect(taskCalls(c)).toEqual([]);
+    expect(await opRow(left!.operationId)).toMatchObject({ status: "failed", errorCode: "RESOURCE_LOCKED" });
+    for (const stackId of [a, b]) {
+      expect((await runRows(stackId)).map((r) => r.status)).toEqual(["succeeded"]);
+      expect((await stackRow(stackId)).status).toBe("running");
+    }
   });
 
   it("stores the schedule a customer chooses and refuses anything that is not one of the four choices", async () => {

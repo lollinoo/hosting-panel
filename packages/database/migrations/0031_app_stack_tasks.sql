@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS app_stack_task_runs (
   status TEXT NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued','running','succeeded','failed','timed_out','not_started','unknown')),
   problem TEXT
-    CHECK (problem IN ('component_not_running','cannot_run_tasks','task_gone','unavailable','refused','outcome_lost')),
+    CHECK (problem IN ('component_not_running','cannot_run_tasks','task_gone','unavailable','refused','outcome_lost','busy')),
   exit_code INTEGER CHECK (exit_code BETWEEN 0 AND 255),
   requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at TIMESTAMPTZ,

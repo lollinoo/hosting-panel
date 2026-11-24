@@ -7,14 +7,15 @@ import {
 } from "@hosting-panel/contracts";
 import {
   appStackTaskRuns,
+  beginAppStackTaskRunTransactional,
   eq,
   finishAppStackTaskRun,
   getAppStack,
   getAppStackTaskRun,
   operationSteps,
   renewOperationLease,
+  reopenAppStackTaskSlot,
   settleOperation,
-  startAppStackTaskRun,
   updateOperationStepTransactional,
   type AppStackTaskRunRow,
   type DatabaseClient,
@@ -35,9 +36,10 @@ import {
 } from "./app-stack-tasks.js";
 
 // Worker side of one run of a task (ADR-0042). The command is read here, when the run begins, from the template
-// version of the installed revision: the operation carries only the application and the id of the run. The row of the
-// run is always closed together with its operation; a run whose answer is lost is asked to the executor and never
-// started a second time.
+// version of the installed revision: the operation carries only the application and the id of the run. A run waits for
+// this lane without holding its application and takes the application's lock when it begins; if the application is
+// busy or not running then, it does not start. The row of the run is always closed together with its operation; a run
+// whose answer is lost is asked to the executor and never started a second time.
 
 type OperationRow = typeof operations.$inferSelect;
 const OPEN_STEP = new Set(["pending", "running", "unknown"]);
@@ -110,13 +112,23 @@ export class AppStackTaskRuntime {
     const stack = await getAppStack(db, { organizationId: run.organizationId, stackId: run.stackId });
     const installed = stack ? await installedAppStackTasks(db, stack, this.#validation) : null;
     const task = installed?.tasks.find((candidate) => candidate.key === run.taskKey);
-    if (!task) {
+    if (!task || !installed) {
       await this.#settle(op, run, this.#notStarted("task_gone"));
       return;
     }
 
-    const startedAt = new Date();
-    if (!(await startAppStackTaskRun(db, { runId: run.id, startedAt }))) {
+    const begun = await beginAppStackTaskRunTransactional(db, {
+      runId: run.id,
+      operationId: op.id,
+      revisionId: installed.revisionId,
+      componentKey: task.service,
+      startedAt: new Date(),
+    });
+    if (begun.outcome === "refused") {
+      await this.#notBegun(op, run, begun.reason);
+      return;
+    }
+    if (begun.outcome === "gone") {
       await this.#settle(op, run, this.#lost(run));
       return;
     }
@@ -173,6 +185,19 @@ export class AppStackTaskRuntime {
     // An executor that does not know the run started again since, or never got it: nobody knows how it went.
     await this.#settle(op, run, seen.state === "finished" ? this.#endOf(seen.result) : this.#lost(run));
     return "settled";
+  }
+
+  /**
+   * A run that could not begin did not start. A run of a schedule gives its time back, to be tried again inside its
+   * window (ADR-0042 A7); a run asked by a person ends as not started.
+   */
+  async #notBegun(op: OperationRow, run: AppStackTaskRunRow, reason: "busy" | "not_running"): Promise<void> {
+    const end = this.#notStarted(reason === "busy" ? "busy" : "component_not_running");
+    const settled = await this.#settleOperation(op, end.status, end.problem, async (tx) => {
+      if (run.trigger === "schedule" && (await reopenAppStackTaskSlot(tx, { runId: run.id, reason }))) return;
+      await this.#finish(tx, run, end);
+    });
+    if (!settled) await this.#finish(this.#db, run, end).catch(() => undefined);
   }
 
   /** A run that is not queued any more: closed already, its operation ends the same way; still going, nobody knows. */

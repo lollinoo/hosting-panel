@@ -19,6 +19,15 @@ export const APP_STACK_TASK_STEPS: readonly { readonly key: string; readonly lab
   Object.freeze({ key: "run", label: "Run the task" }),
 ]);
 
+/**
+ * The lock a run holds while it waits for the lane of tasks: one run waiting or running per application. It is not the
+ * application's lock (`stack:<id>`), which the run takes only when it begins: a run that waits behind the runs of other
+ * applications holds nothing a stop, an update or a delete of its application needs.
+ */
+export function appStackTaskQueueKey(stackId: string): string {
+  return `stack:${stackId}:task`;
+}
+
 /** A run can be asked only while the application is in one of these (and no other work of it is queued or running). */
 export const APP_STACK_TASK_RUNNABLE_STATUSES = ["running", "degraded"] as const satisfies readonly AppStackStatus[];
 
@@ -54,6 +63,7 @@ export const APP_STACK_TASK_RUN_PROBLEMS = [
   "unavailable", // this server cannot run tasks, or the executor was not reached
   "refused", // the executor refused the request
   "outcome_lost", // the answer was lost and the executor does not know the run
+  "busy", // when it was to begin, another action of the application was queued or running
 ] as const;
 export type AppStackTaskRunProblem = (typeof APP_STACK_TASK_RUN_PROBLEMS)[number];
 export const AppStackTaskRunProblemSchema = z.enum(APP_STACK_TASK_RUN_PROBLEMS);

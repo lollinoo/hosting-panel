@@ -3,6 +3,7 @@ import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, type AppStackTaskRunIpcRes
 import {
   appStacks,
   appStackTaskRuns,
+  appStackTaskSchedules,
   auditEvents,
   enqueueAppStackTaskRunTransactional,
   eq,
@@ -12,12 +13,14 @@ import {
   outboxEvents,
   repairOrphanedAppStackTaskRunsTransactional,
   resourceQuotas,
+  setAppStackTaskScheduleTransactional,
   transitionOperation,
 } from "@hosting-panel/database";
 import { Phase1DisabledDockerExecutor, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { APP_STACK_TASK_LEASE_EXTRA_MS, AppStackTaskRuntime, appStackTaskRefusalProblem } from "../src/app-stacks/app-stack-task-runtime.js";
+import { AppStackTaskSchedulerService } from "../src/app-stacks/app-stack-task-scheduler.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness } from "./fixtures/app-stack-harness.js";
@@ -221,6 +224,62 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
     await runtime(forStale.port, { allowlist: [] }).apply(stale.op, stale.payload);
     expect(await runRow(stale.runId)).toMatchObject({ status: "not_started", problem: "task_gone" });
     for (const fake of [disabled, forGhost, forStale]) expect(fake.run).not.toHaveBeenCalled();
+  });
+
+  it("does not start a run whose application is busy when it begins, and gives a scheduled time back", async () => {
+    const { port, run } = executor();
+    const restart = async () => {
+      const res = await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/restart`, {}, { "Idempotency-Key": randomUUID() });
+      expect(res.status, res.raw).toBe(202);
+      return res.body.data.operationId as string;
+    };
+    const free = async (operationId: string) => {
+      const worker = h.app.nestApp.get(OutboxWorkerService);
+      for (let round = 0; round < 10 && (await opRow(operationId)).status !== "succeeded"; round += 1) await worker.processPendingOnce();
+      expect((await stack()).status).toBe("running");
+    };
+
+    // A person's run waits; meanwhile the application is restarted: the run does not start and holds nothing.
+    const asked = await taken();
+    const first = await restart();
+    await runtime(port).apply(asked.op, asked.payload);
+    expect(await runRow(asked.runId)).toMatchObject({ status: "not_started", problem: "busy", startedAt: null, exitCode: null });
+    expect(await opRow(asked.op.id)).toMatchObject({
+      status: "failed",
+      errorCode: "RESOURCE_LOCKED",
+      errorMessage: "The task did not start: another action on the application was in progress.",
+      lockKey: `stack:${stackId}:task`,
+    });
+    await free(first);
+
+    // A time of a schedule in the same case is owed again with its reason, and is queued again inside its window.
+    const changedAt = new Date("2026-11-22T12:00:00.000Z");
+    const slot = new Date("2026-11-23T03:00:00.000Z");
+    const schedule = { organizationId: h.a.orgId, stackId, taskKey: "save" };
+    await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "daily", hourUtc: 3 }, changedBy: null, now: changedAt });
+    const queued = await enqueueAppStackTaskRunTransactional(h.dbClient.db, {
+      ...schedule,
+      runId: newAppEntityId("srun"),
+      componentKey: "storage",
+      appliedRevisionId: (await stack()).appliedRevisionId!,
+      request: { trigger: "schedule", slot, changedAt },
+    });
+    if (queued.outcome !== "queued") throw new Error(`not queued: ${JSON.stringify(queued)}`);
+    await transitionOperation(h.dbClient.db, queued.operationId, "processing");
+    const second = await restart();
+    await runtime(port).apply(await opRow(queued.operationId), { stackId, runId: queued.run.id, operationId: queued.operationId });
+    expect(await h.dbClient.db.select().from(appStackTaskRuns).where(eq(appStackTaskRuns.id, queued.run.id))).toEqual([]);
+    const [row] = await h.dbClient.db.select().from(appStackTaskSchedules).where(eq(appStackTaskSchedules.stackId, stackId));
+    expect(row).toMatchObject({ servedSlotAt: null, skippedSlotAt: slot, skipReason: "busy" });
+    expect(await opRow(queued.operationId)).toMatchObject({ status: "failed", errorCode: "RESOURCE_LOCKED" });
+    await free(second);
+    const scheduler = h.app.nestApp.get(AppStackTaskSchedulerService);
+    expect(await scheduler.tick(new Date(slot.getTime() + 10 * 60_000))).toMatchObject({ queued: 1 });
+    const again = await h.dbClient.db.select().from(appStackTaskRuns).where(eq(appStackTaskRuns.stackId, stackId));
+    expect(again.filter((r) => r.slotAt?.getTime() === slot.getTime()).map((r) => r.status)).toEqual(["queued"]);
+    expect(run).not.toHaveBeenCalled();
+    await setAppStackTaskScheduleTransactional(h.dbClient.db, { ...schedule, schedule: { frequency: "never" }, changedBy: null });
+    await free(again.find((r) => r.status === "queued")!.operationId);
   });
 
   it("fails an operation whose payload is not of one of its runs, and sends nothing", async () => {

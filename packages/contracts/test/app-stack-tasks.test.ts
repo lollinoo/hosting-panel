@@ -35,6 +35,8 @@ import {
   appStackTaskDueSlot,
   appStackTaskSlotAfter,
   appStackTaskSlotAtOrBefore,
+  appStackLockKey,
+  appStackTaskQueueKey,
   boundAppStackTaskOutput,
   findForbiddenPublicDtoKeys,
   findPemValues,
@@ -118,8 +120,14 @@ describe("statuses of a run", () => {
       "unavailable",
       "refused",
       "outcome_lost",
+      "busy",
     ]);
     expect(APP_STACK_TASK_SKIP_REASONS).toEqual(["busy", "not_running", "missed"]);
+  });
+
+  it("a run waits under a lock of its own, not under the application's", () => {
+    expect(appStackTaskQueueKey("stk_a")).toBe("stack:stk_a:task");
+    expect(appStackTaskQueueKey("stk_a")).not.toBe(appStackLockKey("stk_a"));
   });
 
   it("the limits of ADR-0042", () => {

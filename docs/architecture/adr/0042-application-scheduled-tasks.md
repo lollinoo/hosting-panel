@@ -75,7 +75,7 @@ Le due chiamate (esegui, leggi l'esito) sono nuove e stanno in un'interfaccia op
 
 ### A6 — Un'esecuzione è lavoro in coda dell'applicazione
 
-Lanciare un'attività crea un'operazione di tipo nuovo, `stack.task`, **sotto il blocco dell'applicazione**: mentre un'attività è in coda o gira, l'applicazione non può essere fermata, aggiornata o eliminata, e non parte un'altra attività; mentre l'applicazione viene cambiata, nessuna attività parte. La richiesta è rifiutata con `409` se l'applicazione è occupata, ferma o mai installata. Lo stato dell'applicazione non cambia per un'attività.
+Lanciare un'attività crea un'operazione di tipo nuovo, `stack.task`. Per ogni applicazione **una sola esecuzione alla volta aspetta o gira**: la richiesta è rifiutata con `409` se un'altra esecuzione dell'applicazione è in coda o in corso, se l'applicazione è occupata, ferma o mai installata. Un'esecuzione **in coda** non tiene l'applicazione: aspetta con un blocco suo (`stack:<id>:task`), e nel frattempo l'applicazione può essere fermata, aggiornata o eliminata. Un'esecuzione prende il **blocco dell'applicazione** solo quando parte: da lì finché non è chiusa l'applicazione non può essere cambiata. Se quando tocca a lei l'applicazione è occupata o ferma, l'esecuzione non parte (`not_started`, motivo «occupata» o «componente fermo»); un orario programmato in quel caso torna dovuto e viene riprovato dentro i suoi 30 minuti (A7). Lo stato dell'applicazione non cambia per un'attività.
 
 Le attività hanno una **corsia propria** nel lavoratore della coda: un'attività lunga non ferma l'installazione di un'altra applicazione, e viceversa.
 
@@ -90,7 +90,7 @@ Per ogni attività il cliente sceglie tra: **mai** (solo a mano), **ogni ora**, 
 Una passata dell'API, ogni minuto, mette in coda ciò che è in programma:
 
 - ogni orario parte **al massimo una volta**: l'orario servito è scritto nella stessa transazione che crea l'operazione;
-- se in quel momento l'applicazione è occupata, la passata riprova per **30 minuti**; poi l'orario è saltato. Un orario saltato (applicazione occupata, ferma, API spenta in quel momento) è scritto sulla riga del programma con il motivo, non come un'esecuzione, e non viene recuperato dopo;
+- se in quel momento l'applicazione è occupata, la passata riprova per **30 minuti**; poi l'orario è saltato. Lo stesso vale per un orario già in coda la cui esecuzione, quando è toccato a lei, ha trovato l'applicazione occupata o ferma: l'orario torna dovuto. Un orario saltato (applicazione occupata, ferma, API spenta in quel momento) è scritto sulla riga del programma con il motivo, non come un'esecuzione, e non viene recuperato dopo;
 - un programma di un'attività che la versione installata non ha più resta fermo e torna a valere se una versione successiva, o un ritorno indietro, riporta quell'attività.
 
 ### A8 — Che cosa resta di un'esecuzione
@@ -118,7 +118,7 @@ Italiano e inglese, senza parole da server: mai «container», «comando», «co
 
 La migrazione `0031` è additiva (due tabelle nuove) e la release precedente continua a funzionare sul database migrato finché nessun modello dichiara attività.
 
-Una voce nuova, `app-tasks`, tra le funzioni di una release. `hp-update` rifiuta di tornare a una release che non la dichiara finché esiste una versione di modello con attività, a meno di forzare: una release più vecchia rifiuterebbe quel modello a ogni nuova installazione (per lei `x-hp-tasks` è una chiave sconosciuta), non ha la passata dei programmi e non sa eseguire un'operazione `stack.task`, che resterebbe in coda tenendo il blocco dell'applicazione.
+Una voce nuova, `app-tasks`, tra le funzioni di una release. `hp-update` rifiuta di tornare a una release che non la dichiara finché esiste una versione di modello con attività, a meno di forzare: una release più vecchia rifiuterebbe quel modello a ogni nuova installazione (per lei `x-hp-tasks` è una chiave sconosciuta), non ha la passata dei programmi e non sa eseguire un'operazione `stack.task`.
 
 ### A12 — Fuori ambito
 
@@ -136,11 +136,11 @@ Ciascuno è un lavoro successivo, con la sua issue: un comando scritto da un cli
 
 ## 3. Conseguenze
 
-- **Un'attività lunga tiene occupata la sua applicazione**: per al massimo dieci minuti il cliente non può fermarla o aggiornarla. È il motivo del limite di tempo.
+- **Un'attività che gira tiene occupata la sua applicazione**: per al massimo dieci minuti (il limite di tempo) il cliente non può fermarla o aggiornarla. Un'attività **in coda** non la tiene: la corsia delle attività è una per tutto il server, e un'esecuzione può aspettare a lungo dietro quelle di altre applicazioni; in quel tempo l'applicazione si ferma, si aggiorna e si elimina come sempre, e l'esecuzione, se l'applicazione è occupata o ferma quando tocca a lei, non parte.
 - **Un componente senza `/bin/sh` non può eseguire attività.** Lo si scopre alla prima esecuzione, non quando si salva il modello.
 - **Il mascheramento copre i valori dei segreti così come sono.** Un comando che stampa un segreto trasformato (in base64, a pezzi) lo mostra a chi ha `app.read` su quell'applicazione. Il comando lo scrive l'amministratore.
 - **Un processo che toglie il segno dal proprio ambiente e lascia la sessione sopravvive alla pulizia** finché l'applicazione non viene riavviata. Resta dentro i limiti del componente.
-- **Gli orari sono in UTC e a ore intere**, e due attività della stessa applicazione alla stessa ora partono una dopo l'altra.
+- **Gli orari sono in UTC e a ore intere.** Più attività della stessa applicazione alla stessa ora non partono insieme: una sola alla volta aspetta o gira, le altre sono rifiutate come «occupata» e riprovate a ogni passata, e un orario che non riesce a partire entro 30 minuti è saltato (`busy`). Quattro attività di dieci minuti alle 03:00: la prima parte alle 03:00, la seconda verso le 03:11, la terza verso le 03:21, la quarta è saltata alle 03:30.
 - **Chi scrive un modello decide che cosa può essere lanciato** in ogni applicazione che lo usa, anche in quelle già installate, quando vengono aggiornate a quella versione.
 
 ## 4. Come è stato costruito
@@ -157,7 +157,8 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 **Database (`packages/database`, migrazione `0031`).**
 
 - Nessuna riga in `app_stack_task_schedules` vuol dire «mai»: scegliere «mai» cancella la riga. Una programmazione cambiata riparte pulita: nessun orario precedente al cambio è dovuto.
-- Un'esecuzione è una riga di `app_stack_task_runs` e un'operazione `stack.task`, scritte nella stessa transazione, sotto il blocco dell'applicazione. `stack.task` è un tipo di operazione ma **non** uno dei tipi che cambiano l'applicazione: nessuna riga di installazione, nessuna revisione, stato invariato. Si può chiedere solo mentre l'applicazione è `running` o `degraded`; mentre un'esecuzione è in coda o in corso, una modifica dell'applicazione è rifiutata (`409`).
+- Un'esecuzione è una riga di `app_stack_task_runs` e un'operazione `stack.task`, scritte nella stessa transazione. L'operazione aspetta con il blocco `stack:<id>:task` (una sola esecuzione in coda o in corso per applicazione) e, quando parte, in una sola transazione con la riga dell'applicazione bloccata, lo cambia nel blocco dell'applicazione `stack:<id>` e passa l'esecuzione a `running`; se in quel momento un'altra operazione dell'applicazione è in coda o in corso, o l'applicazione non è `running` o `degraded`, non scrive niente e l'esecuzione non parte. `stack.task` è un tipo di operazione ma **non** uno dei tipi che cambiano l'applicazione: nessuna riga di installazione, nessuna revisione, stato invariato. Si può chiedere solo mentre l'applicazione è `running` o `degraded` e non ha altre operazioni in coda o in corso; mentre un'esecuzione **gira**, una modifica dell'applicazione è rifiutata (`409`).
+- Un'esecuzione programmata che non può partire restituisce il suo orario: la riga del programma torna a doverlo, con il motivo (`busy` o `not_running`), e l'esecuzione, che non è partita, viene cancellata (un orario saltato non è un'esecuzione). La passata la rimette in coda dentro i 30 minuti; un orario partito non torna mai indietro.
 - Le applicazioni si cancellano scrivendo `deleted_at` (la riga resta): un trigger toglie le loro programmazioni e le loro esecuzioni. Le operazioni restano.
 - Per ogni attività restano le ultime 20 esecuzioni. Un'esecuzione che **non è partita** non ha un'ora di inizio, anche se era già stata inviata all'esecutore.
 - Un'esecuzione rimasta `queued` o `running` con l'operazione già chiusa (il pannello si è fermato fra le due scritture) viene chiusa dalla passata della programmazione: la prima come non partita, la seconda come esito non noto. Nessuna delle due viene rilanciata.
@@ -180,12 +181,12 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 
 - Quattro rotte sotto l'applicazione (in `docs/api/openapi.yaml`): elenco delle attività, ultime esecuzioni di una, «esegui ora» (`202`, con `Idempotency-Key`, corpo vuoto), programmazione (`PUT`). La risposta al cliente non ha il codice di uscita: resta nella riga, per chi amministra.
 - Le attività si leggono dal **sorgente** della versione del modello della revisione installata, ricontrollato con le regole di oggi: una versione che oggi non passerebbe i controlli non ha attività, e niente di suo viene eseguito. Così fanno l'elenco, la richiesta, il lavoratore e la programmazione.
-- Una corsia a parte nel lavoratore: le attività del server girano una dopo l'altra, senza fermare installazioni, backup o lavori dei siti.
+- Una corsia a parte nel lavoratore: le attività del server girano una dopo l'altra, senza fermare installazioni, backup o lavori dei siti. Un'esecuzione che aspetta il suo turno non tiene la sua applicazione; il riquadro di avanzamento della pagina la mostra comunque, se nessun'altra operazione dell'applicazione è in corso.
 - L'operazione tiene il suo blocco per il limite di tempo più 180 secondi. Se la risposta dell'esecutore si perde, l'operazione resta `unknown` e a ogni passata di recupero il pannello **legge** dall'esecutore: finita → esito scritto; ancora in corso → si aspetta, e l'applicazione resta ferma; non conosciuta → esito non noto, operazione chiusa come fallita, niente rilancio.
-- Un rifiuto certo dell'esecutore chiude l'esecuzione come non partita, con il motivo: componente fermo, il server non poteva (motore non raggiungibile, un'altra attività già in corso, esecutore senza la porta), rifiutata (etichette o richiesta non valide).
+- Un rifiuto certo dell'esecutore chiude l'esecuzione come non partita, con il motivo: componente fermo, il server non poteva (motore non raggiungibile, un'altra attività già in corso, esecutore senza la porta), rifiutata (etichette o richiesta non valide). Un'esecuzione che trova l'applicazione occupata quando tocca a lei si chiude come non partita con il motivo `busy` (una programmata restituisce invece il suo orario); una che la trova ferma, con `component_not_running`.
 - Mentre un'attività è in coda o in corso l'aggiornamento del pannello, l'aggiornamento del sistema e il riavvio dell'esecutore dall'amministrazione aspettano, come per i backup: `stack.task` è fra i lavori che li bloccano.
 - La passata della programmazione gira ogni minuto, senza variabile d'ambiente e senza una passata all'avvio. A ogni passata conta solo l'orario più recente di ogni programmazione.
-- Dopo un ritorno automatico alla release precedente, il lavoratore vecchio chiude come fallita un'operazione di un tipo che non conosce: il blocco dell'applicazione si libera. La riga dell'esecuzione viene sistemata alla passata successiva della release nuova.
+- Dopo un ritorno automatico alla release precedente, il lavoratore vecchio chiude come fallita un'operazione di un tipo che non conosce: il suo blocco si libera. La riga dell'esecuzione viene sistemata alla passata successiva della release nuova.
 
 **Pagine (`apps/web`).**
 
@@ -233,7 +234,7 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 
 - **Le decisioni A1–A12 e quelle del §4 sono dell'agente.** Nessun proprietario le ha approvate.
 - **Niente di questo è raggiungibile su un pannello installato**, finché `applicationStacksAvailable` resta `false` (lo accende la PR #43 per il backend `linux-systemd`).
-- **La corsia delle attività è una per tutto il server.** Un'attività di dieci minuti ritarda le attività delle altre applicazioni; non le installazioni.
+- **La corsia delle attività è una per tutto il server.** Un'attività di dieci minuti ritarda le attività delle altre applicazioni; non le installazioni, e chi aspetta non tiene la propria applicazione. Un'esecuzione programmata già in coda parte quando arriva il suo turno, anche più di 30 minuti dopo il suo orario. Il lavoratore non esegue in parallelo le attività di applicazioni diverse.
 - **Un processo che toglie il segno dal proprio ambiente e lascia la sessione sfugge alla pulizia**, fino al riavvio dell'applicazione. Resta nei limiti del componente.
 - **Un'immagine che avesse già `HP_TASK_RUN=srun_…` nel proprio ambiente** vedrebbe i propri processi (non il primo) chiusi dalla pulizia. Un modello non può scriverlo (i nomi che cominciano con `HP_` sono riservati); le immagini ammesse le sceglie l'amministratore, e l'effetto resterebbe dentro quell'applicazione.
 - **La regola sulla shell guarda i nomi degli argomenti.** Un programma che al suo interno lancia una shell (uno script con la sua prima riga, un programma che esegue altri programmi) non viene riconosciuto, come oggi nel comando di un componente. Il modello lo scrive l'amministratore.

@@ -3187,6 +3187,7 @@ x-hp-ingress:
         unavailable: "The server could not run it then: try again in a few minutes.",
         refused: "The server refused it: ask the administrator for help.",
         outcome_lost: "We do not know how it ended. It was not started again by itself.",
+        busy: "When it was to start, another action on the application was in progress: run it again when that ends.",
       },
       trigger: { manual: "started by hand", schedule: "scheduled" },
       runs: {

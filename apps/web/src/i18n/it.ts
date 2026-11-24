@@ -3215,6 +3215,7 @@ x-hp-ingress:
         unavailable: "Il server non poteva eseguirla in quel momento: riprova tra qualche minuto.",
         refused: "Il server l'ha rifiutata: chiedi aiuto all'amministratore.",
         outcome_lost: "Non sappiamo com'è finita. Non è stata rieseguita da sola.",
+        busy: "Quando doveva partire era in corso un'altra azione sull'applicazione: eseguila di nuovo quando è finita.",
       },
       trigger: { manual: "avviata a mano", schedule: "programmata" },
       runs: {

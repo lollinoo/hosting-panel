@@ -7,6 +7,7 @@ import {
   ApprovedStackPlanSchema,
   appStackLockKey,
   appStackPlanImageProblems,
+  appStackTaskQueueKey,
   effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
@@ -34,6 +35,7 @@ import {
   ACTIVE_OPERATION_LOCK_STATUSES,
   addAppStackDomainsTransactional,
   and,
+  asc,
   appStackComponents,
   appStackDeployments,
   appStackDomains,
@@ -315,16 +317,19 @@ export class AppStacksService {
       listAppStackParameters(db, scope),
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
+      // A run of a task that waits for its lane holds a lock of its own; an operation under the application's lock
+      // ("stack:<id>" sorts first) is the one shown.
       db
         .select({ id: operations.id })
         .from(operations)
         .where(
           and(
             eq(operations.organizationId, stack.organizationId),
-            eq(operations.lockKey, appStackLockKey(stack.id)),
+            inArray(operations.lockKey, [appStackLockKey(stack.id), appStackTaskQueueKey(stack.id)]),
             inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
           ),
         )
+        .orderBy(asc(operations.lockKey))
         .limit(1),
     ]);
     const { defaultVersionId } = template;

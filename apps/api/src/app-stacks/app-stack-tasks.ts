@@ -74,6 +74,7 @@ const FAILURE_BY_PROBLEM: Readonly<Record<AppStackTaskRunProblem, { readonly cod
   unavailable: { code: "DOCKER_ENGINE_UNAVAILABLE", text: "The task did not start: the server could not run it now. Try again in a few minutes." },
   refused: { code: "HOST_POLICY_DENIED", text: "The task did not start: the server refused it. Ask the administrator for help." },
   outcome_lost: { code: "OPERATION_AMBIGUOUS", text: "It is not known how the task ended. It was not started again." },
+  busy: { code: "RESOURCE_LOCKED", text: "The task did not start: another action on the application was in progress." },
 });
 export const APP_STACK_TASK_FAILED_TEXT = "The task ended with an error. See what it printed.";
 export const APP_STACK_TASK_TIMED_OUT_TEXT = "The task took too long and was stopped.";

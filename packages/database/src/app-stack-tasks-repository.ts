@@ -1,7 +1,8 @@
 // Tasks of applications (ADR-0042): the schedule of a task, its runs and the request side of a run.
-// A run holds the application's lock like every stack operation. Lock order: app_stacks row FOR UPDATE →
-// app_stack_task_schedules row FOR UPDATE. No function here takes or returns a command: the command of a task is read
-// from the template when the run begins. What a run printed lives only in its row.
+// A run waits for the lane of tasks under a lock of its own (one run waiting or running per application) and takes the
+// application's lock only when it begins. Lock order: app_stacks row FOR UPDATE → app_stack_task_schedules row FOR
+// UPDATE. No function here takes or returns a command: the command of a task is read from the template when the run
+// begins. What a run printed lives only in its row.
 
 import {
   APP_STACK_BUSY_STATUSES,
@@ -11,6 +12,7 @@ import {
   APP_STACK_TASK_RUNNABLE_STATUSES,
   APP_STACK_TASK_STEPS,
   appStackLockKey,
+  appStackTaskQueueKey,
   boundAppStackTaskOutput,
   type AppStackStatus,
   type AppStackTaskRunFinalStatus,
@@ -150,11 +152,17 @@ export async function enqueueAppStackTaskRunTransactional(
       if (!owed) return { outcome: "stale" };
     }
 
-    const lockKey = appStackLockKey(stack.id);
+    const lockKey = appStackTaskQueueKey(stack.id);
+    // Another run of the application waiting or running, or any other operation of it queued or running.
     const [active] = await tx
       .select({ id: operations.id })
       .from(operations)
-      .where(and(eq(operations.lockKey, lockKey), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])));
+      .where(
+        and(
+          inArray(operations.lockKey, [lockKey, appStackLockKey(stack.id)]),
+          inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
+        ),
+      );
     if (active || (APP_STACK_BUSY_STATUSES as readonly AppStackStatus[]).includes(stack.status)) {
       return { outcome: "refused", reason: "busy", status: stack.status };
     }
@@ -198,7 +206,7 @@ export async function enqueueAppStackTaskRunTransactional(
         .set({ servedSlotAt: request.slot, skippedSlotAt: null, skipReason: null })
         .where(and(eq(appStackTaskSchedules.stackId, stack.id), eq(appStackTaskSchedules.taskKey, input.taskKey)));
     }
-    // The last runs of the task stay; a run that has not ended is the newest one (the lock allows one at a time).
+    // The last runs of the task stay; a run that has not ended is the newest one (the locks allow one at a time).
     await tx.execute(sql`
       DELETE FROM app_stack_task_runs
       WHERE stack_id = ${stack.id} AND task_key = ${input.taskKey} AND ended_at IS NOT NULL AND id IN (
@@ -218,13 +226,91 @@ export async function getAppStackTaskRun(db: DatabaseExecutor, input: { readonly
 }
 
 /** queued → running. False when the run is not queued any more. */
-export async function startAppStackTaskRun(db: DatabaseExecutor, input: { readonly runId: string; readonly startedAt: Date }): Promise<boolean> {
+export async function startAppStackTaskRun(
+  db: DatabaseExecutor,
+  input: { readonly runId: string; readonly startedAt: Date; readonly componentKey?: string },
+): Promise<boolean> {
   const updated = await db
     .update(appStackTaskRuns)
-    .set({ status: "running", startedAt: input.startedAt })
+    .set({ status: "running", startedAt: input.startedAt, ...(input.componentKey === undefined ? {} : { componentKey: input.componentKey }) })
     .where(and(eq(appStackTaskRuns.id, input.runId), eq(appStackTaskRuns.status, "queued")))
     .returning({ id: appStackTaskRuns.id });
   return updated.length === 1;
+}
+
+export interface BeginAppStackTaskRunInput {
+  readonly runId: string;
+  readonly operationId: string;
+  /** The installed revision the task was read from: another one by now means the application has just changed. */
+  readonly revisionId: string;
+  /** The component that revision gives the task. */
+  readonly componentKey: string;
+  readonly startedAt: Date;
+}
+
+export type BeginAppStackTaskRunResult =
+  | { readonly outcome: "started" }
+  /** Nothing was written: the run has not started and holds nothing of the application. */
+  | { readonly outcome: "refused"; readonly reason: "busy" | "not_running" }
+  /** The run is not a queued run of this operation any more, or its application is gone. */
+  | { readonly outcome: "gone" };
+
+const isActiveLockTaken = (err: unknown): boolean => {
+  for (let current: unknown = err, depth = 0; current && typeof current === "object" && depth < 4; depth += 1) {
+    const e = current as { code?: unknown; constraint?: unknown; message?: unknown; cause?: unknown };
+    if (e.code === "23505" && (e.constraint === "uq_operations_active_lock" || String(e.message).includes("uq_operations_active_lock"))) return true;
+    current = e.cause;
+  }
+  return false;
+};
+
+/**
+ * A queued run begins: in one transaction its operation trades the lock it waited under for the application's lock and
+ * the run becomes running. Refused while another operation of the application is queued or running, or while the
+ * application is not running: then nothing is written, and the run never held the application.
+ */
+export async function beginAppStackTaskRunTransactional(
+  db: HostingPanelDatabase,
+  input: BeginAppStackTaskRunInput,
+): Promise<BeginAppStackTaskRunResult> {
+  try {
+    return await db.transaction(async (tx): Promise<BeginAppStackTaskRunResult> => {
+      const [run] = await tx
+        .select({ stackId: appStackTaskRuns.stackId, status: appStackTaskRuns.status })
+        .from(appStackTaskRuns)
+        .where(and(eq(appStackTaskRuns.id, input.runId), eq(appStackTaskRuns.operationId, input.operationId)));
+      if (!run || run.status !== "queued") return { outcome: "gone" };
+      const [stack] = await tx
+        .select()
+        .from(appStacks)
+        .where(and(eq(appStacks.id, run.stackId), isNull(appStacks.deletedAt)))
+        .for("update");
+      if (!stack) return { outcome: "gone" };
+      const [op] = await tx.select({ status: operations.status }).from(operations).where(eq(operations.id, input.operationId)).for("update");
+      if (!op || !(ACTIVE_OPERATION_LOCK_STATUSES as readonly string[]).includes(op.status)) return { outcome: "gone" };
+
+      const lockKey = appStackLockKey(stack.id);
+      const [active] = await tx
+        .select({ id: operations.id })
+        .from(operations)
+        .where(and(eq(operations.lockKey, lockKey), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])));
+      if (active || (APP_STACK_BUSY_STATUSES as readonly AppStackStatus[]).includes(stack.status)) {
+        return { outcome: "refused", reason: "busy" };
+      }
+      if (!(APP_STACK_TASK_RUNNABLE_STATUSES as readonly AppStackStatus[]).includes(stack.status) || stack.appliedRevisionId === null) {
+        return { outcome: "refused", reason: "not_running" };
+      }
+      if (stack.appliedRevisionId !== input.revisionId) return { outcome: "refused", reason: "busy" };
+
+      if (!(await startAppStackTaskRun(tx, input))) return { outcome: "gone" };
+      await tx.update(operations).set({ lockKey, updatedAt: new Date() }).where(eq(operations.id, input.operationId));
+      return { outcome: "started" };
+    });
+  } catch (err) {
+    // Taken by an operation that did not lock the application's row first.
+    if (isActiveLockTaken(err)) return { outcome: "refused", reason: "busy" };
+    throw err;
+  }
 }
 
 export interface FinishAppStackTaskRunInput {
@@ -416,4 +502,36 @@ export async function closeAppStackTaskSlot(db: DatabaseExecutor, input: SlotSco
     .where(ofSlot(input))
     .returning({ taskKey: appStackTaskSchedules.taskKey });
   return updated.length === 1;
+}
+
+/**
+ * A run of a schedule that could not begin gives its time back: the time is owed again with the reason noted and is
+ * tried at the next passes inside its window, like a time refused when it was to be queued. The run, which never
+ * started, goes: a skipped time is written on its schedule, not as a run. False, with nothing written, for a run that is
+ * not a queued run of a schedule, or when the schedule has moved on since (changed, or a later time served). Call it in
+ * the transaction that closes the run's operation.
+ */
+export async function reopenAppStackTaskSlot(
+  db: DatabaseExecutor,
+  input: { readonly runId: string; readonly reason: Exclude<AppStackTaskSkipReason, "missed"> },
+): Promise<boolean> {
+  const [run] = await db
+    .select({ stackId: appStackTaskRuns.stackId, taskKey: appStackTaskRuns.taskKey, slotAt: appStackTaskRuns.slotAt, status: appStackTaskRuns.status })
+    .from(appStackTaskRuns)
+    .where(eq(appStackTaskRuns.id, input.runId));
+  if (!run || run.status !== "queued" || run.slotAt === null) return false;
+  const reopened = await db
+    .update(appStackTaskSchedules)
+    .set({ servedSlotAt: null, skippedSlotAt: run.slotAt, skipReason: input.reason })
+    .where(
+      and(
+        eq(appStackTaskSchedules.stackId, run.stackId),
+        eq(appStackTaskSchedules.taskKey, run.taskKey),
+        eq(appStackTaskSchedules.servedSlotAt, run.slotAt),
+      ),
+    )
+    .returning({ taskKey: appStackTaskSchedules.taskKey });
+  if (reopened.length !== 1) return false;
+  await db.delete(appStackTaskRuns).where(and(eq(appStackTaskRuns.id, input.runId), eq(appStackTaskRuns.status, "queued")));
+  return true;
 }

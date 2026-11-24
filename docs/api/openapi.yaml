@@ -6423,8 +6423,11 @@ paths:
       description: >-
         Queues one run of the task named in the path; the body is empty and no command can be sent. The run is an
         operation of kind `stack.task`: it leaves the status of the application as it is, and it succeeds only when the
-        command ends with code 0. One task of an application runs at a time. Returns 422 NOT_SUPPORTED (reason
-        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+        command ends with code 0. One run of an application waits or runs at a time. A run that waits for its turn does
+        not hold the application (a stop, an update or a delete is accepted meanwhile); it holds it from when it begins
+        until it ends. A run that finds the application busy or stopped when its turn comes ends as `not_started`
+        (problem `busy` or `component_not_running`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6456,7 +6459,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: The application is being changed or another task of it is running (`RESOURCE_LOCKED`, retryable), it is stopped, failed or was never installed (`RESOURCE_LOCKED`, `details[0].reason` is its status), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: The application is being changed or another run of it is waiting or running (`RESOURCE_LOCKED`, retryable), it is stopped, failed or was never installed (`RESOURCE_LOCKED`, `details[0].reason` is its status), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -14017,8 +14020,8 @@ components:
         problem:
           type: string
           nullable: true
-          enum: [component_not_running, cannot_run_tasks, task_gone, unavailable, refused, outcome_lost, null]
-          description: Why a run did not start, or `outcome_lost` for an `unknown` one
+          enum: [component_not_running, cannot_run_tasks, task_gone, unavailable, refused, outcome_lost, busy, null]
+          description: Why a run did not start (`busy`, another action on the application was queued or running when its turn came), or `outcome_lost` for an `unknown` one
         requestedAt:
           type: string
           format: date-time

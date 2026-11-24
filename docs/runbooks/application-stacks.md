@@ -162,8 +162,12 @@ names only the key of a task, and the command is read from the template version 
    «cannot run tasks» at the first run.
 2. **What a run is.** The command is started directly in the component's running container, as the component's user,
    with nothing added but the environment variable `HP_TASK_RUN`. At its time limit the executor kills it and
-   everything it started. One task of an application runs at a time, and while it is queued or running the
-   application cannot be changed (`409 RESOURCE_LOCKED`); its status does not change.
+   everything it started. One run of an application waits or runs at a time; its status does not change. The tasks of
+   the whole server run one after another, so a run may wait for its turn: while it waits it does not hold the
+   application (a stop, an update or a delete is accepted; its operation holds the lock `stack:<id>:task`). It takes
+   the application's lock `stack:<id>` when it begins, and from then until it ends the application cannot be changed
+   (`409 RESOURCE_LOCKED`). A run that finds the application busy or stopped when its turn comes does not start
+   (`not_started`, problem `busy` or `component_not_running`); a scheduled one gives its time back instead (step 4).
 3. **See the runs of an application** (the last 20 per task are kept; the exit code is here and not on the page):
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, task_key, run_trigger, status, problem, exit_code, requested_at, ended_at from app_stack_task_runs where stack_id = '<stack id>' order by requested_at desc limit 20"
@@ -176,8 +180,12 @@ names only the key of a task, and the command is read from the template version 
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, task_key, frequency, hour_utc, weekday, served_slot_at, skipped_slot_at, skip_reason from app_stack_task_schedules order by stack_id, task_key"
    ```
-   `busy` = the application was being changed, `not_running` = it was stopped or failed, `missed` = nothing tried the
-   time within 30 minutes (the panel was off). A skipped time is never caught up.
+   `busy` = the application was being changed or another run of it was waiting or running, `not_running` = it was
+   stopped or failed, `missed` = nothing tried the time within 30 minutes (the panel was off). While `served_slot_at`
+   is older than `skipped_slot_at` (or empty), the time is still owed and tried every minute; a scheduled run that
+   could not begin leaves no row in `app_stack_task_runs` and makes its time owed again this way. After 30 minutes
+   the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
+   at the same hour run one after another; one that cannot start within 30 minutes is skipped as `busy`.
 5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
    the run (it restarted). The panel never starts it again by itself: check the application, then press «Esegui ora»
    if running it twice is safe. While the executor still knows the run, the application stays held and the panel asks
