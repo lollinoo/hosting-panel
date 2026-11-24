@@ -71,8 +71,11 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 ## 2. A stack or an operation is unknown
 
 1. **What it means.** The API sent a step to the executor and lost the answer (a timeout after the connection, problem
-   `OPERATION_AMBIGUOUS`), or the operation's lease ran out. The operation and the stack become `unknown` (a delete in
-   doubt stays `deleting`). The operation keeps its lock, so every new action on that stack is refused until it settles.
+   `OPERATION_AMBIGUOUS`), or the operation's lease ran out. An answer the panel could not read after a change was
+   sent (a success answer that is not JSON or not of the expected shape, or a server error without the error
+   envelope) counts as lost too. The operation and the stack become `unknown` (a delete in doubt stays `deleting`).
+   The operation keeps its lock, so every new action on that stack is refused until it settles. A client error
+   (`4xx`) the panel could not read is not a lost answer: the operation fails as after any other refusal.
 2. **What the panel does.** On every outbox poll and at every API start, recovery reads the stack's state from the
    executor once (a `GET`) and settles the operation from what it sees. It never continues or repeats the action
    (`HARNESS.md`, `TH-08`):
@@ -271,9 +274,9 @@ names only the key of a task, and the command is read from the template version 
    the time is given up (`served_slot_at` = `skipped_slot_at`) and never caught up. Several tasks of one application
    at the same hour run one after another; one that cannot start within 30 minutes is skipped as `busy`.
 5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
-   the run (it restarted). The panel never starts it again by itself: check the application, then press «Esegui ora»
-   if running it twice is safe. While the executor still knows the run, the application stays held and the panel asks
-   again at every recovery pass.
+   the run (it restarted), or its answer to the panel's question did not have the expected shape. The panel never
+   starts it again by itself: check the application, then press «Esegui ora» if running it twice is safe. While the
+   executor still knows the run, the application stays held and the panel asks again at every recovery pass.
 6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
    (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
    a code only when that clean-up could not finish; restart the application to be sure nothing is left).
@@ -652,9 +655,9 @@ approval.
 9. **The backup or the restore reads «Da verificare».** Procedure 2 applies: the panel reads the state of the
    application and of the job from the executor and settles the action; it never sends a copy or a restore twice. A
    job the executor no longer knows (it restarted) is closed as interrupted. The action also reads so when the panel
-   lost track of a job the executor had accepted (no answer, or the database failed while the job ran): until the
-   job's end is read, the application keeps its lock and nothing can start it, because the job may still be reading
-   or writing its data.
+   lost track of a job the executor had accepted (no answer, an answer the panel could not read, or the database
+   failed while the job ran): until the job's end is read, the application keeps its lock and nothing can start it,
+   because the job may still be reading or writing its data.
 10. **Limits.** No scheduled backup, no restore into another application, no download of a backup, no backup without
     stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: hard links, extended
     attributes, file capabilities, device files, an S3 destination, two destinations at once. A copy is taken with the
