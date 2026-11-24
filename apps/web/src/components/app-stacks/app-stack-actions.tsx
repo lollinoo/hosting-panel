@@ -85,8 +85,8 @@ export function AppStackActions({
       setNotice(t.accepted);
       router.refresh();
     } else if (sent.ok) setError(appStackRefusalText(m, ""));
-    // The plan dialog plans again on plan_changed, and shows the refusal of a private value next to its field.
-    else if (sent.reason !== "plan_changed" && !sent.field?.startsWith(SECRET_FIELD)) setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
+    // The plan dialog shows the refusal of its own confirm, next to what was typed: the page behind says nothing.
+    else if (action !== "upgrade" && action !== "rollback") setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
     return sent;
   }
 
@@ -148,6 +148,7 @@ export function AppStackActions({
           base={base}
           csrfToken={csrfToken}
           target={target}
+          status={status}
           busy={busy !== null}
           onSend={(planHash, secrets) => run(plan, { ...target, planHash, ...(secrets.length > 0 ? { secrets } : {}) })}
           onClose={() => !busyRef.current && setPlan(null)}
@@ -163,6 +164,7 @@ function PlanDialog({
   base,
   csrfToken,
   target,
+  status,
   busy,
   onSend,
   onClose,
@@ -171,6 +173,7 @@ function PlanDialog({
   base: string;
   csrfToken: string;
   target: PlanTarget;
+  status: AppStackStatus;
   busy: boolean;
   onSend: (planHash: string, secrets: TypedSecret[]) => Promise<Sent | null>;
   onClose: () => void;
@@ -180,12 +183,14 @@ function PlanDialog({
   const [error, setError] = useState<string | null>(null);
   const [ack, setAck] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  // A typed private value lives only in its field, which is emptied once the request is sent.
+  const [loading, setLoading] = useState(false);
+  // A typed private value lives only in its field, which is emptied once it is stored or refused as a value.
   const inputs = useRef(new Map<string, HTMLInputElement>());
   const asked = mode === "upgrade" ? (diff?.newSecrets ?? []) : [];
 
+  // A review asked again keeps the old one until the new one arrives: clearing it would unmount the fields and the text typed in them.
   async function load() {
-    setDiff(null);
+    setLoading(true);
     setAck(false);
     setFieldErrors({});
     try {
@@ -196,10 +201,15 @@ function PlanDialog({
       });
       const body = await res.json().catch(() => null);
       if (res.ok && body?.data) setDiff(body.data);
-      else setError(appStackChangeRefusalText(m, body?.error?.code ?? "", body?.error?.details?.[0]?.reason));
+      else {
+        setDiff(null);
+        setError(appStackChangeRefusalText(m, body?.error?.code ?? "", body?.error?.details?.[0]?.reason));
+      }
     } catch {
+      setDiff(null);
       setError(appStackRefusalText(m, ""));
     }
+    setLoading(false);
   }
 
   // Once per opening: the dialog mounts when it opens.
@@ -223,20 +233,29 @@ function PlanDialog({
     );
     if (problems.length > 0) return setFieldErrors(Object.fromEntries(problems));
     setFieldErrors({});
+    setError(null);
     const sent = await onSend(diff.planHash, secrets);
-    for (const input of inputs.current.values()) input.value = "";
-    if (sent && !sent.ok && sent.field?.startsWith(SECRET_FIELD)) {
+    // Another request was still out: nothing was sent, and nothing leaves a field.
+    if (!sent) return;
+    if (sent.ok) {
+      for (const input of inputs.current.values()) input.value = "";
+      return onClose();
+    }
+    // A value refused as a value leaves its own field only; the others keep what was typed, as on any refusal that is not about a value.
+    if (sent.field?.startsWith(SECRET_FIELD)) {
       const key = sent.field.slice(SECRET_FIELD.length);
       const text = appStackSecretRefusalText(m, sent);
+      const input = inputs.current.get(key);
+      if (input) input.value = "";
       if (asked.some((wanted) => wanted.key === key)) setFieldErrors({ [key]: text });
       else setError(text);
       return;
     }
-    if (sent && !sent.ok && sent.reason === "plan_changed") {
+    if (sent.reason === "plan_changed") {
       setError(m.apps.reasons.plan_changed);
       return load();
     }
-    if (sent) onClose();
+    setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
   }
 
   const t = mode === "upgrade" ? m.apps.upgrade : m.apps.rollback;
@@ -247,7 +266,7 @@ function PlanDialog({
           <DialogTitle>{t.title}</DialogTitle>
           {mode === "rollback" && <DialogDescription>{m.apps.rollback.body}</DialogDescription>}
         </DialogHeader>
-        {!diff && !error && (
+        {(loading || (!diff && !error)) && (
           <p role="status" className="text-sm text-muted-foreground">
             {m.apps.upgrade.loading}
           </p>
@@ -257,7 +276,7 @@ function PlanDialog({
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-        {diff && <PlanDiff diff={diff} m={m} />}
+        {diff && !loading && <PlanDiff diff={diff} m={m} />}
         {asked.length > 0 && (
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium">{m.apps.upgrade.secretsTitle}</legend>
@@ -309,7 +328,7 @@ function PlanDialog({
           <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
             {m.apps.actions.cancel}
           </Button>
-          <Button type="button" disabled={busy || !diff || (diff.dataRisk && !ack)} onClick={confirm}>
+          <Button type="button" disabled={busy || loading || !diff || (diff.dataRisk && !ack)} onClick={confirm}>
             {t.confirm}
           </Button>
         </DialogFooter>

@@ -39,7 +39,7 @@ import { format, type Messages } from "@/i18n";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
-import { appStackRefusalText, appStackSecretRefusalText } from "@/components/app-stacks/app-stack-view";
+import { appStackChangeRefusalText, appStackRefusalText, appStackSecretRefusalText } from "@/components/app-stacks/app-stack-view";
 import {
   APP_STACK_POLL_LIMIT,
   APP_STACK_POLL_MS,
@@ -450,9 +450,12 @@ describe("upgrade and rollback plan dialog", () => {
 
     keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "address_removing" });
     const parent = callHooks(AppStackActions, actionProps("running"), m, { 4: "upgrade" });
-    const { out } = run(planDialog(parent.out), m, { 0: DIFF, 2: true });
-    await click(button(out, m.apps.upgrade.confirm));
-    expect(parent.sets).toContainEqual([2, m.apps.reasons.versionAddressRemoving]);
+    const confirmed = run(planDialog(parent.out), m, { 0: DIFF, 2: true });
+    await click(button(confirmed.out, m.apps.upgrade.confirm));
+    // The dialog says it, and stays open (issue #136); the page behind says nothing.
+    expect(confirmed.sets).toContainEqual([1, m.apps.reasons.versionAddressRemoving]);
+    expect(parent.sets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+    expect(parent.sets).not.toContainEqual([4, null]);
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
@@ -599,7 +602,8 @@ describe("upgrade and rollback plan dialog", () => {
       const { input, refs } = fields(TYPED);
       const { out, sets } = dialog(d, { 0: ASKING }, refs);
       await click(button(out, en.apps.upgrade.confirm));
-      expect(input.value).toBe("");
+      // Nothing is emptied: the field goes with its node when the fresh review drops it (issue #136).
+      expect(input.value).toBe(TYPED);
       expect(sets).toContainEqual([1, en.apps.reasons.plan_changed]);
       expect(sets).toContainEqual([3, {}]);
       await vi.waitFor(() => expect(sets).toContainEqual([0, FRESH]));
@@ -620,6 +624,123 @@ describe("upgrade and rollback plan dialog", () => {
     it.each(locales)("a value the update does not need has its own sentence (%s)", (_l, m) => {
       expect(appStackRefusalText(m, "VALIDATION_ERROR", "secret_not_needed")).toBe(m.apps.reasons.secret_not_needed);
       expect(m.apps.reasons.secret_not_needed).not.toBe(m.apps.reasons.STACK_PARAMETER_INVALID);
+    });
+  });
+
+  describe("what was typed survives a refusal that is not about its value (issue #136)", () => {
+    const ASKING: AppStackPlanDiffDto = { ...DIFF, dataRisk: false, newSecrets: [{ key: "mail_password", label: "Mail password" }] };
+    const TWO: AppStackPlanDiffDto = { ...ASKING, newSecrets: [{ key: "mail_password", label: "Mail password" }, { key: "api_token", label: "Api token" }] };
+    const TYPED = "typed-mail-password-9c1";
+    const OTHER = "typed-api-token-77f";
+    const inputs = (typed: Record<string, string>) => {
+      const fields = Object.fromEntries(Object.entries(typed).map(([key, value]) => [key, { value }]));
+      return { fields, refs: [{ current: new Map(Object.entries(fields)) }] };
+    };
+    const confirmOf = (m: Messages = en) => m.apps.upgrade.confirm;
+
+    it.each([
+      ["the application is busy (409)", { ok: false, code: "RESOURCE_LOCKED", reason: "failed", field: "status" }],
+      ["too many requests (429)", { ok: false, code: "RATE_LIMITED" }],
+      ["a server error (5xx)", { ok: false, code: "INTERNAL_ERROR" }],
+      ["a lost reply", { ok: false, code: "" }],
+      ["a 400 with no detail", { ok: false, code: "VALIDATION_ERROR" }],
+    ])("%s: the dialog stays open with the value in its field, says why itself, and the next confirm sends the same value", async (_name, refusal) => {
+      keyedSend.mockResolvedValueOnce(refusal).mockResolvedValueOnce(accepted);
+      const { d, parentSets } = openDialog("upgrade");
+      const { fields, refs } = inputs({ mail_password: TYPED });
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING }, refs);
+
+      await click(button(out, confirmOf()));
+      const text = appStackChangeRefusalText(en, refusal.code, (refusal as { reason?: string }).reason, "running");
+      expect(fields.mail_password!.value).toBe(TYPED);
+      expect(sets).toContainEqual([1, text]);
+      // Said in the dialog only: the page behind keeps no copy of it, and the dialog is not closed.
+      expect(parentSets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(router.refresh).not.toHaveBeenCalled();
+      expect(html(callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING, 1: text }).out)).toContain(text);
+
+      await click(button(out, confirmOf()));
+      const bodies = keyedSend.mock.calls.map((call) => call[5]);
+      expect(bodies).toEqual([
+        { templateVersionId: "atv_notes_3", planHash: ASKING.planHash, secrets: [{ parameterKey: "mail_password", value: TYPED }] },
+        { templateVersionId: "atv_notes_3", planHash: ASKING.planHash, secrets: [{ parameterKey: "mail_password", value: TYPED }] },
+      ]);
+      expect(fields.mail_password!.value).toBe(""); // stored: emptied
+      expect(JSON.stringify([sets, parentSets])).not.toContain(TYPED);
+      expect(parentSets).toContainEqual([4, null]);
+    });
+
+    it("a refusal replaces the one before it: a new confirm clears the sentence while it waits", async () => {
+      keyedSend.mockResolvedValue({ ok: false, code: "RATE_LIMITED" });
+      const { d } = openDialog("upgrade");
+      const { refs } = inputs({ mail_password: TYPED });
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING, 1: "an earlier sentence" }, refs);
+      await click(button(out, confirmOf()));
+      expect(sets.filter(([k]) => k === 1)).toEqual([[1, null], [1, appStackChangeRefusalText(en, "RATE_LIMITED", undefined, "running")]]);
+    });
+
+    it("a rollback refused the same way stays open and says why in its own dialog", async () => {
+      keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "failed", field: "status" });
+      const { d, parentSets } = openDialog("rollback");
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: { ...DIFF, dataRisk: false } });
+      await click(button(out, en.apps.rollback.confirm));
+      expect(sets).toContainEqual([1, appStackChangeRefusalText(en, "RESOURCE_LOCKED", "failed", "running")]);
+      expect(parentSets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+      expect(parentSets).not.toContainEqual([4, null]);
+    });
+
+    it("a value refused as a value empties only its own field and says so there; the other keeps what was typed", async () => {
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "secrets.mail_password", limit: "store" });
+      const { d, parentSets } = openDialog("upgrade");
+      const { fields, refs } = inputs({ mail_password: TYPED, api_token: OTHER });
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: TWO }, refs);
+      await click(button(out, confirmOf()));
+      expect(fields.mail_password!.value).toBe("");
+      expect(fields.api_token!.value).toBe(OTHER);
+      expect(sets).toContainEqual([3, { mail_password: en.apps.reasons.value_too_long_store }]);
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(JSON.stringify([sets, parentSets])).not.toMatch(new RegExp(`${TYPED}|${OTHER}`));
+    });
+
+    it("plan_changed reloads the review and leaves the fields it still asks for as they are", async () => {
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "plan_changed", field: "planHash" });
+      const NEWER: AppStackPlanDiffDto = { ...TWO, planHash: `sha256:${"b".repeat(64)}` };
+      const fetchMock = vi.fn(async () => respond(200, { data: NEWER }));
+      vi.stubGlobal("fetch", fetchMock);
+      const { d } = openDialog("upgrade");
+      const { fields, refs } = inputs({ mail_password: TYPED });
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING }, refs);
+      await click(button(out, confirmOf()));
+      await vi.waitFor(() => expect(sets).toContainEqual([0, NEWER]));
+      expect(fields.mail_password!.value).toBe(TYPED);
+      expect(sets).toContainEqual([1, en.apps.reasons.plan_changed]);
+      // The review is not cleared meanwhile: that would unmount the fields and the text typed in them.
+      expect(sets).not.toContainEqual([0, null]);
+      // While it loads, confirm is off and the old review is not shown as current; the field is still there.
+      const loading = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING, 4: true });
+      expect(button(loading.out, confirmOf())!.props.disabled).toBe(true);
+      const markup = html(loading.out);
+      expect(markup).toContain("app-upgrade-secret-mail_password");
+      expect(markup).toContain(en.apps.upgrade.loading);
+      expect(markup).not.toContain(en.apps.upgrade.componentsTitle);
+    });
+
+    it("a review that cannot be loaded again drops the old one, so confirm cannot send a stale hash", async () => {
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "plan_changed", field: "planHash" });
+      vi.stubGlobal("fetch", vi.fn(async () => respond(400, { error: { code: "VALIDATION_ERROR", details: [{ reason: "STACK_IMAGE_NOT_ALLOWED" }] } })));
+      const { d } = openDialog("upgrade");
+      const { refs } = inputs({ mail_password: TYPED });
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 0: ASKING }, refs);
+      await click(button(out, confirmOf()));
+      await vi.waitFor(() => expect(sets).toContainEqual([1, en.apps.reasons.STACK_IMAGE_NOT_ALLOWED]));
+      expect(sets).toContainEqual([0, null]);
+      expect(button(callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, { 1: en.apps.reasons.STACK_IMAGE_NOT_ALLOWED }).out, confirmOf())!.props.disabled).toBe(true);
+    });
+
+    it("closing the dialog leaves no field: the page renders it only while a plan is open", () => {
+      expect(planDialog(callHooks(AppStackActions, actionProps("running"), en, { 4: "upgrade" }).out)).toBeDefined();
+      expect(els(callHooks(AppStackActions, actionProps("running"), en, { 4: null }).out).some((e) => typeof e.type === "function" && e.type.name === "PlanDialog")).toBe(false);
     });
   });
 
