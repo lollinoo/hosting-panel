@@ -1792,7 +1792,19 @@ paths:
     post:
       tags: [Sites]
       operationId: createSite
-      summary: Create a site container on an allocated dedicated host (site.create)
+      summary: Create a site container on an allocated dedicated host (site.create, then server administrator)
+      description: >-
+        Server administrators only: a site with no known type is a generic service (ADR 0029), so the
+        caller needs `site.create` in the organization and then the server-administrator permission, as
+        for `createService`. `site.create` is also a support visit's permission, but a server administrator
+        on an open support visit gets 403 `PERMISSION_DENIED`, with a denied audit row whose reason is
+        `SUPPORT_ACCESS_PERMISSION_DENIED`, as for `createService`. A member of another organization, or a server
+        administrator with no support visit or a closed one, gets 404 with no audit row; a server administrator
+        whose visit ran out gets 403 `PERMISSION_DENIED`; a member with the permission who is not a server
+        administrator gets 403 `PERMISSION_DENIED`. `initialDomain` is normalised and checked as the
+        `domain` of `createManagedSite`: a name that is not a valid domain gets 400 `VALIDATION_ERROR`, one
+        another site, an application or a server already uses gets 409 `DOMAIN_CONFLICT`, and one a manual
+        certificate captures gets that route's 409 (`DOMAIN_CONFLICT` or `CERTIFICATE_IN_USE`).
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
@@ -1826,8 +1838,10 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: >-
-            Domain hostname conflict or slug conflict, or the customer's site limit is reached
-            (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
+            The organization already has a site with this `slug` (`ALREADY_EXISTS`, `details[0].reason: slug_taken`);
+            `initialDomain` is already another site's, an application's or a server's name or address
+            (`DOMAIN_CONFLICT`) or a manual certificate captures it (`CERTIFICATE_IN_USE`); or the customer's site
+            limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/sites/{siteId}:
@@ -5928,6 +5942,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)
+          $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
@@ -5972,7 +5989,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6139,7 +6156,11 @@ paths:
         with other values replays the first request. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
-        `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
+        `path_target_removed` (`details[0].field: domains`). When every such address is one being removed, the refusal
+        is 409 `RESOURCE_LOCKED` with `address_removing` instead: its row goes once its route is withdrawn, so the same
+        upgrade is normally accepted a few minutes later; while the application is `failed`, or after a stop that
+        failed before it withdrew the routes, only once a start, a restart or a stop of the application succeeds. A
+        database that an application still uses is refused with
         `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
         Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
@@ -6174,7 +6195,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6191,7 +6212,8 @@ paths:
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
         refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
-        `path_target_removed`. A database that an application still uses is refused with `database_in_use`
+        `path_target_removed`; when every such address is one being removed, with 409 `RESOURCE_LOCKED`,
+        `address_removing`, until its route is withdrawn. A database that an application still uses is refused with `database_in_use`
         (`details[0].field: links`) when that revision is not one component with one port. Volume data is never
         touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
@@ -6225,7 +6247,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          description: Another operation is running, the status does not allow it, or only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`; `details[0].reason: address_removing` for the last), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6593,11 +6615,12 @@ paths:
       description: >-
         The component and port must be an entry point of the application (`VALIDATION_ERROR`,
         `details[0].reason: unknown_ingress`); at most 8 web addresses (`details[0].field: domains`,
-        `details[0].reason: STACK_QUOTA_EXCEEDED`). A hostname already on this application adds nothing and writes no
-        audit row. On a running application the route refresh is queued in the same request (ADR-0037); while a run
-        of a task of the application executes (ADR-0042, at most its time limit) the address is saved all the same and
-        nothing is queued: the application's `routesPending` stays true until the panel's first pass after the run
-        publishes it. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        `details[0].reason: STACK_QUOTA_EXCEEDED`; an address being removed is not counted). A hostname already on this
+        application adds nothing and writes no audit row; one being removed from it is refused (`DOMAIN_CONFLICT`)
+        until its route is withdrawn. On a running application the route refresh is queued in the same request
+        (ADR-0037); while a run of a task of the application executes (ADR-0042, at most its time limit) the address is
+        saved all the same and nothing is queued: the application's `routesPending` stays true until the panel's first
+        pass after the run publishes it. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
         capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6649,7 +6672,9 @@ paths:
         application that does not redirect itself and that no address redirects to (`redirect_target`,
         `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
         point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
-        pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
+        pathRoutes.<n>.componentKey`); an address being removed is no destination (`redirect_target`) and takes no
+        change (409 `RESOURCE_LOCKED`, `details[0].field: domainId`, `details[0].reason: address_removing`). A change
+        either reaches every route file of the application that may be
         published or is refused: on a running application the route refresh is queued in the same request; while a
         route file may be in place that the panel cannot rewrite now (an action in progress other than the panel's own
         route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
@@ -6702,7 +6727,8 @@ paths:
         "409":
           description: >-
             The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
-            (`RESOURCE_LOCKED`, `details[0].reason` is the status, or `task_running` while a run of a task executes)
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status, or `task_running` while a run of a task executes), or
+            the address is being removed (`RESOURCE_LOCKED`, `details[0].reason: address_removing`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -6714,7 +6740,11 @@ paths:
       description: >-
         Its route is withdrawn: on a running application the route refresh is queued in the same request (ADR-0037).
         Removing frees the hostname, so it is accepted only when that refresh withdraws it now, or when nothing of the
-        application is published and no action is open (never installed, or stopped). Otherwise (any action in
+        application is published and no action is open (never installed, or stopped). With nothing published the
+        address goes at once; otherwise it stays in the list with `removing: true`, keeping its hostname, until a route
+        file of the application without it is published (that refresh, a later one the panel retries after one that
+        failed, or a stop that withdraws the routes). Removing it again is refused (409 `RESOURCE_LOCKED`,
+        `details[0].field: domainId`, `details[0].reason: address_removing`). Otherwise (any action in
         progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
         stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
         status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
@@ -6736,7 +6766,7 @@ paths:
               $ref: "#/components/schemas/AppStackActionInput"
       responses:
         "200":
-          description: The web addresses left
+          description: The web addresses of the application, the one being removed included until its route is withdrawn
           content:
             application/json:
               schema:
@@ -6758,7 +6788,8 @@ paths:
         "409":
           description: >-
             A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
-            `details[0].reason` is the status, or `task_running` while a run of a task executes); the address is kept
+            `details[0].reason` is the status, or `task_running` while a run of a task executes); the address is kept. Or
+            the address is already being removed (`RESOURCE_LOCKED`, `details[0].reason: address_removing`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -15137,7 +15168,7 @@ components:
 
     AppStackDomainDto:
       type: object
-      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes]
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes, removing]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -15184,6 +15215,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppStackDomainPathRoute"
+        removing:
+          type: boolean
+          description: >-
+            The address was removed and still answers until the application's route file without it is published. It
+            keeps its hostname until then, takes no change, is no redirect destination and counts in no limit; it then
+            leaves the list.
 
     CreateAppStackLinkInput:
       type: object
@@ -16086,6 +16123,9 @@ components:
           type: string
         initialDomain:
           type: string
+          description: >-
+            Trimmed, lowercased, without a trailing dot, an international name in its `xn--` form; stored
+            as the site's primary address.
 
     CreateServiceInstanceInput:
       type: object

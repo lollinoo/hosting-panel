@@ -365,4 +365,70 @@ describe("@hosting-panel/database — app stack domains repository", () => {
     const [stored] = await listAppStackDomains(db(), { organizationId: orgA, stackId: id });
     expect(stored!.compression).toBe(false);
   });
+
+  // ---- an address being removed (issue #112) ----
+  /** A stack whose route file is published: its addresses may be in it. */
+  async function published(org = orgA): Promise<string> {
+    const id = await stack(org);
+    await db().update(appStacks).set({ appliedRoutesHash: "f".repeat(64) }).where(eq(appStacks.id, id));
+    return id;
+  }
+  const remove = (stackId: string, domainId: string) => removeAppStackDomainTransactional(db(), { organizationId: orgA, stackId, domainId });
+  const everyRow = (stackId: string) => listAppStackDomains(db(), { organizationId: orgA, stackId, includeRemoving: true });
+
+  it("with a route file published, a removal marks the address, which keeps its host name until a file without it is", async () => {
+    const id = await published();
+    const [row] = await add(id, ["mark.example"]);
+    await expect(remove(id, row!.id)).resolves.toBe(true);
+    expect(await listAppStackDomains(db(), { organizationId: orgA, stackId: id })).toEqual([]);
+    const [marked, ...more] = await everyRow(id);
+    expect(more).toEqual([]);
+    expect(marked).toMatchObject({ id: row!.id, hostname: "mark.example" });
+    expect(marked!.removalRequestedAt).toBeInstanceOf(Date);
+    const refusal = await add(await stack(orgB), ["mark.example"], orgB).catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ code: "DOMAIN_CONFLICT" });
+    expect((refusal as Error).message).not.toMatch(/mark\.example|org_sd/);
+    await expect(site(orgB, "mark.example")).rejects.toThrow();
+    expect(await listAppStackHostnames(db())).toContainEqual(expect.objectContaining({ hostname: "mark.example" }));
+  });
+
+  it("refuses a second removal, an edit and the same name again on an address being removed, and counts it in no limit", async () => {
+    const id = await published();
+    const names = Array.from({ length: MAX_APP_STACK_DOMAINS }, (_, i) => `n${String(i)}.removing.example`);
+    const [first] = await add(id, names);
+    await remove(id, first!.id);
+    await expect(remove(id, first!.id)).rejects.toMatchObject({ code: "REMOVING" });
+    await expect(route(id, first!.id, { compression: true })).rejects.toMatchObject({ code: "REMOVING" });
+    const again = await add(id, [first!.hostname]).catch((e: unknown) => e);
+    expect(again).toBeInstanceOf(AppStackDomainError);
+    expect(again).toMatchObject({ code: "DOMAIN_CONFLICT" });
+    await expect(add(id, ["extra.removing.example"])).resolves.toHaveLength(1);
+    expect(await everyRow(id)).toHaveLength(MAX_APP_STACK_DOMAINS + 1);
+    const [marked] = (await everyRow(id)).filter((r) => r.id === first!.id);
+    expect(marked!.compression).toBe(false);
+  });
+
+  it("an address being removed is no redirect target; the redirects to it end at once, its own one blocks nothing", async () => {
+    const id = await published();
+    const [a, b, c, d] = await add(id, ["a.going.example", "b.going.example", "c.going.example", "d.going.example"]);
+    await route(id, a!.id, { redirectToDomainId: b!.id, compression: true });
+    await route(id, d!.id, { redirectToDomainId: c!.id });
+    await remove(id, b!.id);
+    await remove(id, d!.id);
+    expect((await listAppStackDomains(db(), { organizationId: orgA, stackId: id })).map((r) => [r.hostname, r.redirectToDomainId, r.compression])).toEqual([
+      ["a.going.example", null, true],
+      ["c.going.example", null, false],
+    ]);
+    await expect(route(id, c!.id, { redirectToDomainId: b!.id })).rejects.toMatchObject({ code: "REDIRECT_TARGET" });
+    // d, being removed, still redirects to c in the published file: c may redirect all the same.
+    await expect(route(id, c!.id, { redirectToDomainId: a!.id })).resolves.toMatchObject({ after: { redirectToDomainId: a!.id } });
+  });
+
+  it("with no route file published, a removal deletes the address and frees the name at once", async () => {
+    const id = await stack();
+    const [row] = await add(id, ["free.removing.example"]);
+    await expect(remove(id, row!.id)).resolves.toBe(true);
+    expect(await everyRow(id)).toEqual([]);
+    await expect(add(await stack(orgB), ["free.removing.example"], orgB)).resolves.toHaveLength(1);
+  });
 });

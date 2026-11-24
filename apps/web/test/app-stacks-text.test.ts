@@ -21,6 +21,7 @@ import {
   APP_STACK_STATUS_TONE,
   COMPONENT_HEALTH_TONE,
   appStackBackupProblemText,
+  appStackChangeRefusalText,
   appStackProblemText,
   appStackRefusalText,
   formatCpu,
@@ -178,6 +179,27 @@ describe("application backup texts", () => {
 
   it.each(locales)("%s: no sentence a backup problem can read names a site", (_n, m) => {
     for (const p of [...BACKUP_PROBLEMS, "nope"]) expect(appStackBackupProblemText(m, p), p).not.toMatch(/\b(sito|siti|site|sites)\b/i);
+  });
+
+  it.each(locales)("%s: an address being removed has its own state and refusal, in no proxy word (issue #112)", (_n, m) => {
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "address_removing");
+    expect(text).toBe(m.apps.reasons.address_removing);
+    expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
+    for (const t of [text, m.apps.domains.removing, m.apps.domains.removingHint]) expect(t).not.toMatch(/proxy|caddy|traefik|docker|route/i);
+  });
+
+  it.each(locales)("%s: a change of version held by an address being removed says to try again in a few minutes, then to restart; other refusals read as usual", (_n, m) => {
+    const text = appStackChangeRefusalText(m, "RESOURCE_LOCKED", "address_removing", "running");
+    expect(text).toBe(m.apps.reasons.versionAddressRemoving);
+    // A failed application, or one whose stop failed, never frees the address by itself: a restart does, and a
+    // stop does when the application cannot start (a restart that fails at the health wait leaves the routes).
+    expect(text).toContain(m.apps.actions.restart);
+    expect(text).toContain(m.apps.actions.stop);
+    expect(text).not.toBe(m.apps.reasons.address_removing);
+    expect(text).not.toMatch(/proxy|caddy|traefik|docker|route/i);
+    expect(appStackChangeRefusalText(m, "VALIDATION_ERROR", "domain_target_removed")).toBe(m.apps.reasons.domain_target_removed);
+    expect(appStackChangeRefusalText(m, "VALIDATION_ERROR", "STACK_TEMPLATE_UNPUBLISHED", "draft")).toBe(m.apps.reasons.draftUnpublished);
+    expect(appStackChangeRefusalText(m, "RESOURCE_LOCKED", "stopped")).toBe(appStackRefusalText(m, "RESOURCE_LOCKED", "stopped"));
   });
 
   it.each(locales)("%s: the refusals of a backup or a restore have their own sentences", (_n, m) => {

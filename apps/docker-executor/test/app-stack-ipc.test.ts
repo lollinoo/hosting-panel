@@ -602,7 +602,7 @@ describe("application stack IPC routes", () => {
         ["syncAppStackLinks", (c) => c.syncAppStackLinks(links)],
         ["backups status", (c) => c.backups({ action: "status", jobId: stackJob.jobId } as never)],
         ["backups start", (c) => c.backups({ action: "start", siteId: "site_0123456789abcdef", jobId: "job-1" } as never)],
-        ["stopService", (c) => c.stopService("svc_0123456789abcdef")],
+        ["siteFiles list", (c) => c.siteFiles({ serviceInstanceId: "svc_0123456789abcdef", op: "list", path: "" })],
       ];
       const seen = await (await answering())(others, UNREADABLE);
       for (const name of others.map(([n]) => n)) {

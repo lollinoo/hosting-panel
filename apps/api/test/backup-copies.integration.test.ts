@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { SiteBackupsDtoSchema, type BackupJobStatus, type BackupsIpcRequest } from "@hosting-panel/contracts";
 import {
+  and,
   archiveBackupTarget,
   auditEvents,
   createDatabaseClient,
@@ -15,8 +16,10 @@ import {
   insertSiteBackup,
   insertSiteBackupCopies,
   listSiteBackupCopies,
+  operationSteps,
   operations,
   organizations,
+  outboxEvents,
   platformInstallations,
   setPolicyTargets,
   upsertBackupSettings,
@@ -26,6 +29,7 @@ import {
   siteBackupCopies,
   siteBackups,
   sites,
+  unlockOperationBreakGlassTransactional,
   updatePolicySettings,
   users,
   type DatabaseClient,
@@ -56,6 +60,12 @@ import { ControlPlaneError } from "../src/common/control-plane.error.js";
 import { AppModule } from "../src/app.module.js";
 import { AdminBackupPoliciesController } from "../src/controllers/admin-backup-policies.controller.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 
 vi.mock("../src/sites/site-files.service.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/sites/site-files.service.js")>();
@@ -102,6 +112,8 @@ describe("backup copies ledger: enqueue, apply, recover, retention", () => {
   const statusAnswers = new Map<string, BackupJobStatus | Error>();
   let forgetFails: (req: ForgetReq) => boolean = () => false;
   let startFails: (req: StartReq) => boolean = () => false;
+  /** Runs inside a `status` read, before its answer. */
+  let beforeStatus: () => Promise<void> = async () => undefined;
 
   const customer = (): SiteBackupActor => ({
     auth: { user: { id: customerId } } as unknown as SiteBackupActor["auth"],
@@ -226,6 +238,7 @@ describe("backup copies ledger: enqueue, apply, recover, retention", () => {
           if (forgetFails(req)) throw new Error("repository unavailable");
           return { jobId: req.jobId, state: "running", failure: null, snapshot: null };
         case "status": {
+          await beforeStatus();
           const answer = statusAnswers.get(req.jobId);
           if (answer instanceof Error) throw answer;
           if (answer) return answer;
@@ -293,6 +306,7 @@ describe("backup copies ledger: enqueue, apply, recover, retention", () => {
     statusAnswers.clear();
     forgetFails = () => false;
     startFails = () => false;
+    beforeStatus = async () => undefined;
     await db.delete(siteBackups);
     await db.delete(operations);
     baselineAuditIds = new Set((await db.select({ id: auditEvents.id }).from(auditEvents)).map((r) => r.id));
@@ -681,5 +695,177 @@ describe("backup copies ledger: enqueue, apply, recover, retention", () => {
     await settleSiteBackup(db, accepted.operationId, { status: "failed", problem: "other" });
     expect((await backupOf(accepted.operationId)).status).toBe(backup.status);
     expect(await settleSiteBackupCopy(db, (await copiesOf(backup.id))[0]!.id, { status: "failed", problem: "other" })).toBe(false);
+  });
+
+  describe("a read of the copy job that keeps failing (issue #183)", () => {
+    const MINUTE = 60_000;
+    const clock = { t: Date.now() };
+    const coded = (code: string) => Object.assign(new Error(`executor said ${code}`), { code });
+    const running = (jobId: string): BackupJobStatus => ({ jobId, state: "running", failure: null, snapshot: null });
+    const statusReads = (jobId: string) => calls.filter((c) => c.action === "status" && c.jobId === jobId).length;
+    const opRow = async (id: string) => (await db.select().from(operations).where(eq(operations.id, id)))[0]!;
+    const stepsOf = async (id: string) =>
+      Object.fromEntries(
+        (await db.select().from(operationSteps).where(eq(operationSteps.operationId, id))).map((s) => [s.key, [s.status, s.message]]),
+      );
+    const unconfirmed = (id: string) =>
+      db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.targetId, id), eq(auditEvents.action, RECOVERY_UNCONFIRMED_AUDIT_ACTION)));
+    const worker = () => {
+      app.outboxWorker.recoveryReads = new RecoveryReadBound(() => clock.t);
+      return app.outboxWorker;
+    };
+    /** The operation in doubt as the worker leaves it when its lease ran out while the copy job ran. */
+    const inDoubt = async (opId: string) => {
+      await db.update(operations).set({ status: "unknown", leaseExpiresAt: null }).where(eq(operations.id, opId));
+      calls.length = 0;
+      return opId;
+    };
+
+    it("a copy whose job cannot be read for the whole bound is closed as not confirmed: copy interrupted, only reads sent", async () => {
+      const opId = await inDoubt((await service.create(site, customer(), "k-183-close")).operationId);
+      const w = worker();
+      statusAnswers.set(opId, coded("INTERNAL_ERROR"));
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedSucceeded: 0, convergedFailed: 0 });
+      clock.t += RECOVERY_READ_GIVE_UP_MS - 1;
+      statusAnswers.set(opId, new Error("Unexpected token < in JSON"));
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 0 });
+      expect((await opRow(opId)).status).toBe("unknown");
+      expect((await copiesOf((await backupOf(opId)).id))[0]!.status).toBe("running");
+
+      clock.t += 1;
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedSucceeded: 0, convergedFailed: 1 });
+
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS", errorMessage: RECOVERY_UNCONFIRMED_TEXT });
+      expect(await stepsOf(opId)).toEqual({
+        backup: ["failed", RECOVERY_UNCONFIRMED_TEXT],
+        retention: ["skipped", "Skipped because backup did not finish"],
+      });
+      // What a copy whose job the executor no longer knows gets: interrupted. The job may still run on the executor.
+      const backup = await backupOf(opId);
+      expect(backup).toMatchObject({ status: "failed", problem: "interrupted" });
+      expect((await copiesOf(backup.id)).map((c) => [c.status, c.problem])).toEqual([["failed", "interrupted"]]);
+      const rows = await unconfirmed(opId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ actorType: "system", organizationId: orgId, targetType: "operation" });
+      expect(rows[0]!.details).toEqual({
+        operationId: opId,
+        kind: "site.backups.create",
+        resourceType: "site",
+        resourceId: siteId,
+        minutesWaited: 30,
+        failure: "unexpected_error",
+      });
+      // One audit row for the closing: none per copy, none of the other recovery ends.
+      expect(await audits("site.backups.copy_failed")).toEqual([]);
+      expect(await audits("operation.recovered.failed")).toEqual([]);
+      const events = await db.select().from(outboxEvents);
+      expect(events.filter((e) => (e.payload as { operationId?: string }).operationId === opId).map((e) => e.status)).toEqual(["failed"]);
+      expect(statusReads(opId)).toBe(3);
+      expect(calls.filter((c) => c.action !== "status")).toEqual([]);
+
+      // A second pass finds nothing in doubt: no read, no row.
+      const closed = await opRow(opId);
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 0 });
+      expect(statusReads(opId)).toBe(3);
+      expect(await opRow(opId)).toEqual(closed);
+      expect(await unconfirmed(opId)).toHaveLength(1);
+      expect(w.recoveryReads.size).toBe(0);
+    });
+
+    it("an executor that cannot be reached never closes it; an answer it can read starts the count again", async () => {
+      const opId = await inDoubt((await service.create(site, customer(), "k-183-wait")).operationId);
+      const w = worker();
+      const honest = [coded("DOCKER_ENGINE_UNAVAILABLE"), Object.assign(coded("OPERATION_AMBIGUOUS"), { ambiguousOutcome: true }), coded("RESOURCE_LOCKED")];
+      for (let pass = 0; pass < 48; pass += 1) {
+        statusAnswers.set(opId, honest[pass % honest.length]!);
+        expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 0 });
+        clock.t += 30 * MINUTE;
+      }
+      expect((await opRow(opId)).status).toBe("unknown");
+      expect(w.recoveryReads.size).toBe(0);
+
+      // Counted, then an answer it can read (the job runs), then counted again: the bound is counted from the last one.
+      statusAnswers.set(opId, coded("INTERNAL_ERROR"));
+      await w.recoverUnknownOperations();
+      clock.t += 20 * MINUTE;
+      statusAnswers.set(opId, running(opId));
+      await w.recoverUnknownOperations();
+      clock.t += 20 * MINUTE;
+      statusAnswers.set(opId, coded("INTERNAL_ERROR"));
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS - MINUTE;
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 0 });
+      expect((await opRow(opId)).status).toBe("unknown");
+
+      clock.t += MINUTE;
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 1 });
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+      expect((await unconfirmed(opId))[0]!.details).toMatchObject({ minutesWaited: 30, failure: "error_code" });
+      expect(calls.filter((c) => c.action !== "status")).toEqual([]);
+    });
+
+    it("never closes as succeeded: a copy saved before the reads failed keeps the backup partial, the operation fails", async () => {
+      const { operation } = await db.transaction((tx) =>
+        enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
+          organizationId: orgId,
+          kind: "site.backups.create",
+          resourceType: "site",
+          resourceId: siteId,
+          lockKey: `site:${siteId}`,
+          leaseDurationMs: BACKUP_LEASE_MS,
+          steps: SITE_BACKUP_STEPS,
+          outboxPayload: { siteId },
+        }),
+      );
+      await db.transaction((tx) =>
+        createBackupWithCopies(tx, { id: siteId }, {
+          kind: "manual",
+          operationId: operation.id,
+          targets: [
+            { targetId: local, kind: "local", priority: 1, required: true },
+            { targetId: s3B, kind: "s3", priority: 2, required: true },
+          ],
+        }),
+      );
+      const opId = await inDoubt(operation.id);
+      const w = worker();
+      // The first copy's job answers (succeeded); the second's read keeps failing.
+      statusAnswers.set(`${opId}-t2`, coded("INTERNAL_ERROR"));
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS;
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedSucceeded: 0, convergedFailed: 1 });
+
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+      const backup = await backupOf(opId);
+      expect(backup).toMatchObject({ status: "partial", snapshotId: SNAP });
+      expect((await copiesOf(backup.id)).map((c) => [c.status, c.problem])).toEqual([
+        ["succeeded", null],
+        ["failed", "interrupted"],
+      ]);
+      expect(statusReads(opId)).toBe(1);
+      expect(statusReads(`${opId}-t2`)).toBe(2);
+      expect(calls.filter((c) => c.action !== "status")).toEqual([]);
+    });
+
+    it("an operation unlocked by hand while the last read fails is left as the unlock wrote it", async () => {
+      const opId = await inDoubt((await service.create(site, customer(), "k-183-unlock")).operationId);
+      const w = worker();
+      statusAnswers.set(opId, coded("INTERNAL_ERROR"));
+      await w.recoverUnknownOperations();
+      clock.t += RECOVERY_READ_GIVE_UP_MS;
+      beforeStatus = async () => {
+        await unlockOperationBreakGlassTransactional(db, { operationId: opId, reason: "checked by hand" });
+      };
+      expect(await w.recoverUnknownOperations()).toMatchObject({ convergedFailed: 0 });
+
+      expect(await opRow(opId)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+      expect(await unconfirmed(opId)).toEqual([]);
+      const backup = await backupOf(opId);
+      expect(backup.status).toBe("running");
+      expect((await copiesOf(backup.id))[0]!.status).toBe("running");
+    });
   });
 });

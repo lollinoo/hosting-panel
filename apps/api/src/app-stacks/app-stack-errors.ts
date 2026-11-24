@@ -51,6 +51,16 @@ function isHostnameClaimViolation(err: unknown): boolean {
   return false;
 }
 
+/**
+ * A new version would drop what only addresses being removed still point at (issue #112): the same refusal as a change
+ * of such an address, as it ends by itself once their route is withdrawn.
+ */
+export function addressRemovingInTheWay(): ControlPlaneError {
+  const message =
+    "A web address this version no longer serves is still being removed. Try again in a few minutes. If it is still not possible, restart the application (or stop it, if it does not start), then try again.";
+  return appRefusal("RESOURCE_LOCKED", message, { field: "domains", message, reason: "address_removing" }, false);
+}
+
 function mapRepositoryError(err: AppStackRepositoryError): ControlPlaneError {
   switch (err.code) {
     case "NOT_FOUND":
@@ -81,6 +91,8 @@ function mapRepositoryError(err: AppStackRepositoryError): ControlPlaneError {
       const message = "A path of a web address still points at a part this version removes. Remove the path first.";
       return appRefusal("VALIDATION_ERROR", message, { field: "domains", message, reason: "path_target_removed" });
     }
+    case "ADDRESS_REMOVING":
+      return addressRemovingInTheWay();
     case "DATABASE_IN_USE": {
       const message = "Applications still use this database. Disconnect them first.";
       return appRefusal("VALIDATION_ERROR", message, { field: "links", message, reason: "database_in_use" });
@@ -137,6 +149,11 @@ function mapDomainError(err: AppStackDomainError): ControlPlaneError {
     case "PASSWORD_REQUIRED": {
       const message = "Choose a password for this web address.";
       return appRefusal("VALIDATION_ERROR", message, { field: "protection.password", message, reason: "password_required" });
+    }
+    case "REMOVING": {
+      // It ends by itself once its route is withdrawn (issue #112): asking again changes nothing.
+      const message = "This web address is being removed.";
+      return appRefusal("RESOURCE_LOCKED", message, { field: "domainId", message, reason: "address_removing" }, false);
     }
   }
 }

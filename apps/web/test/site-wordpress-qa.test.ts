@@ -69,7 +69,7 @@ import { I18nProvider } from "@/i18n/provider";
 import { SiteTabs } from "@/components/customer/site-tabs";
 import { SiteBackups } from "@/components/customer/site-backups";
 import { SiteWordpress, WordpressLastUpdate, wordpressErrorText } from "@/components/customer/site-wordpress";
-import { ResetConfirmView, UpdateConfirmView, WordpressResetDialog } from "@/components/customer/wordpress-dialogs";
+import { ResetConfirmView, UpdateConfirmView, WordpressResetDialog, WordpressUpdateDialog } from "@/components/customer/wordpress-dialogs";
 import SiteLayout from "@/app/sites/[siteId]/layout";
 import SiteOverviewPage from "@/app/sites/[siteId]/page";
 import SiteWordpressPage from "@/app/sites/[siteId]/wordpress/page";
@@ -537,5 +537,85 @@ describe("B6. the BFF refuses before any upstream call", () => {
     expect(options.method).toBe("POST");
     expect(options.idempotencyKey).toBeUndefined();
     expect(options.timeoutMs).toBeGreaterThan(75_000);
+  });
+});
+
+describe("B7. a check or an update keeps its Idempotency-Key until an answer comes (issue #146)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const answering = (answers: Array<number | "lost">) => {
+    const sent: Array<[string, string | null]> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        sent.push([url, new Headers(init?.headers).get("idempotency-key")]);
+        const a = answers.shift() ?? "lost";
+        if (a === "lost") throw new TypeError("network down");
+        const body = a < 300 ? { data: { siteId: "site_qa1", operationId: `op_${"c".repeat(32)}` } } : { error: { code: "INTERNAL_ERROR", message: "x" } };
+        return new Response(JSON.stringify(body), { status: a });
+      }),
+    );
+    return sent;
+  };
+  const settle = async () => {
+    for (let i = 0; i < 10; i++) await tick();
+  };
+  const props = { basePath: BASE, initial: dto(), csrfToken: "c" };
+  const sameThenNew = (sent: Array<[string, string | null]>, url: string) => {
+    expect(sent.map(([u]) => u)).toEqual(Array(4).fill(url));
+    const keys = sent.map(([, key]) => key);
+    expect(keys[0]).toMatch(/\S{8,}/);
+    expect(keys.slice(0, 3)).toEqual([keys[0], keys[0], keys[0]]);
+    expect(keys[3]).toMatch(/\S{8,}/);
+    expect(keys[3]).not.toBe(keys[0]);
+  };
+
+  it("Check now: no answer, then a 503, then the 202 all carry one key; the next check has a new one", async () => {
+    const sent = answering(["lost", 503, 202, 202]);
+    const tab = slot();
+    const labels: unknown[] = [en.site.wordpress.header.checkNow, en.site.wordpress.header.checking];
+    for (let i = 0; i < 4; i++) {
+      const button = tab.run(SiteWordpress, props).find((e) => labels.includes((e.props as { children?: unknown }).children))!;
+      (button.props as { onClick: () => void }).onClick();
+      await settle();
+    }
+    sameThenNew(sent, `${BASE}/refresh`);
+  });
+
+  it("an update: no answer, then a 503, then the 202 all carry one key; the next update has a new one", async () => {
+    const sent = answering(["lost", 503, 202, 202]);
+    const tab = slot();
+    const core = format(en.site.wordpress.tables.updateLabel, { name: en.site.wordpress.tables.core, version: STATE.coreUpdate! });
+    const dialog = () => tab.run(SiteWordpress, props).find((e) => e.type === WordpressUpdateDialog);
+    for (let i = 0; i < 4; i++) {
+      if (!dialog()) {
+        const open = tab.run(SiteWordpress, props).find((e) => (e.props as { "aria-label"?: string })["aria-label"] === core)!;
+        (open.props as { onClick: () => void }).onClick();
+      }
+      await (dialog()!.props as { onConfirm: () => Promise<unknown> }).onConfirm();
+    }
+    sameThenNew(sent, `${BASE}/updates`);
+  });
+
+  it("a check whose answer was lost does not come back after an update was accepted: the next check has a new key", async () => {
+    const sent = answering(["lost", 202, 202]);
+    const tab = slot();
+    const labels: unknown[] = [en.site.wordpress.header.checkNow, en.site.wordpress.header.checking];
+    const checkNow = async () => {
+      const button = tab.run(SiteWordpress, props).find((e) => labels.includes((e.props as { children?: unknown }).children))!;
+      (button.props as { onClick: () => void }).onClick();
+      await settle();
+    };
+    await checkNow();
+    const core = format(en.site.wordpress.tables.updateLabel, { name: en.site.wordpress.tables.core, version: STATE.coreUpdate! });
+    const open = tab.run(SiteWordpress, props).find((e) => (e.props as { "aria-label"?: string })["aria-label"] === core)!;
+    (open.props as { onClick: () => void }).onClick();
+    await (tab.run(SiteWordpress, props).find((e) => e.type === WordpressUpdateDialog)!.props as { onConfirm: () => Promise<unknown> }).onConfirm();
+    // The accepted update ran under the site's lock, so the lost check has ended; the next check is a new one.
+    await checkNow();
+    expect(sent.map(([u]) => u)).toEqual([`${BASE}/refresh`, `${BASE}/updates`, `${BASE}/refresh`]);
+    const keys = sent.map(([, key]) => key);
+    for (const k of keys) expect(k).toMatch(/\S{8,}/);
+    expect(new Set(keys).size).toBe(3);
   });
 });

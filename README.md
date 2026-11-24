@@ -150,7 +150,7 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.17.6
+V=0.17.7
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -361,7 +361,7 @@ Cosa sapere prima:
 
 ```bash
 sudo hp-update                    # ultima release
-sudo hp-update --version 0.17.6    # oppure --archive <file>
+sudo hp-update --version 0.17.7    # oppure --archive <file>
 ```
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--allow-feature-loss`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall (**il proxy non viene ricreato**: i certificati caricati a mano e le destinazioni di backup non richiedono nessuna interruzione). Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito, `8` downgrade rifiutato perché la release di destinazione perderebbe una funzione già in uso.

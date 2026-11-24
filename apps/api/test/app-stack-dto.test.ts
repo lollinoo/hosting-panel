@@ -114,6 +114,7 @@ const domain = (id: string, hostname: string, status: AppStackDomainRow["status"
   pathRoutes: [],
   createdAt: NOW,
   updatedAt: NOW,
+  removalRequestedAt: null,
 });
 const revision: AppStackRevisionRow = {
   id: REVISION,
@@ -400,8 +401,13 @@ describe("row mappers", () => {
       compression: false,
       protection: null,
       pathRoutes: [],
+      removing: false,
     });
     expect(AppStackDomainDtoSchema.strict().parse(dto)).toEqual(dto);
+    // Issue #112: an address being removed says so, in no proxy word.
+    const going = appStackDomainDto({ ...domain("sdom_2", "old.example.test", "active"), removalRequestedAt: NOW });
+    expect(going.removing).toBe(true);
+    expect(AppStackDomainDtoSchema.strict().parse(going)).toEqual(going);
   });
 
   it("maps the routing options of a domain row: the user name, never the verifier of the password", () => {

@@ -88,6 +88,18 @@ describe("admin domains", () => {
     expect(fetchUpstream).toHaveBeenLastCalledWith("v1/admin/sites/s1/domains", expect.objectContaining({ method: "GET" }));
   });
 
+  it("admin add forwards the Idempotency-Key it carries (a certificate needs it), and an add without one goes as before", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 201, data: { data: {} } });
+    const withCertificate = { hostname: "a.it", tlsVersionId: "tv_1" };
+    expect((await addDomain(req("POST", { "Idempotency-Key": "k-admin-add" }, withCertificate), site)).status).toBe(201);
+    expect(fetchUpstream).toHaveBeenLastCalledWith(
+      "v1/admin/sites/s1/domains",
+      expect.objectContaining({ method: "POST", idempotencyKey: "k-admin-add", body: withCertificate }),
+    );
+    expect((await addDomain(req("POST", {}, { hostname: "a.it" }), site)).status).toBe(201);
+    expect(fetchUpstream.mock.calls[1]![1]).not.toHaveProperty("idempotencyKey");
+  });
+
   it("admin sites page shows certificate alerts", () => {
     const alerts = [
       { kind: "expiring" as const, siteId: "s1", siteName: "Hotel", hostname: "hotel.it", expiresAt: "2026-12-01T12:00:00Z", problem: null },

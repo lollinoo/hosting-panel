@@ -26,6 +26,13 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { ZodError } from "zod";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
+import {
+  RECOVERY_UNCONFIRMED_TEXT,
+  closeUnconfirmedOperation,
+  type RecoveryGiveUp,
+  type RecoveryOutcome,
+  type RecoveryReadBound,
+} from "../runtime/recovery-read-bound.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import {
@@ -155,7 +162,7 @@ export class AppStackTaskRuntime {
   }
 
   /** Worker recovery of an `unknown` `stack.task` operation: a read, it never starts the command. */
-  public async recover(op: OperationRow): Promise<"pending" | "settled"> {
+  public async recover(op: OperationRow, reads?: RecoveryReadBound): Promise<RecoveryOutcome> {
     const db = this.#db;
     const [run] = await db.select().from(appStackTaskRuns).where(eq(appStackTaskRuns.operationId, op.id));
     if (!run) {
@@ -185,12 +192,31 @@ export class AppStackTaskRuntime {
         await this.#settle(op, run, this.#lost(run));
         return "settled";
       }
+      return this.#unconfirmed(op, run, reads?.failed(op.id, err) ?? null);
+    }
+    if (seen.state === "running") {
+      reads?.answered(op.id);
       return "pending";
     }
-    if (seen.state === "running") return "pending";
     // An executor that does not know the run started again since, or never got it: nobody knows how it went.
     await this.#settle(op, run, seen.state === "finished" ? this.#endOf(seen.result) : this.#lost(run));
     return "settled";
+  }
+
+  /**
+   * Issue #183: the reads of the run have failed, for a reason waiting does not cure, for the whole bound. The run is
+   * closed as one whose outcome is lost and is never started again; the operation gets its own code and text and an audit
+   * row. Released, the lock lets a new run or a change of the containers be asked: while the old run still goes, the
+   * executor refuses both (STACK_BUSY). An operation that is no longer unknown (unlocked by hand meanwhile) is left as
+   * it is, its run too.
+   */
+  async #unconfirmed(op: OperationRow, run: AppStackTaskRunRow, giveUp: RecoveryGiveUp | null): Promise<RecoveryOutcome> {
+    if (giveUp === null) return "pending";
+    const closed = await closeUnconfirmedOperation(this.#db, op.id, giveUp, async (tx) => {
+      await this.#finish(tx, run, this.#lost(run));
+      await this.#closeSteps(tx, op.id, "failed", RECOVERY_UNCONFIRMED_TEXT);
+    });
+    return closed ? "unconfirmed" : "pending";
   }
 
   /**
@@ -256,21 +282,23 @@ export class AppStackTaskRuntime {
       failure === null ? { status: "succeeded" } : { status: "failed", errorCode: failure.code, errorMessage: failure.text },
       async (tx) => {
         await write?.(tx);
-        const steps = await tx
-          .select({ key: operationSteps.key, status: operationSteps.status })
-          .from(operationSteps)
-          .where(eq(operationSteps.operationId, op.id));
-        for (const step of steps) {
-          if (!OPEN_STEP.has(step.status)) continue;
-          await updateOperationStepTransactional(
-            tx,
-            op.id,
-            step.key,
-            failure === null ? "succeeded" : "failed",
-            failure === null ? APP_STACK_TASK_STEP_DONE_TEXT : failure.text,
-          );
-        }
+        await this.#closeSteps(
+          tx,
+          op.id,
+          failure === null ? "succeeded" : "failed",
+          failure === null ? APP_STACK_TASK_STEP_DONE_TEXT : failure.text,
+        );
       },
     );
+  }
+
+  async #closeSteps(tx: HostingPanelDatabase, operationId: string, status: "succeeded" | "failed", text: string): Promise<void> {
+    const steps = await tx
+      .select({ key: operationSteps.key, status: operationSteps.status })
+      .from(operationSteps)
+      .where(eq(operationSteps.operationId, operationId));
+    for (const step of steps) {
+      if (OPEN_STEP.has(step.status)) await updateOperationStepTransactional(tx, operationId, step.key, status, text);
+    }
   }
 }

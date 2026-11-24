@@ -69,7 +69,7 @@ export default async function SiteLayout({
           </a>
         )}
       </div>
-      <SiteTabs siteId={site.id} typeTabs={type?.available(capabilities) ? type.tabs : []} />
+      <SiteTabs siteId={site.id} typeTabs={type?.available(capabilities) ? type.tabs : []} managed={type !== null} />
       {children}
     </div>
   );

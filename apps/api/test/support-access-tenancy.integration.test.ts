@@ -28,6 +28,16 @@ const PW = "sentinel-admin-pass-0001";
 const SETUP = { installationName: "Test", hostHostname: "panel.example.test", hostIpv4: "10.0.0.1" };
 const ORG_ROUTE = /^\/v1\/organizations\/:orgId(\/|$)/;
 const SUPPORT_KEYS: readonly string[] = SUPPORT_ACCESS_PERMISSIONS;
+// One route of each application family and of notifications: outside the visit's keys, so an open visit is refused on them.
+const APP_ROUTES = [
+  "GET /v1/organizations/:orgId/app-stacks/:stackId",
+  "GET /v1/organizations/:orgId/app-stacks/:stackId/domains",
+  "GET /v1/organizations/:orgId/app-stacks/:stackId/links",
+  "GET /v1/organizations/:orgId/app-stacks/:stackId/tasks",
+  "GET /v1/organizations/:orgId/app-stacks/:stackId/backups",
+  "GET /v1/organizations/:orgId/app-templates",
+  "GET /v1/organizations/:orgId/notifications",
+];
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Route = { method: string; path: string };
@@ -242,6 +252,10 @@ describe("support access tenancy over every organization route", () => {
     ]) {
       expect(orgRoutes()).toContainEqual({ method, path: `/v1/organizations/:orgId/managed-sites/:siteId${path}` });
     }
+    for (const route of APP_ROUTES) {
+      const [method, path] = route.split(" ");
+      expect(orgRoutes()).toContainEqual({ method, path });
+    }
   });
 
   it("without a visit, with a closed one, and on any other organization: 404 and no audit row on every route", async () => {
@@ -342,14 +356,15 @@ describe("support access tenancy over every organization route", () => {
     const answers = await walk(orgA, adminToken);
     const table = answers.map((a) => ({ route: a.route, permission: permissionOf.get(a.route)!, status: a.status, code: a.code }));
     const wrong = answers.filter((a) => {
-      const inside = SUPPORT_KEYS.includes(permissionOf.get(a.route)!);
+      // The generic site route asks site.create, a visit's key, and refuses a visit all the same (#116, ADR 0029 §2).
+      const inside = SUPPORT_KEYS.includes(permissionOf.get(a.route)!) && a.route !== "POST /v1/organizations/:orgId/sites";
       const denied = a.status === 403 && a.code === "PERMISSION_DENIED" && a.rows.length === 1
         && (a.rows[0]!.details as Json).reason === "SUPPORT_ACCESS_PERMISSION_DENIED";
       // Inside: a 404 here can only be a missing resource (a valid grant never hides the organization), so no denied row may appear.
       return inside ? a.status === 403 || a.status === 401 || a.status >= 500 || a.rows.some((r) => (r.details as Json).outcome === "denied") : !denied;
     });
     none(wrong.map((a) => JSON.stringify(table.find((t) => t.route === a.route))));
-    for (const closed of ["GET /v1/organizations/:orgId/members", "GET /v1/organizations/:orgId/quotas", "GET /v1/organizations/:orgId"]) {
+    for (const closed of ["GET /v1/organizations/:orgId/members", "GET /v1/organizations/:orgId/quotas", "GET /v1/organizations/:orgId", ...APP_ROUTES]) {
       expect(table.find((t) => t.route === closed)?.status, closed).toBe(403);
     }
     expect((await close()).status).toBe(204);

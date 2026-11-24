@@ -409,9 +409,10 @@ export function appStackOptionsApply(
 }
 
 /**
- * ADR-0037: removing an address frees its host name for anyone, so it is accepted only when the refresh queued with it
- * withdraws the name now (the routes follow the addresses), or when nothing is published and no action is open. Not
- * while the panel's own refresh runs (it may have read the address already) nor during a first install.
+ * ADR-0037: removing an address must end its route, so it is accepted only when the refresh queued with it withdraws the
+ * name now (the routes follow the addresses), or when nothing is published and no action is open. Not while the panel's
+ * own refresh runs (it may have read the address already) nor during a first install. The name stays held until a route
+ * file without it is published (issue #112).
  */
 export function appStackAddressRemovable(
   stack: Pick<AppStackRow, "status" | "appliedRevisionId" | "appliedRoutesHash">,

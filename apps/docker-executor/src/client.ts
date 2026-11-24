@@ -264,8 +264,64 @@ export class ExecutorIpcClientError extends Error {
   }
 }
 
-/** The backup actions of an application that start or end a job on the server (ADR-0038): see `sendChange`. */
-const BACKUPS_CHANGE_ACTIONS: ReadonlySet<BackupsRequest["action"]> = new Set(["stackStart", "stackRestore", "stackForget"]);
+/**
+ * How an answer that cannot be read ends, per call (#182). "change": a lost answer, see `sendChange`. "read": a failed
+ * read, which the recoveries rely on. "kept": a change that still fails as an ordinary error, for the reason next to it.
+ * A new op or action does not build until it is classified here.
+ */
+type UnreadableAnswerClass = "change" | "read" | "kept";
+
+const BACKUPS_ANSWER_CLASS: Readonly<Record<BackupsRequest["action"], UnreadableAnswerClass>> = {
+  test: "read",
+  // Writes a marker and probes the volume. No test result is recorded, the API answers with its existing "connectivity
+  // test timed out" error, and running the set-up again is safe (ADR-0032).
+  localInit: "change",
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
+  start: "kept",
+  status: "read",
+  // A failed forget and a lost one end the same way for the retention: it is tried again the next night.
+  forget: "kept",
+  // See #202: the restore settles through a call that repeats (#199).
+  restore: "kept",
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
+  archive: "kept",
+  readArchive: "read",
+  // Best effort: the caller ignores every failure, and the executor drops an archive nobody collects.
+  discardArchive: "kept",
+  // The restore recovery's own settling call: any failure leaves the restore pending, and the next pass asks again.
+  settle: "kept",
+  // See #202: as a change its operation would hold the lock until the status read answers or the bound of #183
+  // closes it.
+  panelStart: "kept",
+  siteState: "read",
+  // The backup jobs of an application (ADR-0038).
+  stackStart: "change",
+  stackRestore: "change",
+  stackForget: "change",
+};
+
+const SITE_FILES_ANSWER_CLASS: Readonly<Record<SiteFilesRequest["op"], UnreadableAnswerClass>> = {
+  list: "read",
+  stat: "read",
+  read: "read",
+  write: "change",
+  mkdir: "change",
+  move: "change",
+  delete: "change",
+  archive: "change",
+  extract: "change",
+  "import.put": "change",
+  // Not a read: it moves the uploaded file into the import's slot, and a second call does not find it.
+  "import.take": "change",
+  "import.stat": "read",
+  "import.discard": "change",
+  "import.unpack": "change",
+  "import.switch": "change",
+  "import.undo": "change",
+  "import.finish": "change",
+};
 
 /**
  * An answer the client could not read after a change was sent: the executor may have made the change, so it is a lost
@@ -369,6 +425,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return ExecutorHealthResponseSchema.parse(json);
   }
 
+  /** Kept as it is (#182): nothing in the API calls it. */
   public async ensureIngressProxy(): Promise<{
     readonly component: "ingress_proxy";
     readonly status: "running";
@@ -418,15 +475,10 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
       } as DeployServiceIpcRequest["spec"],
     };
 
-    const json = await this.sendSignedJsonRequest(
-      "POST",
-      "/v1/services/deploy",
-      payload,
-      DEPLOY_TIMEOUT_MS,
-    );
-    return ExecutionResultDataEnvelopeSchema.parse(json).data;
+    return this.sendChange("/v1/services/deploy", payload, DEPLOY_TIMEOUT_MS, ExecutionResultDataEnvelopeSchema.shape.data);
   }
 
+  /** Kept as it is, see #202: the restore's database-password job is sent again on every recovery pass. */
   public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
     const payload: SiteJobIpcRequest = {
       jobId: req.jobId,
@@ -449,12 +501,17 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return checked?.success === true ? { ...data, result: checked.data } : data;
   }
 
+  /** Kept as it is (#182): the site's removal fails its operation on any failure of this call. */
   public async purgeSite(siteId: string): Promise<void> {
     assertSafeIdentifier(siteId, "siteId");
     const payload: SitePurgeIpcRequest = { siteId };
     await this.sendSignedJsonRequest("POST", "/v1/sites/purge", payload, SITE_PURGE_TIMEOUT_MS);
   }
 
+  /**
+   * Kept as it is (#182): the domains change fails its operation on any failure and the reconciler publishes the routes
+   * again; the certificate change rolls the routes back on any failure but a lost connection.
+   */
   public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
     assertSafeIdentifier(req.siteId, "siteId");
     assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
@@ -474,6 +531,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: CertificateStatusReportWireSchema }).parse(json).data;
   }
 
+  /** Kept as it is (#182): any failure is logged and the next tick applies the whole configuration again. */
   public async applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
     await this.sendSignedJsonRequest(
       "POST",
@@ -483,6 +541,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     );
   }
 
+  /** Kept as it is (#182): any failure is logged and the next tick applies the whole configuration again. */
   public async applyDnsProvider(req: DnsProviderApplyRequest | null): Promise<void> {
     await this.sendSignedJsonRequest(
       "POST",
@@ -498,13 +557,10 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
   }
 
   public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/test", {
-      to: req.to,
-      from: req.from,
-    });
-    return z.object({ data: MailTestIpcResponseSchema }).parse(json).data;
+    return this.sendChange("/v1/mail-relay/test", { to: req.to, from: req.from }, undefined, MailTestIpcResponseSchema);
   }
 
+  /** Kept as it is (#182): every failure is "failed" to its callers. */
   public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/panel", req);
     return z.object({ data: PanelMailIpcResponseSchema }).parse(json).data;
@@ -523,11 +579,15 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
         : req.op === "delete"
           ? SITE_FILES_DELETE_TIMEOUT_MS
           : SITE_FILES_TIMEOUT_MS;
-    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
     const schema = SITE_FILES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
+    if (SITE_FILES_ANSWER_CLASS[req.op] === "change") {
+      return (await this.sendChange("/v1/sites/files", req, timeoutMs, schema)) as SiteFilesResult<R["op"]>;
+    }
+    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
     return z.object({ data: schema }).parse(json).data as SiteFilesResult<R["op"]>;
   }
 
+  /** Kept as it is (#182), every op: the API answers the same retryable refusal for a lost answer and an unreadable one. */
   public async siteDatabases<R extends SiteDatabasesRequest>(
     req: R,
   ): Promise<SiteDatabasesResult<R["op"]>> {
@@ -540,6 +600,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: schema }).parse(json).data as SiteDatabasesResult<R["op"]>;
   }
 
+  /** Kept as it is (#182): any failure marks the access to apply again, and the loop sends the whole set. */
   public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
     const json = await this.sendSignedJsonRequest(
       "POST",
@@ -567,13 +628,14 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
         ? BACKUPS_TEST_TIMEOUT_MS
         : BACKUPS_TIMEOUT_MS;
     const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
-    if (BACKUPS_CHANGE_ACTIONS.has(req.action)) {
+    if (BACKUPS_ANSWER_CLASS[req.action] === "change") {
       return (await this.sendChange("/v1/backups", req, timeoutMs, schema)) as BackupsResult<R["action"]>;
     }
     const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
     return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;
   }
 
+  /** putVersion, publish and gc kept as they are, see #202: the certificate applier's two paths are not read yet. */
   public async manualTls<R extends ManualTlsRequest>(req: R): Promise<ManualTlsResult<R["action"]>> {
     const timeoutMs =
       req.action === "putVersion"
@@ -614,6 +676,10 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return ServiceLogsDataEnvelopeSchema.parse(json).data;
   }
 
+  /**
+   * Kept as it is (#182), like the application's below: on any failure but a lost connection the session is recorded as
+   * not started, and the server's sweep closes a shell nobody holds. As a lost answer the row would stay open for nobody.
+   */
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/open", req, TERMINAL_OPEN_TIMEOUT_MS);
     return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
@@ -625,6 +691,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
   }
 
+  /** Kept as it is (#182): every failure but a gone session is "unavailable", a lost answer included; the next read shows the keys. */
   public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
     EmptyDataEnvelopeSchema.parse(await this.sendSignedJsonRequest("POST", "/v1/terminal/write", req, TERMINAL_WRITE_TIMEOUT_MS));
   }
@@ -634,6 +701,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: TerminalReadWireSchema }).parse(json).data;
   }
 
+  /** Kept as it is (#182): any failure but a gone session keeps the row open, and the sweep closes it again. */
   public async closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/close", req, TERMINAL_CLOSE_TIMEOUT_MS);
     return TerminalEndedEnvelopeSchema.parse(json).data;
@@ -644,6 +712,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return TerminalSessionsEnvelopeSchema.parse(json).data;
   }
 
+  /** Kept as it is (#182), like the pin below: every failure settles the operation failed, never unknown. */
   public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/panel/restart", req, PANEL_RESTART_TIMEOUT_MS);
     return z.object({ data: PanelContainerRestartWireSchema }).parse(json).data;
@@ -719,6 +788,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return this.sendChange("/v1/app-stacks/remove-components", req, APP_STACK_REMOVE_TIMEOUT_MS, AppStackComponentsRemoveIpcResultSchema);
   }
 
+  /** Kept as it is (#182): any failure marks the links unsettled, and they are sent again. */
   public async syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/links", req, APP_STACK_LINKS_TIMEOUT_MS);
     return z.object({ data: AppStackLinksIpcResultSchema }).parse(json).data;
@@ -769,18 +839,23 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
       action,
       ...(resolvedSecrets ? { resolvedSecrets: { ...resolvedSecrets } } : {}),
     };
-    const json = await this.sendSignedJsonRequest("POST", "/v1/services/action", payload);
-    return ExecutionResultDataEnvelopeSchema.parse(json).data;
+    return this.sendChange("/v1/services/action", payload, undefined, ExecutionResultDataEnvelopeSchema.shape.data);
   }
 
   /**
-   * A call of the closed list of changes of an application (ADR-0035, ADR-0038, ADR-0042), whose request may have
-   * changed the server once sent. An answer that cannot be read is a lost one (`ambiguousOutcome`), so the caller
-   * settles from a read and never sends the change again: a 2xx that fails the schema (an empty body included), a body
-   * that is not JSON, a 5xx without the executor's error envelope. A refusal with the envelope, whatever its status,
-   * and a 4xx stay refusals.
+   * A call of the closed list of changes (an application's: ADR-0035, ADR-0038, ADR-0042; a site's, a service's and
+   * the test mail: #182), whose request may have changed the server once sent. An answer that cannot be read (a 2xx that
+   * fails the schema, an empty body included; a body that is not JSON; a 5xx without the executor's error envelope) is a
+   * lost one (`ambiguousOutcome`): the caller handles it as a lost connection and never sends the change again by itself.
+   * The outbox settles it from a read; the site provisioner fails its operation and leaves the site degraded. A refusal
+   * with the envelope, whatever its status, and a 4xx stay refusals. No `timeoutMs` is the client's default wait.
    */
-  private async sendChange<S extends z.ZodTypeAny>(path: string, body: unknown, timeoutMs: number, schema: S): Promise<z.output<S>> {
+  private async sendChange<S extends z.ZodTypeAny>(
+    path: string,
+    body: unknown,
+    timeoutMs: number | undefined,
+    schema: S,
+  ): Promise<z.output<S>> {
     const json = await this.sendSignedJsonRequest("POST", path, body, timeoutMs, { unreadableChangeIsLost: true });
     const parsed = z.object({ data: schema as z.ZodTypeAny }).safeParse(json);
     if (!parsed.success) throw unreadableChangeAnswer("the result does not have the expected shape");

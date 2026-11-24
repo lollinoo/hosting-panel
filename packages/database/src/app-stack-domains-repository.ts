@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { MAX_APP_STACK_DOMAINS, type AppStackDomainPathRoute, type CertStatus, type DomainStatus } from "@hosting-panel/contracts";
-import { and, asc, eq, getTableColumns, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { appStackDomains, appStacks, domains, hosts } from "./schema.js";
 import { assertNoManualCapture } from "./tls-coverage.js";
@@ -21,7 +21,9 @@ export type AppStackDomainErrorCode =
   /** The target redirects itself, or another address already redirects to this one. */
   | "REDIRECT_CHAIN"
   /** Protection asked while keeping a password that was never set. */
-  | "PASSWORD_REQUIRED";
+  | "PASSWORD_REQUIRED"
+  /** The address is being removed: it can be neither changed nor removed again. */
+  | "REMOVING";
 
 export class AppStackDomainError extends Error {
   constructor(
@@ -86,10 +88,15 @@ export async function addAppStackDomainsTransactional(
       if (!(await lockLiveStack(tx, input.organizationId, input.stackId))) {
         throw new AppStackDomainError("NOT_FOUND", "The application was not found.");
       }
-      const existing = await tx
-        .select({ hostname: appStackDomains.hostname })
+      const rows = await tx
+        .select({ hostname: appStackDomains.hostname, removalRequestedAt: appStackDomains.removalRequestedAt })
         .from(appStackDomains)
         .where(eq(appStackDomains.stackId, input.stackId));
+      // A name being removed is still held by the published route file: refused as if another owner held it.
+      if (rows.some((row) => row.removalRequestedAt !== null && input.entries.some((entry) => entry.hostname === row.hostname))) {
+        throw new AppStackDomainError("DOMAIN_CONFLICT", CONFLICT);
+      }
+      const existing = rows.filter((row) => row.removalRequestedAt === null);
       const fresh = input.entries
         .filter((entry) => !existing.some((row) => row.hostname === entry.hostname))
         .sort((a, b) => (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0));
@@ -127,25 +134,50 @@ export async function addAppStackDomainsTransactional(
   }
 }
 
-/** Stack row FOR UPDATE; false when the stack or the row does not exist. */
+/**
+ * Stack row FOR UPDATE; false when the stack or the row does not exist. With no route file published the row is deleted.
+ * Otherwise that file may still hold the name: the row is marked as being removed and keeps claiming it (0025 triggers)
+ * until a route file without it is published (deleteRemovedAppStackDomains). Redirects to it end at once.
+ */
 export function removeAppStackDomainTransactional(
   db: HostingPanelDatabase,
   input: { readonly organizationId: string; readonly stackId: string; readonly domainId: string },
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
-    if (!(await lockLiveStack(tx, input.organizationId, input.stackId))) return false;
-    const removed = await tx
-      .delete(appStackDomains)
-      .where(
-        and(
-          eq(appStackDomains.id, input.domainId),
-          eq(appStackDomains.stackId, input.stackId),
-          eq(appStackDomains.organizationId, input.organizationId),
-        ),
-      )
-      .returning({ id: appStackDomains.id });
-    return removed.length > 0;
+    const [stack] = await tx
+      .select({ appliedRoutesHash: appStacks.appliedRoutesHash })
+      .from(appStacks)
+      .where(and(eq(appStacks.id, input.stackId), eq(appStacks.organizationId, input.organizationId), isNull(appStacks.deletedAt)))
+      .for("update");
+    if (!stack) return false;
+    const address = and(
+      eq(appStackDomains.id, input.domainId),
+      eq(appStackDomains.stackId, input.stackId),
+      eq(appStackDomains.organizationId, input.organizationId),
+    );
+    const [row] = await tx.select({ removalRequestedAt: appStackDomains.removalRequestedAt }).from(appStackDomains).where(address);
+    if (!row) return false;
+    if (row.removalRequestedAt !== null) throw new AppStackDomainError("REMOVING", "This web address is already being removed.");
+    if (stack.appliedRoutesHash === null) {
+      await tx.delete(appStackDomains).where(address);
+      return true;
+    }
+    const now = new Date();
+    await tx
+      .update(appStackDomains)
+      .set({ redirectToDomainId: null, updatedAt: now })
+      .where(and(eq(appStackDomains.stackId, input.stackId), eq(appStackDomains.redirectToDomainId, input.domainId)));
+    await tx.update(appStackDomains).set({ removalRequestedAt: now, updatedAt: now }).where(address);
+    return true;
   });
+}
+
+/**
+ * Deletes the addresses being removed of a stack, freeing their host names. Called in the transaction that records a
+ * route file published without them, or that no route file is published.
+ */
+export async function deleteRemovedAppStackDomains(db: DatabaseExecutor, stackId: string): Promise<void> {
+  await db.delete(appStackDomains).where(and(eq(appStackDomains.stackId, stackId), isNotNull(appStackDomains.removalRequestedAt)));
 }
 
 /** Every option of one address. A redirecting address takes no protection and no path rule (the contract refuses it). */
@@ -170,9 +202,12 @@ export function updateAppStackDomainRoutingTransactional(
     if (!(await lockLiveStack(tx, input.organizationId, input.stackId))) {
       throw new AppStackDomainError("NOT_FOUND", "The application was not found.");
     }
-    const rows = await listAppStackDomains(tx, { organizationId: input.organizationId, stackId: input.stackId });
-    const before = rows.find((row) => row.id === input.domainId);
+    const every = await listAppStackDomains(tx, { organizationId: input.organizationId, stackId: input.stackId, includeRemoving: true });
+    const before = every.find((row) => row.id === input.domainId);
     if (!before) throw new AppStackDomainError("NOT_FOUND", "The web address was not found.");
+    if (before.removalRequestedAt !== null) throw new AppStackDomainError("REMOVING", "This web address is being removed.");
+    // An address being removed is no destination, and its own redirect leaves the published file with it.
+    const rows = every.filter((row) => row.removalRequestedAt === null);
     const { redirectToDomainId, compression, protection, pathRoutes } = input.routing;
     if (redirectToDomainId !== null) {
       const target = rows.find((row) => row.id === redirectToDomainId);
@@ -209,14 +244,21 @@ export function updateAppStackDomainRoutingTransactional(
   });
 }
 
+/** The addresses of a stack; those being removed only with `includeRemoving` (they are never published again). */
 export function listAppStackDomains(
   db: DatabaseExecutor,
-  input: { organizationId: string; stackId: string },
+  input: { organizationId: string; stackId: string; includeRemoving?: boolean },
 ): Promise<AppStackDomainRow[]> {
   return db
     .select()
     .from(appStackDomains)
-    .where(and(eq(appStackDomains.stackId, input.stackId), eq(appStackDomains.organizationId, input.organizationId)))
+    .where(
+      and(
+        eq(appStackDomains.stackId, input.stackId),
+        eq(appStackDomains.organizationId, input.organizationId),
+        input.includeRemoving === true ? undefined : isNull(appStackDomains.removalRequestedAt),
+      ),
+    )
     .orderBy(asc(appStackDomains.hostname));
 }
 

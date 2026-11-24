@@ -122,6 +122,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       "0030_app_terminal_sessions.sql",
       "0031_app_stack_tasks.sql",
       "0032_app_stack_deployment_replaced.sql",
+      "0033_app_stack_domain_removal.sql",
     ]);
 
     const after0008 = await db().execute(

@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Unreadable executor answers, a time bound on recoveries, the generic site route, removed addresses and three more fixes (2026-11-24)
+*hosting-panel v0.17.7*
+
+**Bug Fixes & Stability**
+- **api**: Unreadable executor answers, a time bound on recoveries, the generic site route, removed addresses and three more fixes
+
+---
+
 ### Application buttons, log masking, WordPress address and uploads, image registries and five more fixes (2026-11-24)
 *hosting-panel v0.17.6*
 

@@ -21,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
-import { appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
+import { appStackChangeRefusalText, appStackRefusalText, appStackSecretRefusalText } from "./app-stack-view";
 
 export type StackAction = "start" | "stop" | "restart" | "deploy";
 type QueuedAction = StackAction | "upgrade" | "rollback";
@@ -86,7 +86,7 @@ export function AppStackActions({
       router.refresh();
     } else if (sent.ok) setError(appStackRefusalText(m, ""));
     // The plan dialog plans again on plan_changed, and shows the refusal of a private value next to its field.
-    else if (sent.reason !== "plan_changed" && !sent.field?.startsWith(SECRET_FIELD)) setError(appStackRefusalText(m, sent.code, sent.reason, status));
+    else if (sent.reason !== "plan_changed" && !sent.field?.startsWith(SECRET_FIELD)) setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
     return sent;
   }
 
@@ -196,7 +196,7 @@ function PlanDialog({
       });
       const body = await res.json().catch(() => null);
       if (res.ok && body?.data) setDiff(body.data);
-      else setError(appStackRefusalText(m, body?.error?.code ?? "", body?.error?.details?.[0]?.reason));
+      else setError(appStackChangeRefusalText(m, body?.error?.code ?? "", body?.error?.details?.[0]?.reason));
     } catch {
       setError(appStackRefusalText(m, ""));
     }

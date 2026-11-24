@@ -43,6 +43,7 @@ import {
   updateOperationStepTransactional,
   type ClaimPendingOutboxFilter,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutionResult, DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import {
@@ -74,6 +75,7 @@ import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-appli
 import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 import { AppStackRuntime } from "../app-stacks/app-stack-runtime.js";
 import { AppStackTaskRuntime } from "../app-stacks/app-stack-task-runtime.js";
+import { RECOVERY_UNCONFIRMED_TEXT, RecoveryReadBound, closeUnconfirmedOperation } from "./recovery-read-bound.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -243,6 +245,11 @@ export class OutboxWorkerService {
   readonly #wordpressImportApplier: SiteWordpressImportApplier;
   readonly #appStacks: AppStackRuntime;
   readonly #appStackTasks: AppStackTaskRuntime;
+  /**
+   * How long each unknown operation's recovery read has kept failing (issue #183). In memory: a restart of the API
+   * starts every count again. Public so a test can give it a clock of its own.
+   */
+  public recoveryReads = new RecoveryReadBound();
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -1036,6 +1043,9 @@ export class OutboxWorkerService {
       .from(operations)
       .where(eq(operations.status, "unknown"))
       .orderBy(asc(operations.submittedAt));
+    // Counts of operations no longer unknown (settled, unlocked by hand, deleted) go here, so the map never grows
+    // beyond the operations in doubt.
+    this.recoveryReads.retain(unknownOps.map((op) => op.id));
 
     let convergedSucceeded = 0;
     let convergedFailed = 0;
@@ -1070,17 +1080,24 @@ export class OutboxWorkerService {
           // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
             op.kind === STACK_TASK_KIND
-              ? await this.#appStackTasks.recover(op) // a read: the command of a run is never started again
+              ? await this.#appStackTasks.recover(op, this.recoveryReads) // a read: the command of a run is never started again
               : APP_STACK_RUNTIME_KINDS.includes(op.kind)
-              ? await this.#appStacks.recover(op)
+              ? await this.#appStacks.recover(op, this.recoveryReads)
               : op.kind === HOST_JOB_KIND
               ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)
               : op.kind === "site.wordpress.update"
               ? await this.#wordpressApplier.recover(op)
               : op.kind === WORDPRESS_IMPORT_KIND
                 ? await this.#wordpressImportApplier.recover(op)
-                : await this.#backupsApplier.recover(op);
+                : await this.#backupsApplier.recover(op, this.recoveryReads);
           if (outcome === "pending") {
+            continue;
+          }
+          this.recoveryReads.forget(op.id);
+          if (outcome === "unconfirmed") {
+            // Closed by the bound on reads (issue #183): its own audit row is written with it.
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT);
+            convergedFailed += 1;
             continue;
           }
           const [settled] = await db
@@ -1170,10 +1187,24 @@ export class OutboxWorkerService {
           let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
           try {
             obs = await this.dockerExecutor.getObservedState(op.resourceId);
-          } catch {
-            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
+          } catch (err) {
+            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey for the next pass, until a
+            // read that waiting does not cure has failed for the whole bound (issue #183). Then the operation is closed
+            // as not confirmed and its steps fail, nothing sent. As when the runtime is unavailable above, the service
+            // row keeps what the request wrote (wanted status, revision): the drift reconciler reads what runs, and
+            // with the lock released every action on the service is offered again.
+            const giveUp = this.recoveryReads.failed(op.id, err);
+            if (giveUp === null) continue;
+            const closed = await closeUnconfirmedOperation(db, op.id, giveUp, (tx) =>
+              this.#settleNonTerminalSteps(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT, tx),
+            );
+            if (!closed) continue;
+            this.recoveryReads.forget(op.id);
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", RECOVERY_UNCONFIRMED_TEXT);
+            convergedFailed += 1;
             continue;
           }
+          this.recoveryReads.answered(op.id);
 
           const targetMatched =
             op.kind === "service.stop"
@@ -1416,8 +1447,8 @@ export class OutboxWorkerService {
     operationId: string,
     targetStatus: "succeeded" | "failed",
     message: string,
+    db: HostingPanelDatabase = this.dbClient.db,
   ): Promise<void> {
-    const db = this.dbClient.db;
     const steps = await db
       .select()
       .from(operationSteps)

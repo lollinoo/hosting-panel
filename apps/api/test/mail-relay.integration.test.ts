@@ -14,7 +14,7 @@ import {
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { MailRelayApplyRequest, MailRelayStatusReport } from "@hosting-panel/executor-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
@@ -364,12 +364,30 @@ describe("mail relay API", () => {
     expect((await call("DELETE", RELAY)).body.data).toMatchObject({ configured: false, relayRunning: null });
   });
 
-  it("a test email whose executor call timed out is audited and reported as ambiguous", async () => {
+  // The client's answer when its wait ends after the request was sent, and when the answer cannot be read (#182).
+  it.each([
+    ["timed out", () => coded("OPERATION_AMBIGUOUS")],
+    [
+      "answered unreadably",
+      () =>
+        new ExecutorIpcClientError(
+          "Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON",
+          "OPERATION_AMBIGUOUS",
+          502,
+          true,
+        ),
+    ],
+  ])("a test email whose executor call %s is sent once, audited and reported as ambiguous", async (_, lost) => {
     await saveAndApply();
-    sim.sendTestMail = () => Promise.reject(coded("OPERATION_AMBIGUOUS"));
+    let sends = 0;
+    sim.sendTestMail = () => {
+      sends += 1;
+      return Promise.reject(lost());
+    };
     const res = await call("POST", `${RELAY}/test`, { to: "admin@x.it" });
     expect(res.status).toBe(502);
-    expect(res.body.error.code).toBe("OPERATION_AMBIGUOUS");
+    expect(res.body.error).toMatchObject({ code: "OPERATION_AMBIGUOUS", message: "The test email may have been sent. Check the inbox." });
+    expect(sends).toBe(1);
     const [audit] = await audits("admin.mail_relay.test");
     expect(audit?.details).toEqual({ to: "admin@x.it", outcome: "unknown", problem: null });
   });

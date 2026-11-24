@@ -3429,6 +3429,7 @@ x-hp-ingress:
         cancelled: "Cancelled",
       },
       problemGeneric: "The operation failed.",
+      unconfirmed: "The outcome could not be confirmed: check the application's state before you try again.",
     },
     actions: {
       start: "Start",
@@ -3560,6 +3561,8 @@ x-hp-ingress:
       remove: "Remove",
       removeTitle: "Remove the address?",
       removeBody: "{hostname} will stop answering.",
+      removing: "Being removed",
+      removingHint: "It stays reserved to this application until it stops answering.",
       status: { pending: "Pending", active: "Active", failed: "Failed" },
       certificate: {
         none: "No certificate",
@@ -3671,6 +3674,7 @@ x-hp-ingress:
       redirect_target: "Choose another address of this application as the destination.",
       redirect_chain: "The destination address redirects in turn, or another address already redirects here.",
       password_required: "Choose a password to protect this address.",
+      address_removing: "This address is already being removed: wait a moment, then reload the page.",
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
       path_target_removed: "A path of a web address points at a component the new version removes: remove the path first.",
       value_too_long: "This value is too long: this application accepts at most {max} characters, fewer if it contains accented letters or symbols.",
@@ -3684,6 +3688,7 @@ x-hp-ingress:
       database_in_use: "Applications still use this database: disconnect them first.",
       PARAM_VALUE_NOT_CUSTOMER: "The application decides this setting: it cannot be changed.",
       draftUnpublished: "This version can no longer be installed. Delete this draft and install the application again: a draft has no data, so nothing is lost.",
+      versionAddressRemoving: "A web address that points at a component this version removes is still being removed: try again in a few minutes. If it is still not possible, press Restart (or Stop, if the application does not start), then try again.",
     },
     codes: {
       RESOURCE_LOCKED: "The application is finishing another change: wait and try again.",

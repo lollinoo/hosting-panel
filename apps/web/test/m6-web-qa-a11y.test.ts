@@ -268,6 +268,7 @@ const DOMAIN: AppStackDomainDto = {
   compression: false,
   protection: null,
   pathRoutes: [],
+  removing: false,
 };
 const DOMAINS: AppStackDomainDto[] = [DOMAIN, { ...DOMAIN, id: "sdom_2", hostname: "wiki.example.test", status: "pending", certificateStatus: "requested", certificateExpiresAt: null }];
 const BACKUP: AppStackBackupsDto["backups"][number] = {

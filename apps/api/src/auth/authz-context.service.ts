@@ -353,15 +353,21 @@ export class AuthzContextService {
       readonly targetType: string;
       readonly targetId?: string | null;
       readonly resource?: AuthorizationResourceTarget;
+      /** The route is no visit's even when a visit carries the key: a visit is refused as one without the key. */
+      readonly refuseSupportVisit?: boolean;
     },
   ): Promise<AuthorizationDecision> {
-    const decision = evaluatePolicy({
+    const evaluated = evaluatePolicy({
       principal: auth.principal,
       permission: input.permission,
       organizationId: input.organizationId,
       resource: input.resource,
       now: new Date(),
     });
+    const decision: AuthorizationDecision =
+      input.refuseSupportVisit && evaluated.viaSupportGrant
+        ? { allowed: false, httpStatus: 403, errorCode: "PERMISSION_DENIED", reason: "SUPPORT_ACCESS_PERMISSION_DENIED" }
+        : evaluated;
 
     if (!decision.allowed) {
       if (decision.httpStatus === 403) {

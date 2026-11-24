@@ -6,6 +6,7 @@ import { APP_IMAGE_ALLOWLIST, type AppImageAllowlistEntry } from "@hosting-panel
 import {
   addAppStackDomainsTransactional,
   and,
+  appStackDomains,
   appStackRevisions,
   appStacks,
   asc,
@@ -340,6 +341,36 @@ describe("application stack plan, upgrade and rollback refusals over HTTP (QA M5
       expect(fresh.status, fresh.raw).toBe(200);
       expect(fresh.body.data.ingress).toContainEqual(expect.objectContaining({ componentKey: "web", change: "added" }));
       expect((await upgrade(stackId, renamed, fresh.body.data.planHash as string)).status).toBe(202);
+    });
+
+    it("an address still being removed is address_removing on plan and upgrade; a live one beside it keeps domain_target_removed (issue #112)", async () => {
+      const { templateId, versionId: first } = await h.publish();
+      const stackId = await running(first);
+      const renamed = await addVersion(templateId, NOTES_RENAMED);
+      const hash = (await plan(stackId, { templateVersionId: renamed })).body.data.planHash as string;
+      const add = (label: string) =>
+        addAppStackDomainsTransactional(h.dbClient.db, {
+          organizationId: h.a.orgId,
+          stackId,
+          entries: [{ hostname: `${randomUUID().slice(0, 8)}.${label}.example.test`, componentKey: "app", internalPort: 8080 }],
+        });
+      // Its removal was accepted but the refresh that withdraws it failed: the row still targets `app`.
+      const [marked] = await add("removing");
+      await h.dbClient.db.update(appStackDomains).set({ removalRequestedAt: new Date() }).where(eq(appStackDomains.id, marked!.id));
+      const before = await snapshot(stackId);
+      const removing = { field: "domains", reason: "address_removing" };
+      for (const res of [await upgrade(stackId, renamed, hash), await plan(stackId, { templateVersionId: renamed })]) {
+        expectRefusal(res, 409, "RESOURCE_LOCKED", removing);
+        expect(res.body.error.retryable).toBe(false);
+      }
+      expect(await snapshot(stackId)).toEqual(before);
+      expect(await auditCount("app.stack.upgrade", stackId)).toBe(0);
+
+      await add("live");
+      const removed = { field: "domains", reason: "domain_target_removed" };
+      expectRefusal(await upgrade(stackId, renamed, hash), 400, "VALIDATION_ERROR", removed);
+      expectRefusal(await plan(stackId, { templateVersionId: renamed }), 400, "VALIDATION_ERROR", removed);
+      expect(await auditCount("app.stack.upgrade", stackId)).toBe(0);
     });
 
     it("a rollback to a revision that no longer has the component is domain_target_removed on plan and rollback", async () => {

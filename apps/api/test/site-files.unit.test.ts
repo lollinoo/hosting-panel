@@ -31,6 +31,7 @@ import {
   type SiteFilesRequest,
   type SiteFilesResult,
 } from "@hosting-panel/executor-contracts";
+import { ExecutorIpcClientError } from "@hosting-panel/docker-executor";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
@@ -144,6 +145,21 @@ class ExecutorFailure extends Error {
     }
   }
 }
+
+/** The two answers of the client after a change was sent: the connection was lost, or the answer cannot be read (#182). */
+const LOST_ANSWERS: readonly (readonly [string, () => Error])[] = [
+  ["a lost connection", () => new ExecutorFailure("IPC socket closed mid-request", "OPERATION_AMBIGUOUS", true)],
+  [
+    "an unreadable answer",
+    () =>
+      new ExecutorIpcClientError(
+        "Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON",
+        "OPERATION_AMBIGUOUS",
+        502,
+        true,
+      ),
+  ],
+];
 
 function createRuntimeConfig(
   overrides?: Partial<ControlPlaneRuntimeConfig>,
@@ -519,6 +535,39 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
       expect(recordedPaths).toHaveLength(20);
       expect(recordedPaths[0]?.length).toBeLessThanOrEqual(256);
     });
+
+    it.each(LOST_ANSWERS)(
+      "answers OPERATION_AMBIGUOUS for upload, mkdir, move and delete after %s, sends each once and audits none",
+      async (_, lost) => {
+        const changes: readonly (() => Promise<unknown>)[] = [
+          () =>
+            service.write(readySite, createActor(), {
+              path: "wp-content/lost.txt",
+              uploadId: "22222222-2222-4222-8222-222222222222",
+              offset: 0,
+              dataBase64: Buffer.from("lost").toString("base64"),
+              final: true,
+              overwrite: true,
+            }),
+          () => service.mkdir(readySite, createActor(), { path: "wp-content/lost" }),
+          () => service.move(readySite, createActor(), { from: "wp-content/a.txt", to: "wp-content/c.txt" }),
+          () => service.remove(readySite, createActor(), { paths: ["wp-content/a.txt"] }),
+        ];
+        for (const change of changes) {
+          executor.siteFilesSpy.mockClear();
+          executor.siteFilesSpy.mockRejectedValueOnce(lost());
+          const caught = await change().then(
+            () => null,
+            (err: unknown) => err,
+          );
+          expect(caught).toBeInstanceOf(ControlPlaneError);
+          expect((caught as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+          expect((caught as ControlPlaneError).message).not.toMatch(/IPC|dispatch|JSON/);
+          expect(executor.siteFilesSpy).toHaveBeenCalledTimes(1);
+        }
+        expect(await listNewAudits()).toEqual([]);
+      },
+    );
   });
 
   describe("async archive/extract enqueue, applier, and recovery", () => {
@@ -719,15 +768,23 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
       expect(siteAfter?.status).toBe("ready");
     });
 
-    it("parks ambiguous IPC failure as unknown and later recovers without replay or site degradation", async () => {
-      const ext = await service.enqueueExtract(readySite, createActor(), {
-        body: { path: "ambiguous.zip", to: "out" },
-        idempotencyKey: "key-ambig-1",
-      });
+    it.each([
+      ["extract", ...LOST_ANSWERS[0]!],
+      ["extract", ...LOST_ANSWERS[1]!],
+      ["archive", ...LOST_ANSWERS[1]!],
+    ] as const)("parks an %s after %s as unknown and later recovers without replay or site degradation", async (op, why, lost) => {
+      const ext =
+        op === "extract"
+          ? await service.enqueueExtract(readySite, createActor(), {
+              body: { path: "ambiguous.zip", to: "out" },
+              idempotencyKey: `key-ambig-${why}`,
+            })
+          : await service.enqueueArchive(readySite, createActor(), {
+              body: { paths: ["wp-content"], to: "ambiguous.zip" },
+              idempotencyKey: `key-ambig-${why}`,
+            });
 
-      executor.siteFilesSpy.mockRejectedValueOnce(
-        new ExecutorFailure("IPC socket closed mid-request", "OPERATION_AMBIGUOUS", true),
-      );
+      executor.siteFilesSpy.mockRejectedValueOnce(lost());
 
       const run = await outboxWorker.processPendingOnce(10);
       expect(run).toEqual({ claimed: 1, succeeded: 0, failed: 1 });

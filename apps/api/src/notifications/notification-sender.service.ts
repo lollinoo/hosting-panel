@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   renderNotification,
   type NotificationAudience,
@@ -48,20 +48,32 @@ export function notificationSignature(signingKey: string, seconds: number, body:
 export const notificationAudienceOf = (channel: Pick<NotificationChannelRecord, "organizationId">): NotificationAudience =>
   channel.organizationId === null ? "server" : "customer";
 
+/** Where the sender reads the time a message leaves. */
+export const NOTIFICATION_SENDER_CLOCK = Symbol.for("hosting-panel.api.notificationSenderClock");
+export interface NotificationSenderClock {
+  now(): number;
+}
+export const SYSTEM_NOTIFICATION_SENDER_CLOCK: NotificationSenderClock = Object.freeze({ now: () => Date.now() });
+
 const failed = (problem: NotificationProblem): NotificationSendResult => ({ problem, httpStatus: null });
 
 /** Sends one message through one channel. The words are written here and in the executor from events, never taken from a user. */
 @Injectable()
 export class NotificationSenderService {
+  readonly #clock: NotificationSenderClock;
+
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(MailRelayService) private readonly mailRelay: MailRelayService,
     @Inject(NOTIFICATION_OUTBOUND_TOKEN) private readonly outbound: OutboundHttpPort,
-  ) {}
+    @Optional() @Inject(NOTIFICATION_SENDER_CLOCK) clock?: NotificationSenderClock,
+  ) {
+    this.#clock = clock ?? SYSTEM_NOTIFICATION_SENDER_CLOCK;
+  }
 
   /** Never throws. Mail goes through the relay; a webhook and Telegram go out from the outbound module. */
-  public async send(channel: NotificationChannelRecord, message: NotificationMessage, now: Date): Promise<NotificationSendResult> {
+  public async send(channel: NotificationChannelRecord, message: NotificationMessage): Promise<NotificationSendResult> {
     try {
       const audience = notificationAudienceOf(channel);
       const content = {
@@ -81,6 +93,9 @@ export class NotificationSenderService {
       if (config === null) return failed("channel_changed");
       const { subject, text } = renderNotification(content);
       if (config.kind === "webhook") {
+        // The time of this send: the sends before it in a pass may take a minute and more, and a receiver refuses a
+        // signature whose time is old.
+        const now = new Date(this.#clock.now());
         const body = JSON.stringify({
           version: 1,
           id: message.id,

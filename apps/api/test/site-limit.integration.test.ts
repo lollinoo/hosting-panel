@@ -323,8 +323,13 @@ describe("per-customer site limit", () => {
     it("the generic site route is limited too, and its bare sites count", async () => {
       await setLimit(orgId, 1);
       const [alloc] = await dbClient.db.select().from(hostAllocations).where(eq(hostAllocations.organizationId, orgId));
+      // The generic route is the server administrator's (#116): one who is also an owner of the customer.
+      await dbClient.db.insert(memberships).values({ id: "mem_admin_bare", organizationId: orgId, userId: adminId });
+      await dbClient.db
+        .insert(membershipRoles)
+        .values({ id: "mrl_admin_bare", membershipId: "mem_admin_bare", roleId: "role_customer_owner" });
       const bare = (n: number) =>
-        call("POST", org(orgId, "/sites"), token, { name: `Bare ${String(n)}`, slug: `bare-${String(n)}`, hostAllocationId: alloc!.id });
+        call("POST", org(orgId, "/sites"), adminToken, { name: `Bare ${String(n)}`, slug: `bare-${String(n)}`, hostAllocationId: alloc!.id });
       expect((await bare(1)).status).toBe(201);
 
       const refused = await bare(2);

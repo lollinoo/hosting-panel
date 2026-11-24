@@ -187,6 +187,7 @@ export function appStackDomainDto(row: AppStackDomainRow): AppStackDomainDto {
       port: path.port,
       stripPrefix: path.stripPrefix,
     })),
+    removing: row.removalRequestedAt !== null,
   };
 }
 
