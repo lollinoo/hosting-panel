@@ -512,6 +512,30 @@ describe("3/4. the confirmation and the start, driven", () => {
     expect(byName(rerender(), "ImportConfirmView")).toBeUndefined();
   });
 
+  it("start keeps its Idempotency-Key after no answer and a 503 (the retry replays); after a 409 the next start has a new one (issue #146)", async () => {
+    const answers: Array<number | "lost"> = ["lost", 503, 409, 202];
+    const calls = stubFetch(() => {
+      const a = answers.shift() ?? "lost";
+      if (a === "lost") throw new TypeError("network down");
+      return a === 202
+        ? { status: 202, body: { data: { operationId: `op_${"e".repeat(32)}` } } }
+        : { status: a, body: { error: { code: a === 409 ? "RESOURCE_LOCKED" : "INTERNAL_ERROR", message: "raw" } } };
+    });
+    const rerender = driveWizard(both());
+    propsOf<{ onTyped: (v: string) => void }>(byName(rerender(), "ImportConfirmView")).onTyped(SITE_NAME);
+    for (let n = 1; n <= 4; n++) {
+      propsOf<{ onConfirm: () => void }>(byName(rerender(), "ImportConfirmView")).onConfirm();
+      await vi.waitFor(() => expect(calls).toHaveLength(n));
+      if (n < 4) await vi.waitFor(() => expect(propsOf<{ error: string | null }>(byName(rerender(), "ImportConfirmView")).error).not.toBeNull());
+    }
+    const keys = calls.map((c) => c.headers.get("idempotency-key"));
+    expect(keys[0]).toMatch(/\S{8,}/);
+    expect(keys.slice(0, 3)).toEqual([keys[0], keys[0], keys[0]]);
+    expect(keys[3]).toMatch(/\S{8,}/);
+    expect(keys[3]).not.toBe(keys[0]);
+    expect(calls.map((c) => c.body)).toEqual(Array(4).fill('{"confirm":true}'));
+  });
+
   it("QUOTA_EXCEEDED on start gives the wizard's sentence with the time of retryAt, never the API's message (W3.5)", async () => {
     const retryAt = "2031-01-02T03:04:00.000Z";
     stubFetch(() => ({

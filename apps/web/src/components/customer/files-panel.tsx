@@ -38,6 +38,7 @@ import {
   sortEntries,
   triggerBrowserDownload,
 } from "@/lib/file-browser";
+import { keyFor, settleKey, type KeptKeys } from "@/lib/keyed-send";
 
 export { precheckDownload };
 
@@ -251,6 +252,8 @@ export function FilesPanel({
   const firstToolbarBtnRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const skipNextFocusRef = useRef(true);
+  // Zip and unzip keys, kept until answered; a reload forgets them.
+  const zipKeysRef = useRef<KeptKeys>({});
 
   useEffect(() => {
     const raw = searchParams.get("path") ?? "";
@@ -550,21 +553,24 @@ export function FilesPanel({
     selectedEntries.length <= SITE_FILE_BATCH_MAX &&
     !hasProtectedSelected;
 
+  // With `keys` the action (its subpath) keeps its Idempotency-Key until an answer ends it, so a retry replays.
   async function postJson<T = unknown>(
     subpath: string,
     body: unknown,
-    extraHeaders?: Record<string, string>,
+    keys?: KeptKeys,
   ): Promise<{ ok: true; data: T | undefined } | { ok: false; error: string }> {
+    const payload = JSON.stringify(body);
     try {
       const res = await fetch(`${apiBase}/${subpath}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-csrf-token": liveCsrf,
-          ...extraHeaders,
+          ...(keys ? { "Idempotency-Key": keyFor(keys, subpath, payload) } : {}),
         },
-        body: JSON.stringify(body),
+        body: payload,
       });
+      if (keys) settleKey(keys, subpath, res.status);
       const json = (await res.json().catch(() => null)) as {
         data?: T;
         error?: { code?: string; details?: Array<{ field?: string; reason?: string }> };
@@ -947,7 +953,7 @@ export function FilesPanel({
               paths: selectedEntries.map((e) => joinPath(folder, e.name)),
               to: joinPath(folder, archiveName),
             },
-            { "Idempotency-Key": crypto.randomUUID() },
+            zipKeysRef.current,
           );
           if (!result.ok) return result.error;
           const opId = result.data?.operationId;
@@ -982,7 +988,7 @@ export function FilesPanel({
               path: joinPath(folder, extractTarget.name),
               to: targetDir,
             },
-            { "Idempotency-Key": crypto.randomUUID() },
+            zipKeysRef.current,
           );
           if (!result.ok) return result.error;
           const opId = result.data?.operationId;

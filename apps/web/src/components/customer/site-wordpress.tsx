@@ -25,6 +25,7 @@ import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, Tabl
 import { errorMessage, format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { formatDate } from "@/lib/file-browser";
+import { keyFor, settleKey, type KeptKeys } from "@/lib/keyed-send";
 import {
   pendingWordpressUpdates,
   wordpressNeedsCheck,
@@ -82,16 +83,14 @@ export function wordpressErrorText(
 }
 
 // POST JSON through the BFF; status 0 means no answer reached the browser.
-export async function postJson(url: string, csrfToken: string, body: unknown, idempotent: boolean): Promise<Posted> {
+// With `keys` the action (its url) keeps its Idempotency-Key until an answer ends it, so a retry replays.
+export async function postJson(url: string, csrfToken: string, body: unknown, keys?: KeptKeys): Promise<Posted> {
   const headers: Record<string, string> = { "content-type": "application/json", "x-csrf-token": csrfToken };
-  if (idempotent) {
-    headers["Idempotency-Key"] =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
+  const payload = JSON.stringify(body);
+  if (keys) headers["Idempotency-Key"] = keyFor(keys, url, payload);
   try {
-    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), cache: "no-store" });
+    const res = await fetch(url, { method: "POST", headers, body: payload, cache: "no-store" });
+    if (keys) settleKey(keys, url, res.status);
     const json: unknown = await res.json().catch(() => null);
     return { status: res.status, body: json, retryAfter: res.headers.get("Retry-After") };
   } catch {
@@ -257,6 +256,8 @@ export function SiteWordpress({ basePath, initial, csrfToken }: { basePath: stri
   const inspectFromRef = useRef<string | null | undefined>(
     initial.runningOperation?.kind === "site.wordpress.inspect" ? (initial.state?.checkedAt ?? null) : undefined,
   );
+  // Check and update keys, kept until answered; a reload forgets them.
+  const keysRef = useRef<KeptKeys>({});
 
   const op = data.runningOperation;
   const running = op !== null;
@@ -319,7 +320,7 @@ export function SiteWordpress({ basePath, initial, csrfToken }: { basePath: stri
       setChecking(true);
       if (!automatic) setPageError(null);
       const from = data.state?.checkedAt ?? null;
-      const r = await postJson(`${basePath}/refresh`, csrfToken, {}, true);
+      const r = await postJson(`${basePath}/refresh`, csrfToken, {}, keysRef.current);
       inFlightRef.current = false;
       setChecking(false);
       if (r.status >= 200 && r.status < 300) {
@@ -354,7 +355,7 @@ export function SiteWordpress({ basePath, initial, csrfToken }: { basePath: stri
   }
 
   async function confirmUpdate(target: WordpressUpdateTarget): Promise<string | null> {
-    const r = await postJson(`${basePath}/updates`, csrfToken, target, true);
+    const r = await postJson(`${basePath}/updates`, csrfToken, target, keysRef.current);
     if (r.status >= 200 && r.status < 300) {
       startRunning({ id: operationId(r.body), kind: "site.wordpress.update", status: "queued", steps: [] });
       closeDialog();
@@ -364,7 +365,7 @@ export function SiteWordpress({ basePath, initial, csrfToken }: { basePath: stri
   }
 
   async function confirmReset(id: number): Promise<WordpressResetResult> {
-    const r = await postJson(`${basePath}/administrators/${encodeURIComponent(String(id))}/password-reset`, csrfToken, {}, false);
+    const r = await postJson(`${basePath}/administrators/${encodeURIComponent(String(id))}/password-reset`, csrfToken, {});
     const pw = isRecord(r.body) && isRecord(r.body.data) ? r.body.data.temporaryPassword : undefined;
     if (r.status === 200 && typeof pw === "string" && pw.length > 0) return { ok: true, temporaryPassword: pw };
     // A success answer without a password: the password may have changed.

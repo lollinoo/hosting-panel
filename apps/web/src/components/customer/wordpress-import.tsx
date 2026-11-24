@@ -25,6 +25,7 @@ import { Label } from "@/components/ui/label";
 import { format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { formatDate, formatSize, isValidRelativePath } from "@/lib/file-browser";
+import type { KeptKeys } from "@/lib/keyed-send";
 
 type ImportTexts = Messages["site"]["wordpress"]["import"];
 type RunningImport = NonNullable<SiteWordpressImportDto["runningOperation"]>;
@@ -397,7 +398,7 @@ function ImportSlot(props: {
       return;
     }
     setPicking(true);
-    const r = await postJson(`${chunkUrl}/pick`, csrfToken, { path: p }, false);
+    const r = await postJson(`${chunkUrl}/pick`, csrfToken, { path: p });
     setPicking(false);
     if (r.status >= 200 && r.status < 300) {
       setPath("");
@@ -497,6 +498,8 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
   const focusRunRef = useRef(false);
   const outcomeRef = useRef<HTMLDivElement>(null);
   const followedRef = useRef(initial.runningOperation !== null);
+  // The start's key, kept until answered; a reload forgets it.
+  const startKeysRef = useRef<KeptKeys>({});
   const onChanged = useCallback(() => void reload(), [reload]);
   const [sendingSlots, setSendingSlots] = useState<Record<WordpressImportSlot, boolean>>({ archive: false, dump: false });
   const onSending = useCallback(
@@ -526,7 +529,7 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
     if (busy || !canConfirmRestore(typed, siteName)) return;
     setBusy(true);
     setError(null);
-    const r = await postJson(basePath, csrf, { confirm: true }, true);
+    const r = await postJson(basePath, csrf, { confirm: true }, startKeysRef.current);
     setBusy(false);
     if (r.status >= 200 && r.status < 300) {
       const body = r.body;
