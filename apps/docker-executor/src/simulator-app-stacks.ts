@@ -56,7 +56,6 @@ import {
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
 } from "./app-stacks/index.js";
@@ -244,20 +243,40 @@ export class SimulatedAppStacks implements StackExecutorPort {
     }) as AppStackSimSnapshot;
   }
 
-  /** For the simulated tasks: is the component there and running, and which values its output must never show. */
+  /**
+   * For the simulated tasks: is the component there and running, and which values its output must never show. The
+   * values are the engine's (the same rule as the logs): null when they cannot be established, and then the output
+   * of a run is not kept.
+   */
   public async findAppStackComponent(req: {
     readonly stackId: string;
     readonly organizationId: string;
     readonly componentKey: string;
-  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] } | null> {
+  }): Promise<{ readonly running: boolean; readonly secretValues: readonly string[] | null } | null> {
     const stack = this.own(req.stackId, req.organizationId);
     const container = stack?.containers.get(req.componentKey);
     if (stack === undefined || container === undefined) return null;
-    const secretValues =
-      this.options.secretsRootDir !== null
-        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : Object.values(stack.secrets.get(req.componentKey) ?? {});
+    let secretValues: readonly string[] | null;
+    try {
+      secretValues = await this.maskValues(stack, container, req);
+    } catch {
+      secretValues = null;
+    }
     return { running: container.state === "running", secretValues };
+  }
+
+  /** The engine's rule, from the container's binds: every secret file it was given must be there, or it throws. */
+  private async maskValues(
+    stack: SimStack,
+    container: SimContainer,
+    req: { readonly stackId: string; readonly componentKey: string },
+  ): Promise<string[]> {
+    const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
+    if (this.options.secretsRootDir !== null) return appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
+    const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
+    const held = stack.secrets.get(req.componentKey) ?? {};
+    const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
+    return appStackLogMaskValues(req.componentKey, inspected, files);
   }
 
   public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
@@ -553,18 +572,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return this.run("logs", { method: "getAppStackComponentLogs", stackId: req.stackId, componentKey: req.componentKey }, false, async () => {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
-      if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      // The engine's rule, from the container's binds: every secret file it was given must be there.
-      const inspected = { labels: container.labels, env: container.payload.Env, hostConfig: container.payload.HostConfig };
-      let values: string[];
-      if (this.options.secretsRootDir !== null) {
-        values = await appStackContainerMaskValues(this.options.secretsRootDir, req, inspected);
-      } else {
-        const expected = appStackContainerSecretFileNames(this.secretsRoot, req.stackId, req.componentKey, inspected.hostConfig);
-        const held = stack?.secrets.get(req.componentKey) ?? {};
-        const files = expected === null || expected.some((name) => !Object.hasOwn(held, name)) ? null : Object.values(held);
-        values = appStackLogMaskValues(req.componentKey, inspected, files);
-      }
+      if (stack === undefined || container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+      const values = await this.maskValues(stack, container, req);
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }

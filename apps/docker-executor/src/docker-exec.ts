@@ -27,6 +27,12 @@ export interface DockerExecSpec {
   readonly env?: readonly string[];
 }
 
+/**
+ * The engine answered the create of an exec with a status that refuses it (not 201, not "no such container"): no exec
+ * exists, so nothing was started. A create whose answer could not be read is not this error.
+ */
+export class DockerExecCreateRefusedError extends ExecutorCodedError {}
+
 export interface DockerExecResult {
   readonly exitCode: number | null;
   /** True when the exec stream ended without timeout, yet Docker still reported unknown/running exit state. */
@@ -108,7 +114,7 @@ export async function startDockerExec(
     );
   }
   if (createRes.statusCode !== 201) {
-    throw new ExecutorCodedError(
+    throw new DockerExecCreateRefusedError(
       `Failed to create Docker exec (HTTP ${String(createRes.statusCode)})`,
       "DOCKER_ENGINE_UNAVAILABLE",
     );

@@ -419,6 +419,53 @@ describe("AppStackTaskRuntime (ADR-0042)", () => {
     expect((await opRow(free.op.id)).status).toBe("succeeded");
   });
 
+  it("ends a run the executor answers unknown as one whose outcome is lost, keeps what it printed, and never sends it again (#158)", async () => {
+    // The executor could not confirm that it stopped what the command started: the command may still go.
+    const NOT_STOPPED = { outcome: "unknown", exitCode: null, output: "still going", outputTruncated: false } as const;
+    const ended = async (t: { runId: string; op: { id: string } }) => {
+      expect(await runRow(t.runId)).toMatchObject({ status: "unknown", problem: "outcome_lost", exitCode: null, output: "still going", outputTruncated: false });
+      expect((await runRow(t.runId)).startedAt?.toISOString()).toBe(STARTED);
+      expect((await runRow(t.runId)).endedAt?.toISOString()).toBe(ENDED);
+      // The operation ends exactly as for a run whose answer was lost and that the executor does not know.
+      expect(await opRow(t.op.id)).toMatchObject({
+        status: "failed",
+        errorCode: "OPERATION_AMBIGUOUS",
+        errorMessage: "It is not known how the task ended. It was not started again.",
+      });
+      const steps = await h.dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, t.op.id));
+      expect(steps.map((step) => [step.key, step.status, step.message])).toEqual([["run", "failed", "It is not known how the task ended. It was not started again."]]);
+    };
+
+    // The direct answer.
+    const t = await taken();
+    const sent = executor({ run: async () => result(t.runId, NOT_STOPPED) });
+    await runtime(sent.port).apply(t.op, t.payload);
+    expect(sent.run).toHaveBeenCalledTimes(1);
+    await ended(t);
+
+    // The answer was lost, and the recovery reads the run finished with it: the same end.
+    const w = await taken();
+    await expect(runtime(executor({ run: () => Promise.reject(lost()) }).port).apply(w.op, w.payload)).rejects.toMatchObject({ ambiguousOutcome: true });
+    expect(await runRow(w.runId)).toMatchObject({ status: "running" });
+    const reading = executor({ read: async () => ({ state: "finished", result: result(w.runId, NOT_STOPPED) }) });
+    expect(await runtime(reading.port).recover(w.op)).toBe("settled");
+    await ended(w);
+    expect(reading.run).not.toHaveBeenCalled();
+
+    // The next pass changes nothing and sends nothing: the run is closed, the lock is free.
+    const again = executor();
+    expect(await runtime(again.port).recover(t.op)).toBe("settled");
+    expect(await runtime(again.port).recover(w.op)).toBe("settled");
+    expect(again.run).not.toHaveBeenCalled();
+    expect(again.read).not.toHaveBeenCalled();
+    await ended(t);
+    await ended(w);
+    expect((await stack()).status).toBe("running");
+    const free = await taken();
+    await runtime(executor().port).apply(free.op, free.payload);
+    expect((await opRow(free.op.id)).status).toBe("succeeded");
+  });
+
   describe("a read of the run that keeps failing (issue #183)", () => {
     const MINUTE = 60_000;
     const clock = { t: Date.UTC(2026, 10, 24, 9) };

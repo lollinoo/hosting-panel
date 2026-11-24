@@ -238,10 +238,14 @@ export class AppStackTaskRuntime {
     else await this.#settleOperation(op, run.status, run.problem, null);
   }
 
+  /**
+   * `unknown` from the executor (it could not confirm that it stopped what the command started) ends as a run whose
+   * outcome is lost: the same problem, so the same operation end and text. What it printed is kept.
+   */
   #endOf(result: AppStackTaskRunIpcResult): RunEnd {
     return {
       status: result.outcome,
-      problem: result.outcome === "not_started" ? "cannot_run_tasks" : null,
+      problem: result.outcome === "not_started" ? "cannot_run_tasks" : result.outcome === "unknown" ? "outcome_lost" : null,
       exitCode: result.exitCode,
       startedAt: result.startedAt === null ? null : new Date(result.startedAt),
       endedAt: new Date(result.endedAt),

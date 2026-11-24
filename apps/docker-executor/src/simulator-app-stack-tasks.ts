@@ -22,6 +22,11 @@ export interface AppStackTaskSimBehaviour {
   readonly timedOut?: boolean;
   /** The component has no shell: the run does not start. */
   readonly noShell?: boolean;
+  /**
+   * The kill of what the command started is not confirmed (every try failed). A command with no exit code (ended at its
+   * time limit, or the engine did not tell) is then `unknown`; one that ended with an exit code keeps its outcome.
+   */
+  readonly notStopped?: boolean;
 }
 
 /**
@@ -31,12 +36,15 @@ export interface AppStackTaskSimBehaviour {
 export type AppStackTaskSimFault = "engine_unavailable" | "ambiguous_before" | "ambiguous_after" | "ambiguous_running";
 
 export interface SimulatedAppStackTasksOptions {
-  /** null = no such component. Throws for an application of another organisation. */
+  /**
+   * null = no such component. Throws for an application of another organisation. `secretValues` null = the values the
+   * output must never show cannot be established: what a run prints is then not kept (ADR-0042 A8).
+   */
   readonly findComponent: (req: {
     readonly stackId: string;
     readonly organizationId: string;
     readonly componentKey: string;
-  }) => Promise<{ readonly running: boolean; readonly secretValues: readonly string[] } | null>;
+  }) => Promise<{ readonly running: boolean; readonly secretValues: readonly string[] | null } | null>;
   readonly assertEngineAvailable: () => void;
   readonly now?: () => Date;
 }
@@ -134,22 +142,28 @@ export class SimulatedAppStackTasks implements StackTaskExecutorPort {
       if (behaviour.noShell === true) {
         return { runId: req.runId, outcome: "not_started", problem: "no_shell", exitCode: null, startedAt: null, endedAt, output: "", outputTruncated: false };
       }
-      const masked = maskAppStackLogLines(
-        (behaviour.lines ?? []).map((text) => ({ at: null, stream: "stdout" as const, text })),
-        component.secretValues,
-      ).map((line) => line.text);
-      const { output, truncated } = boundAppStackTaskOutput(masked);
+      const lines = behaviour.lines ?? [];
       const exitCode = behaviour.timedOut === true ? null : behaviour.exitCode === undefined ? 0 : behaviour.exitCode;
-      return {
+      const unknown = behaviour.notStopped === true && exitCode === null;
+      const answer = (output: string, outputTruncated: boolean): AppStackTaskRunIpcResult => ({
         runId: req.runId,
-        outcome: behaviour.timedOut === true ? "timed_out" : exitCode === 0 ? "succeeded" : "failed",
+        outcome: unknown ? "unknown" : behaviour.timedOut === true ? "timed_out" : exitCode === 0 ? "succeeded" : "failed",
         problem: null,
         exitCode,
         startedAt,
         endedAt,
         output,
-        outputTruncated: truncated,
-      };
+        outputTruncated,
+      });
+      // Masked with every private value, or not kept at all: as the executor does, a run that printed something and
+      // whose values cannot be established keeps nothing ("" and cut); one that printed nothing keeps "" and no cut.
+      if (component.secretValues === null) return answer("", lines.some((text) => text !== ""));
+      const masked = maskAppStackLogLines(
+        lines.map((text) => ({ at: null, stream: "stdout" as const, text })),
+        component.secretValues,
+      ).map((line) => line.text);
+      const { output, truncated } = boundAppStackTaskOutput(masked);
+      return answer(output, truncated);
     };
     const run: SimRun = { stackId: req.stackId, organizationId: req.organizationId, state: "running" };
     this.runs.set(req.runId, run);

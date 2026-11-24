@@ -1703,6 +1703,36 @@ describe("scheduled tasks", () => {
     expect(failed.sets).toContainEqual([8, en.apps.tasks.runs.error]);
   });
 
+  it("a run whose output was not kept does not say it printed nothing, and a run that printed nothing does (issue #188)", () => {
+    const run = (status: AppStackTaskRunDto["status"], output: string, outputTruncated: boolean): AppStackTaskRunDto => ({ ...RUNS[0]!, status, output, outputTruncated });
+    for (const m of [en, itMsgs]) {
+      const t = m.apps.tasks.runs;
+      const shown = (r: AppStackTaskRunDto) => html(callHooks(AppStackTasks, props, m, { 6: "save", 7: [r] }).out, m);
+      expect(t.notKept).not.toBe(t.noOutput);
+      // An empty output that is flagged as cut is a run that printed something, whichever way it ended.
+      for (const status of ["succeeded", "failed", "timed_out"] as const) {
+        const kept = shown(run(status, "", true));
+        expect([kept.includes(t.notKept), kept.includes(t.noOutput), kept.includes(t.truncated), kept.includes(t.output)]).toEqual([true, false, false, false]);
+      }
+      // A run that printed nothing keeps its own sentence.
+      const nothing = shown(run("succeeded", "", false));
+      expect([nothing.includes(t.noOutput), nothing.includes(t.notKept)]).toEqual([true, false]);
+      // Lines that were kept are shown as before, cut or not.
+      for (const cut of [true, false]) {
+        const some = shown(run("failed", "last line", cut));
+        expect([some.includes("last line"), some.includes(t.truncated), some.includes(t.notKept), some.includes(t.noOutput)]).toEqual([true, cut, false, false]);
+      }
+    }
+    // The sentence tells both causes and what to do, in the words the page uses for them.
+    expect(en.apps.tasks.runs.notKept).toBe(
+      "This run printed something, but it was not kept. This happens when the output is one very long line, or when the panel could not read the application's private values to hide them. If it happens again, restart the application and run the task again; if it still happens after a restart, ask your server administrator.",
+    );
+    expect(itMsgs.apps.tasks.runs.notKept).toMatch(/valori riservati/);
+    expect(itMsgs.apps.tasks.runs.notKept).toMatch(/riavvia l'applicazione/);
+    expect(itMsgs.apps.tasks.runs.notKept).toMatch(/rivolgiti all'amministratore del server\.$/);
+    expect(itMsgs.apps.tasks.runs.notKept.split(". ")).toHaveLength(3);
+  });
+
   it("a task that is running is followed on the page with its own words", () => {
     const operation = { id: "op_9", kind: "stack.task", status: "failed", steps: [{ id: "st_1", key: "run", status: "failed" }] };
     const h = html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, en, { 0: operation, 1: "done" }).out);

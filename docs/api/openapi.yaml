@@ -15561,9 +15561,10 @@ components:
             output:
               type: string
               maxLength: 16384
-              description: The last lines the run printed, secrets masked; empty while it is queued or running
+              description: The last lines the run printed, secrets masked; empty while it is queued or running. Empty with `outputTruncated` true means the run printed something and none of it was kept
             outputTruncated:
               type: boolean
+              description: True when lines of the output were left out. With an empty `output` it means the run printed something and none of it was kept, because it was one very long line or because the panel could not read the private values of the application to mask it
 
     AppStackTaskRunsDto:
       type: object

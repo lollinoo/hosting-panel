@@ -37,6 +37,7 @@ import {
   appStackTaskSlotAtOrBefore,
   appStackLockKey,
   appStackTaskQueueKey,
+  appStackTaskPrintedButNotKept,
   boundAppStackTaskOutput,
   findForbiddenPublicDtoKeys,
   findPemValues,
@@ -112,7 +113,7 @@ describe("statuses of a run", () => {
   it("are the closed lists of ADR-0042", () => {
     expect(APP_STACK_TASK_RUN_STATUSES).toEqual(["queued", "running", "succeeded", "failed", "timed_out", "not_started", "unknown"]);
     expect(APP_STACK_TASK_RUN_FINAL_STATUSES).toEqual(["succeeded", "failed", "timed_out", "not_started", "unknown"]);
-    expect(APP_STACK_TASK_EXECUTOR_OUTCOMES).toEqual(["succeeded", "failed", "timed_out", "not_started"]);
+    expect(APP_STACK_TASK_EXECUTOR_OUTCOMES).toEqual(["succeeded", "failed", "timed_out", "not_started", "unknown"]);
     expect(APP_STACK_TASK_RUN_PROBLEMS).toEqual([
       "component_not_running",
       "cannot_run_tasks",
@@ -308,6 +309,19 @@ describe("what a run printed", () => {
     expect(AppStackTaskOutputSchema.safeParse(bound.output).success).toBe(true);
   });
 
+  it("tells a run that printed something and kept none of it: an empty output that is flagged, and only that", () => {
+    const answer = (output: string, outputTruncated: boolean) => appStackTaskPrintedButNotKept({ output, outputTruncated });
+    expect(answer("", true)).toBe(true);
+    // nothing was printed
+    expect(answer("", false)).toBe(false);
+    // something was kept, whole or cut
+    expect(answer("a line", false)).toBe(false);
+    expect(answer("the last line", true)).toBe(false);
+    // the pair is one the executor and the schemas of a run answer and carry
+    const finished = { runId: "srun_0123456789abcdef01234567", outcome: "succeeded", problem: null, exitCode: 0, startedAt: "2026-11-23T01:00:00.000Z", endedAt: "2026-11-23T01:00:01.000Z" };
+    expect(AppStackTaskRunIpcResultSchema.safeParse({ ...finished, output: "", outputTruncated: true }).success).toBe(true);
+  });
+
   it("whatever comes in, the result passes the schema", () => {
     const pieces = ["", "plain", "è€😀", "\u0000\u001b\u007f\u0085", "\ud800", "\udc00", "x".repeat(2_500), "\t", "😀".repeat(1_200), "a\nb\r\nc"];
     for (let seed = 1; seed <= 40; seed += 1) {
@@ -382,7 +396,7 @@ describe("the executor call that runs a task", () => {
   const ended = "2026-11-23T10:00:02.000Z";
   const result = { runId: RUN, outcome: "succeeded", problem: null, exitCode: 0, startedAt: started, endedAt: ended, output: "done", outputTruncated: false };
 
-  it("accepts the four ways a run ends", () => {
+  it("accepts the five ways a run ends", () => {
     for (const good of [
       result,
       { ...result, outcome: "failed", exitCode: 3 },
@@ -390,6 +404,9 @@ describe("the executor call that runs a task", () => {
       { ...result, outcome: "failed", exitCode: null }, // the engine did not tell
       { ...result, outcome: "timed_out", exitCode: null, outputTruncated: true },
       { ...result, outcome: "not_started", problem: "no_shell", exitCode: null, startedAt: null, output: "" },
+      // The kill of the command was not confirmed: it started, and nobody can say it is not still going. Its output stays.
+      { ...result, outcome: "unknown", exitCode: null },
+      { ...result, outcome: "unknown", exitCode: null, output: "", outputTruncated: true },
     ]) {
       expect(AppStackTaskRunIpcResultSchema.parse(good), JSON.stringify(good)).toEqual(good);
     }
@@ -406,7 +423,10 @@ describe("the executor call that runs a task", () => {
     ["not started with output", { outcome: "not_started", problem: "no_shell", exitCode: null, startedAt: null }],
     ["not started with a start", { outcome: "not_started", problem: "no_shell", exitCode: null, output: "" }],
     ["not started with an exit code", { outcome: "not_started", problem: "no_shell", startedAt: null, output: "" }],
-    ["an outcome only the API gives", { outcome: "unknown", exitCode: null }],
+    ["an unknown outcome with an exit code", { outcome: "unknown", exitCode: 0 }],
+    ["an unknown outcome with another exit code", { outcome: "unknown", exitCode: 137 }],
+    ["an unknown outcome with a problem", { outcome: "unknown", exitCode: null, problem: "no_shell" }],
+    ["an unknown outcome for a run that did not start", { outcome: "unknown", exitCode: null, startedAt: null }],
     ["a problem only the API gives", { outcome: "not_started", problem: "task_gone", exitCode: null, startedAt: null, output: "" }],
     ["exit code 256", { outcome: "failed", exitCode: 256 }],
     ["a negative exit code", { outcome: "failed", exitCode: -1 }],
