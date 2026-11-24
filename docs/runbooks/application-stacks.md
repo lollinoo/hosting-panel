@@ -365,6 +365,26 @@ names only the key of a task, and the command is read from the template version 
    writes the secret files again, then restarts every component. **Avvia** does not rewrite the files of a component
    that is already running.
 
+## 8a. After an update that changes how application containers are built
+
+1. Every application container carries the label `io.hostingpanel.app_body_version`: the version of the code that
+   built it (`ADR-0035` §2.10). A release that changes how containers are built for the same application (a setting,
+   a label, a mount, where the secret files are) raises that version. The release that brought the label is such a
+   change: every container created before it has no label and counts as older.
+2. Nothing replaces a running container by itself. The update, a host reboot, **Avvia** and **Riavvia** leave every
+   container as it is, with its old settings. Only the next **Reinstalla** (deploy), upgrade or return to a previous
+   version of each application replaces its older containers, **once**: each one stops, is removed and is created
+   again, with the short interruption a replacement has. The volumes and the data in them stay. A later deploy with
+   nothing changed replaces nothing.
+3. The panel does not show which applications still run older containers. List the containers and their version
+   (an empty version is a container built before the label existed):
+   ```bash
+   sudo docker ps -a --filter label=io.hostingpanel.role=app_component --format '{{.Names}}\t{{.Label "io.hostingpanel.app_body_version"}}'
+   ```
+   To bring an application to the new settings at a time that suits its customer, the customer (or a hosting
+   administrator of the organisation) presses **Reinstalla** on its page. The server administrator cannot do it from
+   the console.
+
 ## 9. Read the acceptance scripts' output
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
