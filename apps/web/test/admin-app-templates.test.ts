@@ -405,7 +405,7 @@ describe("editing the details", () => {
 
   it.each(locales)("the category options are the known ones in catalog order; an unknown stored one comes first, raw (%s)", (_l, m) => {
     const known = Object.entries(m.admin.appTemplates.category).map(([value, label]) => ({ value, label }));
-    expect(known).toHaveLength(8);
+    expect(known).toHaveLength(9);
     expect(appTemplateCategoryOptions(m, "content")).toEqual(known);
     expect(appTemplateCategoryOptions(m, "mystery")).toEqual([{ value: "mystery", label: "mystery" }, ...known]);
   });
@@ -439,7 +439,7 @@ describe("editing the details", () => {
     expect(out).not.toContain('href="/admin/templates/apps/atpl_old/edit"');
   });
 
-  it("the button opens the dialog with bounded fields and the 8 categories", () => {
+  it("the button opens the dialog with bounded fields and the 9 categories", () => {
     const t = en.admin.appTemplates.detail;
     const { tree, sets } = callHooks(AppTemplateDetail, props(), en);
     (button(tree, t.editDetails).props.onClick as () => void)();
@@ -452,7 +452,7 @@ describe("editing the details", () => {
     const select = all.find((e) => e.props.id === "app-template-category")!;
     expect(select.type).toBe("select");
     expect(select.props.value).toBe("collaboration");
-    expect(els(select.props.children).filter((e) => e.type === "option")).toHaveLength(8);
+    expect(els(select.props.children).filter((e) => e.type === "option")).toHaveLength(9);
   });
 
   it("save PATCHes name, description and category, then refreshes, says so and closes", async () => {

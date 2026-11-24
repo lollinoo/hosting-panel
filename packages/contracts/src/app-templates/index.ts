@@ -6,5 +6,6 @@ export * from "./canonical.js";
 export * from "./spec.js";
 export * from "./parameters.js";
 export * from "./plan.js";
+export * from "./stack-routing.js";
 export * from "./stack-ipc.js";
 export * from "./built-in.js";

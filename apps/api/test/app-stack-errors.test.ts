@@ -56,6 +56,13 @@ describe("mapAppStackError", () => {
       }),
     ],
     [
+      "PATH_IN_USE",
+      one(400, "VALIDATION_ERROR", "A path of a web address still points at a part this version removes. Remove the path first.", {
+        field: "domains",
+        reason: "path_target_removed",
+      }),
+    ],
+    [
       "DATABASE_IN_USE",
       one(400, "VALIDATION_ERROR", "Applications still use this database. Disconnect them first.", { field: "links", reason: "database_in_use" }),
     ],
@@ -115,6 +122,21 @@ describe("mapAppStackError", () => {
       }),
     );
     expect(mapped(new AppStackDomainError("NOT_FOUND", "x"))).toMatchObject({ status: 404, message: APP_NOT_FOUND });
+  });
+
+  it("maps the refusals of the routing options (ADR-0037), each with the field it is about", () => {
+    expect(mapped(new AppStackDomainError("REDIRECT_TARGET", "x"))).toMatchObject(
+      one(400, "VALIDATION_ERROR", "Choose another web address of this application.", { field: "redirectToDomainId", reason: "redirect_target" }),
+    );
+    expect(mapped(new AppStackDomainError("REDIRECT_CHAIN", "x"))).toMatchObject(
+      one(400, "VALIDATION_ERROR", "A web address that redirects cannot be the destination of another one.", {
+        field: "redirectToDomainId",
+        reason: "redirect_chain",
+      }),
+    );
+    expect(mapped(new AppStackDomainError("PASSWORD_REQUIRED", "x"))).toMatchObject(
+      one(400, "VALIDATION_ERROR", "Choose a password for this web address.", { field: "protection.password", reason: "password_required" }),
+    );
   });
 
   it("maps a TLS coverage refusal like a site domain add", () => {

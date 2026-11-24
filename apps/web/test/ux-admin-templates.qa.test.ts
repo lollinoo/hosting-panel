@@ -386,11 +386,12 @@ describe("the details dialog", () => {
   });
 
   it.each([
-    ["mystery", 9, "mystery"],
-    ["Web", 9, "Web"], // wrong case is not a known key
-    ["", 9, ""],
-    ["productivity", 8, "productivity"],
-    ["web", 8, "web"],
+    ["mystery", 10, "mystery"],
+    ["Web", 10, "Web"], // wrong case is not a known key
+    ["", 10, ""],
+    ["productivity", 9, "productivity"],
+    ["web", 9, "web"],
+    ["apps", 9, "apps"], // the category of an imported Compose file that names none
   ])("a stored category %j: %i options, the select shows %j and saving keeps it", async (stored, count, shown) => {
     const tpl = detail(app({ id: "atpl_c", category: stored }));
     const { tree } = callHooks(AppTemplateDetail, props(tpl), en);
@@ -399,7 +400,7 @@ describe("the details dialog", () => {
     const options = els(select.props.children).filter((e) => e.type === "option");
     expect(options).toHaveLength(count);
     expect(options.map((o) => o.props.value)).toContain(shown);
-    expect(options[0]!.props.value).toBe(count === 9 ? stored : Object.keys(en.admin.appTemplates.category)[0]);
+    expect(options[0]!.props.value).toBe(count === 10 ? stored : Object.keys(en.admin.appTemplates.category)[0]);
     expect(new Set(options.map((o) => o.props.value)).size).toBe(count);
     keyedSend.mockResolvedValue({ ok: true, data: {} });
     await (saveButton(tree, en).props.onClick as () => Promise<void>)();
@@ -509,7 +510,7 @@ describe("/admin/templates/apps", () => {
     expect(config).not.toMatch(/trailingSlash\s*:\s*true/);
     const dir = join(process.cwd(), "apps/web/src/app/admin/templates/apps");
     const entries = readdirSync(dir).sort();
-    expect(entries).toEqual(["[templateId]", "new", "page.tsx"]);
+    expect(entries).toEqual(["[templateId]", "import", "new", "page.tsx"]);
     expect(readdirSync(join(process.cwd(), "apps/web/src/app/admin/templates")).sort()).not.toContain("layout.tsx");
   });
 });

@@ -10,3 +10,4 @@ export * from "./app-template-keys.js";
 export * from "./app-template-graph.js";
 export * from "./app-template-validation.js";
 export * from "./app-template-compile.js";
+export * from "./compose-import.js";

@@ -173,7 +173,10 @@ describe("through the Docker adapter: a route change rewrites one file and never
     const daemon = await startMockDockerDaemon();
     cleanups.push(() => daemon.close());
     const dir = await tempDir("hp-app-traefik-adapter-");
-    const listener = net.createServer((socket) => socket.end());
+    const listener = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end();
+    });
     await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", () => resolve()));
     cleanups.push(() => new Promise<void>((resolve) => listener.close(() => resolve())));
     const port = (listener.address() as AddressInfo).port;

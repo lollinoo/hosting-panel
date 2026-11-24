@@ -59,6 +59,7 @@ export type AppStackRepositoryErrorCode =
   | "INVALID_TRANSITION"
   | "NO_REVISION"
   | "COMPONENT_IN_USE"
+  | "PATH_IN_USE"
   | "DATABASE_IN_USE";
 
 export class AppStackRepositoryError extends Error {
@@ -137,6 +138,11 @@ export interface EnqueueAppStackOperationInput {
   readonly requestHash: string;
   /** upgrade/rollback: required; deploy: optional (null = redeploy the desired revision); start/stop/restart/delete: null. */
   readonly revision: NewAppStackRevision | null;
+  /**
+   * stack.deploy without a revision: the observer's route refresh, which installs nothing. Its deployment names the
+   * applied revision, the one whose routes it publishes, also when a newer one is desired.
+   */
+  readonly routesOnly?: boolean;
   /** stack.delete: sets retention_policy of every volume of the stack (true → 'destroy', false → 'retain'); ignored otherwise. */
   readonly destroyData: boolean;
 }
@@ -483,7 +489,8 @@ export async function enqueueAppStackOperationTransactional(
     if (target === null) {
       throw new AppStackRepositoryError("INVALID_TRANSITION", `This action is not available while the application is ${stack.status}.`, stack.status);
     }
-    if (revisionKind && next === null && (input.kind !== "stack.deploy" || stack.desiredRevisionId === null)) {
+    const redeployed = input.kind === "stack.deploy" && input.routesOnly === true ? stack.appliedRevisionId : stack.desiredRevisionId;
+    if (revisionKind && next === null && (input.kind !== "stack.deploy" || redeployed === null)) {
       throw new AppStackRepositoryError("NO_REVISION", "There is no version of this application to install.");
     }
 
@@ -503,11 +510,16 @@ export async function enqueueAppStackOperationTransactional(
       assertRevision(next, { ...scope, hostAllocationId: stack.hostAllocationId, templateVersionId: next.templateVersionId });
       const ingress = planList(next.plan, "ingress");
       const domains = await tx
-        .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort })
+        .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort, pathRoutes: appStackDomains.pathRoutes })
         .from(appStackDomains)
         .where(eq(appStackDomains.stackId, stack.id));
-      if (domains.some((d) => !ingress.some((route) => route.componentKey === d.componentKey && route.port === d.internalPort))) {
+      const isIngress = (componentKey: string, port: number) => ingress.some((route) => route.componentKey === componentKey && route.port === port);
+      if (domains.some((d) => !isIngress(d.componentKey, d.internalPort))) {
         throw new AppStackRepositoryError("COMPONENT_IN_USE", "A web address still points at a part this version removes.");
+      }
+      // ADR-0037: a path committed after the API checked the plan would stop routing unseen.
+      if (domains.some((d) => d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
+        throw new AppStackRepositoryError("PATH_IN_USE", "A path of a web address still points at a part this version removes.");
       }
       // ADR-0039: a database that applications use stays one component listening on one port. With more, the executor
       // could attach nothing and a disconnection could never be confirmed.
@@ -547,7 +559,7 @@ export async function enqueueAppStackOperationTransactional(
         .set({ retentionPolicy: input.destroyData ? "destroy" : "retain", updatedAt: now })
         .where(eq(appStackVolumes.stackId, stack.id));
     }
-    const revisionId = revision?.id ?? stack.desiredRevisionId;
+    const revisionId = revision?.id ?? redeployed;
     const { deployment, operation } = await enqueueDeployment(tx, {
       ...scope,
       kind: input.kind,
@@ -628,6 +640,8 @@ export async function updateAppStackDeploymentTransactional(
     readonly stackStatus: AppStackStatus | null;
     readonly appliedRevisionId?: string;
     readonly appliedRoutesHash?: string | null;
+    /** Written with appliedRoutesHash only; a routes hash written without it clears it (not known). */
+    readonly appliedAddressesHash?: string;
   },
 ): Promise<AppStackRow> {
   const stack = await lockStack(db, input, false);
@@ -675,7 +689,9 @@ export async function updateAppStackDeploymentTransactional(
       ...(input.stackStatus !== null ? { status: input.stackStatus } : {}),
       ...(deleted ? { deletedAt: now } : {}),
       ...(input.appliedRevisionId !== undefined ? { appliedRevisionId: input.appliedRevisionId } : {}),
-      ...(input.appliedRoutesHash !== undefined ? { appliedRoutesHash: input.appliedRoutesHash } : {}),
+      ...(input.appliedRoutesHash !== undefined
+        ? { appliedRoutesHash: input.appliedRoutesHash, appliedAddressesHash: input.appliedAddressesHash ?? null }
+        : {}),
     })
     .where(eq(appStacks.id, stack.id))
     .returning();

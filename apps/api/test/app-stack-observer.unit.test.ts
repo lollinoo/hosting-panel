@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { AppStackStatus, AppStackStatusIpcResult, ApprovedStackPlan } from "@hosting-panel/contracts";
+import type { AppStackStatus, AppStackStatusIpcResult, ApprovedStackPlan, ApprovedStackPlanV1 } from "@hosting-panel/contracts";
 import {
   and,
   appStackComponents,
@@ -29,6 +29,7 @@ import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.se
 import {
   APP_STACK_OBSERVE_BATCH,
   APP_STACK_ROUTE_REFRESH_INTERVAL_MS,
+  appStackAddressesHash,
   appStackDisplayStatus,
   appStackRoutePlan,
   appStackRoutesHash,
@@ -47,7 +48,7 @@ const ALLOC = "alloc_obs";
 const IPV4 = "10.0.0.71";
 const PLAN = JSON.parse(
   readFileSync(new URL("../../../packages/contracts/test/fixtures/app-stack-notes-demo/plan.json", import.meta.url), "utf8"),
-) as ApprovedStackPlan;
+) as ApprovedStackPlanV1;
 
 interface Seeded {
   readonly id: string;
@@ -143,15 +144,32 @@ describe("AppStackObserverService (PGlite)", () => {
     desiredDiffers?: boolean;
     routesHash?: string | null;
     domains?: readonly Partial<typeof appStackDomains.$inferInsert>[];
+    ingress?: ApprovedStackPlan["ingress"];
     /** Keeps only this component of the fixture plan, with no volume and no address: a database that can be linked. */
     only?: string;
   }): Promise<Seeded> {
     counter += 1;
     const id = `stk_obs_${String(counter).padStart(3, "0")}`;
     const revisionId = `astr_obs_${String(counter)}`;
-    const full: ApprovedStackPlan = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
+    const full = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
     const plan: ApprovedStackPlan =
-      input.only === undefined ? full : { ...full, components: full.components.filter((c) => c.key === input.only), volumes: [], ingress: [] };
+      input.only !== undefined
+        ? { ...full, components: full.components.filter((c) => c.key === input.only), volumes: [], ingress: [] }
+        : {
+            ...full,
+            // Another entry point: its component gets the health check every ingress target has.
+            ...(input.ingress
+              ? {
+                  ingress: input.ingress,
+                  components: PLAN.components.map((c) => {
+                    const port = input.ingress!.find((i) => i.componentKey === c.key)?.port;
+                    return c.healthcheck === null && port !== undefined
+                      ? { ...c, healthcheck: { kind: "tcp" as const, port, intervalSeconds: 15, timeoutSeconds: 3 } }
+                      : c;
+                  }),
+                }
+              : {}),
+          };
     await db()
       .insert(appStacks)
       .values({
@@ -674,15 +692,34 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await deploys(waiting.id)).toEqual([]);
     });
 
-    it("queues none for stopped or failed stacks, nor when the desired revision differs from the applied one", async () => {
+    it("queues none for stopped or failed stacks", async () => {
       await seedStack({ status: "stopped", domains: [{ hostname: "stopped.example.com" }] });
       await seedStack({ status: "failed", domains: [{ hostname: "failed.example.com" }] });
-      await seedStack({ status: "running", desiredDiffers: true, domains: [{ hostname: "upgrade.example.com" }] });
 
       await observer().reconcileOnce(NOW);
 
       expect(await db().select().from(operations)).toEqual([]);
       expect(triggerAsync).not.toHaveBeenCalled();
+    });
+
+    it("a running stack whose newer version was not installed gets the routes of the revision that runs, and the refresh names that revision", async () => {
+      // An upgrade that failed before it changed anything: the desired revision stays the new one, the applied one runs.
+      const stack = await seedStack({ status: "running", desiredDiffers: true, domains: [{ hostname: "upgrade.example.com" }] });
+      await insertOperation(stack.id, "failed", at(-30));
+
+      await observer().reconcileOnce(NOW);
+
+      const [op, ...more] = await deploys(stack.id);
+      expect(more).toEqual([]);
+      expect(op!.idempotencyKey).toMatch(/^sys_routes_[0-9a-f]{32}$/);
+      const [deployment] = await db().select().from(appStackDeployments).where(eq(appStackDeployments.operationId, op!.id));
+      expect(deployment!.revisionId).toBe(stack.revisionId);
+      const [outbox] = await db().select().from(outboxEvents).where(eq(outboxEvents.aggregateId, stack.id));
+      expect(outbox!.payload).toMatchObject({ revisionId: stack.revisionId });
+      const [row] = await db().select().from(appStacks).where(eq(appStacks.id, stack.id));
+      expect(row).toMatchObject({ appliedRevisionId: stack.revisionId, desiredRevisionId: `${stack.revisionId}_b` });
+      expect(await audits(stack.id, "app.stack.deploy")).toMatchObject([{ details: { revisionId: stack.revisionId, trigger: "routes" } }]);
+      expect(mutatingCalls()).toEqual([]);
     });
 
     it("backs off for 10 minutes after a failed operation", async () => {
@@ -693,6 +730,19 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await deploys(stack.id)).toEqual([]);
 
       await observer().reconcileOnce(at(6));
+      expect(await deploys(stack.id)).toHaveLength(1);
+    });
+
+    it("a change of the routing options does not wait out those 10 minutes; a pass of the loop still does", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "options.example.com" }] });
+      await insertOperation(stack.id, "failed", at(-5));
+      const obs = observer();
+
+      await obs.reconcileStack(ORG, stack.id, NOW);
+      await obs.reconcileOnce(NOW);
+      expect(await deploys(stack.id)).toEqual([]);
+
+      await obs.reconcileStack(ORG, stack.id, NOW, { optionsChanged: true });
       expect(await deploys(stack.id)).toHaveLength(1);
     });
 
@@ -782,6 +832,125 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await allDeploys(stack.id)).toHaveLength(3);
       await obs.reconcileOnce(at(5 + APP_STACK_ROUTE_REFRESH_INTERVAL_MS / 60_000));
       expect(await allDeploys(stack.id)).toHaveLength(4);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("a change of the options never waits the five minutes: a path to the other entry point a minute after compression is refreshed at once", async () => {
+      const obs = observer();
+      const stack = await seedStack({
+        status: "running",
+        ingress: [
+          { componentKey: "app", port: 8080 },
+          { componentKey: "cache", port: 6379 },
+        ],
+        domains: [{ hostname: "two.example.com" }],
+      });
+      /** The routes of today's rows with both entry points healthy, as a refresh publishes them. */
+      const published = async () => {
+        const rows = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+        const plan = { ingress: [{ componentKey: "app", port: 8080 }, { componentKey: "cache", port: 6379 }] };
+        return appStackRoutesHash(appStackRoutePlan({ plan, domains: rows, include: new Set(["app", "cache"]), now: NOW, acmeEnabled: true }).entries);
+      };
+      const settle = async () => {
+        await db().update(operations).set({ status: "succeeded", completedAt: NOW }).where(eq(operations.resourceId, stack.id));
+        await db().update(appStacks).set({ status: "running", appliedRoutesHash: await published() }).where(eq(appStacks.id, stack.id));
+      };
+      const address = eq(appStackDomains.stackId, stack.id);
+      await settle();
+
+      // t0: compression is turned on; the refresh is queued and runs.
+      await db().update(appStackDomains).set({ compression: true }).where(address);
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      await settle();
+
+      // t0 + 1 min: a path to the other entry point, which is healthy.
+      await db()
+        .update(appStackDomains)
+        .set({ pathRoutes: [{ pathPrefix: "/api", componentKey: "cache", port: 6379, stripPrefix: false }] })
+        .where(address);
+      await obs.reconcileOnce(at(1));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      await settle();
+
+      // Only health changes from here: the five minutes hold again.
+      cache = "stopped";
+      await obs.reconcileOnce(at(2));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("an option saved while a refresh is queued, which that refresh did not read, is refreshed by the next pass at once", async () => {
+      const obs = observer();
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "late.example.com" }] });
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      // The save lands after the refresh read the addresses: it publishes them as they were.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      const appliedRoutesHash = appStackRoutesHash(
+        appStackRoutePlan({
+          plan: stack.plan,
+          domains: (await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id))).map((r) => ({ ...r, compression: false })),
+          include: new Set(["app"]),
+          now: NOW,
+          acmeEnabled: true,
+        }).entries,
+      );
+      await db().update(operations).set({ status: "succeeded", completedAt: NOW }).where(eq(operations.resourceId, stack.id));
+      await db().update(appStacks).set({ status: "running", appliedRoutesHash }).where(eq(appStacks.id, stack.id));
+
+      await obs.reconcileOnce(at(1));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("after a failed refresh the loop waits the 10 minutes only for the addresses that refresh was queued with", async () => {
+      const obs = observer();
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "pause.example.com" }] });
+      /** The refresh fails a minute later: the stack reads degraded and the old routes (none) stay. */
+      const fail = async (minute: number) => {
+        await db().update(operations).set({ status: "failed", completedAt: at(minute) }).where(eq(operations.resourceId, stack.id));
+        await db().update(appStacks).set({ status: "degraded" }).where(eq(appStacks.id, stack.id));
+      };
+
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      await fail(1);
+      await obs.reconcileOnce(at(2));
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+
+      // An option saved meanwhile (accepted while that refresh was queued) is not a retry of it: no wait.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      await obs.reconcileOnce(at(3));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+
+      // That one fails too: the same addresses wait again.
+      await fail(4);
+      await obs.reconcileOnce(at(5));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("after a restart of the API, an option saved since the last publication does not wait the 10 minutes of a failed action", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "restart.example.com" }] });
+      const rows = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+      const appliedRoutesHash = await routesOf(stack.id, ["restart.example.com"]);
+      const appliedAddressesHash = appStackAddressesHash(rows, appliedRoutesHash);
+      await db().update(appStacks).set({ appliedRoutesHash, appliedAddressesHash }).where(eq(appStacks.id, stack.id));
+      await insertOperation(stack.id, "failed", at(-5));
+
+      // A restarted API remembers no queued refresh: the stored fingerprint says what was published.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      await observer().reconcileOnce(NOW);
+      expect(await deploys(stack.id)).toHaveLength(1);
+
+      // A failed refresh of what is published already (only health moved) still waits.
+      const other = await seedStack({ status: "running", domains: [{ hostname: "restart-same.example.com" }] });
+      const same = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, other.id));
+      await db().update(appStacks).set({ appliedRoutesHash: null, appliedAddressesHash: appStackAddressesHash(same, null) }).where(eq(appStacks.id, other.id));
+      await insertOperation(other.id, "failed", at(-5));
+      await observer().reconcileOnce(NOW);
+      expect(await deploys(other.id)).toEqual([]);
       expect(mutatingCalls()).toEqual([]);
     });
   });

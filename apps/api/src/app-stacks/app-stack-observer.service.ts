@@ -6,7 +6,6 @@ import {
   APP_STACK_BUSY_STATUSES,
   APP_STACK_RESOURCE_TYPE,
   ApprovedStackPlanSchema,
-  isTerminalOperationStatus,
   redactSensitiveString,
   type AppStackStatus,
   type ApprovedStackPlan,
@@ -37,6 +36,7 @@ import {
   sql,
   updateAppStackDomainState,
   type AppStackDomainRow,
+  type AppStackRow,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -59,10 +59,13 @@ import {
   APP_STACK_ROUTE_REFRESH_BACKOFF_MS,
   APP_STACK_ROUTE_REFRESH_INTERVAL_MS,
   APP_STACK_ROUTES_KEY_PREFIX,
+  appStackAddressesHash,
   appStackHealthRows,
   appStackRoutePlan,
+  appStackRoutesFollowAddresses,
   appStackRoutesHash,
   appStackRoutesHealthOnly,
+  appStackRoutesPending,
 } from "./app-stack-runtime-policy.js";
 
 const FAILURE_WINDOW_MS = 10 * 60_000;
@@ -78,8 +81,8 @@ interface StackRef {
 
 interface ManagedStack extends StackRef {
   readonly status: AppStackStatus;
-  readonly desiredRevisionId: string | null;
   readonly appliedRoutesHash: string | null;
+  readonly appliedAddressesHash: string | null;
   readonly ipv4: string;
   readonly hasDomains: boolean;
   /** An operation runs: only failed orders are classified, nothing else moves. */
@@ -101,8 +104,8 @@ export class AppStackObserverService {
   /** A full pass queued and not started yet: a call meanwhile joins it, so a long pass is followed by one pass, not one per tick. */
   #waitingPass: Promise<void> | null = null;
   readonly #certSeenAt = new Map<string, number>();
-  /** Stack id → when its last route refresh was queued. */
-  readonly #routesQueuedAt = new Map<string, number>();
+  /** Stack id → when its last route refresh was queued, and the fingerprint of its saved addresses and options then. */
+  readonly #routesQueuedAt = new Map<string, { readonly at: number; readonly addresses: string }>();
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -141,14 +144,40 @@ export class AppStackObserverService {
     return pass;
   }
 
-  /** After a domain add/remove/check; `forceDnsIds` looks those addresses up now even when not due. */
+  /**
+   * After a domain add/remove/check/update; `forceDnsIds` looks those addresses up now even when not due,
+   * `optionsChanged` (ADR-0037) queues the refresh without waiting out the pause after a failed action, and
+   * `routesQueued` wakes the worker for the refresh the caller queued in its own transaction.
+   */
   public reconcileStack(
     organizationId: string,
     stackId: string,
     now: Date,
-    opts: { readonly forceDnsIds?: readonly string[] } = {},
+    opts: { readonly forceDnsIds?: readonly string[]; readonly optionsChanged?: boolean; readonly routesQueued?: boolean } = {},
   ): Promise<void> {
-    return this.#queue(() => this.#run({ organizationId, stackId }, now, (id) => opts.forceDnsIds?.includes(id) ?? false));
+    if (opts.routesQueued === true) this.outboxWorker.triggerAsync();
+    return this.#queue(() =>
+      this.#run({ organizationId, stackId }, now, (id) => opts.forceDnsIds?.includes(id) ?? false, opts.optionsChanged === true),
+    );
+  }
+
+  /**
+   * ADR-0037: queues the route refresh in the caller's transaction, which holds the stack row, so no action can be
+   * queued between a change of the addresses and their refresh. Only when the saved addresses are not what the route
+   * file holds; the caller has checked that the routes of the stack follow its addresses. True when one was queued.
+   */
+  public async queueRoutesRefresh(
+    tx: HostingPanelDatabase,
+    stack: Pick<AppStackRow, "id" | "organizationId" | "appliedRevisionId" | "appliedRoutesHash" | "appliedAddressesHash">,
+    now: Date,
+  ): Promise<boolean> {
+    if (this.config.runtimeBackend === "disabled" || stack.appliedRevisionId === null) return false;
+    const ref = { organizationId: stack.organizationId, stackId: stack.id };
+    const domains = await listAppStackDomains(tx, ref);
+    if (!appStackRoutesPending({ ...stack, domains })) return false;
+    await this.#enqueueRefresh(tx, { ...ref, appliedRevisionId: stack.appliedRevisionId });
+    this.#routesQueuedAt.set(stack.id, { at: now.getTime(), addresses: appStackAddressesHash(domains, null) });
+    return true;
   }
 
   #queue(work: () => Promise<void>): Promise<void> {
@@ -161,6 +190,7 @@ export class AppStackObserverService {
     only: { readonly organizationId: string; readonly stackId: string } | null,
     now: Date,
     forceDns: (domainId: string) => boolean,
+    optionsChanged = false,
   ): Promise<void> {
     if (this.config.runtimeBackend === "disabled") return;
     if (only === null) {
@@ -175,8 +205,8 @@ export class AppStackObserverService {
         organizationId: appStacks.organizationId,
         status: appStacks.status,
         appliedRevisionId: appStacks.appliedRevisionId,
-        desiredRevisionId: appStacks.desiredRevisionId,
         appliedRoutesHash: appStacks.appliedRoutesHash,
+        appliedAddressesHash: appStacks.appliedAddressesHash,
         ipv4: hosts.ipv4Address,
         hasDomains: hasDomainRows,
       })
@@ -223,7 +253,7 @@ export class AppStackObserverService {
           if (report === null) return;
           await this.#updateCertificates(stack, now, report);
         }
-        enqueued = (await this.#refreshRoutes(stack, now, report?.acmeEnabled ?? false)) || enqueued;
+        enqueued = (await this.#refreshRoutes(stack, now, report?.acmeEnabled ?? false, optionsChanged)) || enqueued;
       };
       if (only) await work();
       else await work().catch(() => undefined);
@@ -423,11 +453,13 @@ export class AppStackObserverService {
     });
   }
 
-  /** Returns true when a route refresh (a routes-only system stack.deploy of the applied revision) was queued. */
-  async #refreshRoutes(stack: ManagedStack, now: Date, acmeEnabled: boolean): Promise<boolean> {
+  /**
+   * Returns true when a route refresh (a routes-only system stack.deploy of the applied revision) was queued. A newer
+   * desired revision that was not installed does not hold it: the refresh publishes the revision that runs.
+   */
+  async #refreshRoutes(stack: ManagedStack, now: Date, acmeEnabled: boolean, optionsChanged: boolean): Promise<boolean> {
     const { appliedRevisionId } = stack;
     if (stack.status !== "running" && stack.status !== "degraded") return false;
-    if (appliedRevisionId === null || appliedRevisionId !== stack.desiredRevisionId) return false;
     const db = this.dbClient.db;
     const [last] = await db
       .select({ kind: operations.kind, status: operations.status, completedAt: operations.completedAt })
@@ -435,14 +467,27 @@ export class AppStackObserverService {
       .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stack.stackId)))
       .orderBy(desc(operations.submittedAt))
       .limit(1);
-    // The routes of a stack the customer last asked to stop stay withdrawn.
-    if (last?.kind === "stack.stop") return false;
-    if (last && !isTerminalOperationStatus(last.status)) return false;
-    if (last?.status === "failed" && last.completedAt && now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS) {
-      return false;
-    }
+    if (!appStackRoutesFollowAddresses(stack, last)) return false;
     const plan = await this.#appliedPlan(stack);
     if (plan === null) return false;
+    const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
+    // The saved addresses and options: they move only when the customer changes them, never with health.
+    const addresses = appStackAddressesHash(routes.domains, null);
+    const queued = this.#routesQueuedAt.get(stack.stackId);
+    // Changed since the last refresh was queued or, when none was queued since the API started, since the last
+    // successful publication (the stored fingerprint).
+    const changed = queued !== undefined ? queued.addresses !== addresses : appStackRoutesPending({ ...stack, domains: routes.domains });
+    // A change of the options is the customer's own request, made once, and changed addresses are not a retry of the
+    // refresh that failed: neither waits out the pause after a failed action.
+    if (
+      !optionsChanged &&
+      !changed &&
+      last?.status === "failed" &&
+      last.completedAt &&
+      now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS
+    ) {
+      return false;
+    }
     // The refresh publishes the addresses of the targets that are healthy.
     const healthy = await db
       .select({ componentKey: appStackComponents.componentKey })
@@ -454,14 +499,14 @@ export class AppStackObserverService {
           eq(appStackComponents.health, "healthy"),
         ),
       );
-    const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
     const { entries } = appStackRoutePlan({ ...routes, include: new Set(healthy.map((c) => c.componentKey)) });
     if ((entries.length > 0 ? appStackRoutesHash(entries) : null) === stack.appliedRoutesHash) return false;
-    // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) never waits.
-    const queuedAt = this.#routesQueuedAt.get(stack.stackId);
+    // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) or of their
+    // options never waits (a new path to a target the published routes leave out would otherwise read as a health change).
     if (
-      queuedAt !== undefined &&
-      now.getTime() - queuedAt < APP_STACK_ROUTE_REFRESH_INTERVAL_MS &&
+      queued !== undefined &&
+      queued.addresses === addresses &&
+      now.getTime() - queued.at < APP_STACK_ROUTE_REFRESH_INTERVAL_MS &&
       appStackRoutesHealthOnly({ ...routes, appliedRoutesHash: stack.appliedRoutesHash })
     ) {
       return false;
@@ -469,46 +514,54 @@ export class AppStackObserverService {
 
     const { organizationId, stackId } = stack;
     try {
-      await db.transaction(async (tx) => {
-        const queued = await enqueueAppStackOperationTransactional(tx as unknown as HostingPanelDatabase, {
-          organizationId,
-          stackId,
-          kind: "stack.deploy",
-          requestedByUserId: null,
-          idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${randomUUID().replace(/-/g, "")}`,
-          requestHash: canonicalRequestHash({
-            route: "app.stack.deploy",
-            organizationId,
-            stackId,
-            body: { revisionId: appliedRevisionId, trigger: "routes" },
-          }),
-          revision: null,
-          destroyData: false,
-        });
-        if (queued.idempotentReplay) return;
-        await appendAuditEvent(tx, {
-          actorType: "system",
-          actorId: null,
-          organizationId,
-          action: APP_AUDIT_ACTIONS.stackDeploy,
-          targetType: APP_AUDIT_TARGET_TYPES.stack,
-          targetId: stackId,
-          details: {
-            operationId: queued.operation?.id ?? null,
-            deploymentId: queued.deployment?.id ?? null,
-            revisionId: appliedRevisionId,
-            templateVersionId: queued.revision?.templateVersionId ?? null,
-            status: queued.stack.status,
-            trigger: "routes",
-          },
-        });
-      });
-      this.#routesQueuedAt.set(stackId, now.getTime());
+      await db.transaction((tx) => this.#enqueueRefresh(tx as unknown as HostingPanelDatabase, { organizationId, stackId, appliedRevisionId }));
+      this.#routesQueuedAt.set(stackId, { at: now.getTime(), addresses });
       return true;
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;
       if (code === "RESOURCE_LOCKED" || code === "INVALID_TRANSITION") return false; // The next pass retries.
       throw err;
     }
+  }
+
+  /** The routes-only system stack.deploy of the applied revision and its audit row, in the given transaction. */
+  async #enqueueRefresh(
+    tx: HostingPanelDatabase,
+    stack: { readonly organizationId: string; readonly stackId: string; readonly appliedRevisionId: string | null },
+  ): Promise<void> {
+    const { organizationId, stackId, appliedRevisionId } = stack;
+    const queued = await enqueueAppStackOperationTransactional(tx, {
+      organizationId,
+      stackId,
+      kind: "stack.deploy",
+      requestedByUserId: null,
+      idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${randomUUID().replace(/-/g, "")}`,
+      requestHash: canonicalRequestHash({
+        route: "app.stack.deploy",
+        organizationId,
+        stackId,
+        body: { revisionId: appliedRevisionId, trigger: "routes" },
+      }),
+      revision: null,
+      routesOnly: true,
+      destroyData: false,
+    });
+    if (queued.idempotentReplay) return;
+    await appendAuditEvent(tx, {
+      actorType: "system",
+      actorId: null,
+      organizationId,
+      action: APP_AUDIT_ACTIONS.stackDeploy,
+      targetType: APP_AUDIT_TARGET_TYPES.stack,
+      targetId: stackId,
+      details: {
+        operationId: queued.operation?.id ?? null,
+        deploymentId: queued.deployment?.id ?? null,
+        revisionId: appliedRevisionId,
+        templateVersionId: queued.revision?.templateVersionId ?? null,
+        status: queued.stack.status,
+        trigger: "routes",
+      },
+    });
   }
 }

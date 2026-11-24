@@ -249,7 +249,7 @@ describe("container body hardening matrix (builder)", () => {
   it("gives a second temporary area to one image name only, and only under the real allowlist", () => {
     const areas = (image: string, allowlist?: readonly AppImageAllowlistEntry[]) => {
       const plan = planFor({ image, user: true, argv: false, mounts: "none", secrets: "none", edge: false });
-      return buildAppStackContainerCreatePayload(plan, KEY, { ...ctx, ...(allowlist === undefined ? {} : { allowlist }) }).HostConfig.Tmpfs;
+      return buildAppStackContainerCreatePayload(plan, KEY, { ...ctx, ...(allowlist === undefined ? {} : { allowlist }) }).HostConfig.Tmpfs ?? {};
     };
     for (const image of CAP_TRAP_IMAGES) {
       expect(Object.keys(areas(image)).sort()).toStrictEqual(image === "postgres" ? ["/run/postgresql", "/tmp"] : ["/tmp"]);

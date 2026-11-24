@@ -6,6 +6,8 @@ import path from "node:path";
 import {
   AppStackComponentIpcRequestSchema,
   AppStackComponentsRemoveIpcRequestSchema,
+  AppStackCreateIpcRequestSchema,
+  AppStackImageResolveIpcRequestSchema,
   AppStackLinksIpcRequestSchema,
   AppStackLogsIpcRequestSchema,
   AppStackPlanIpcRequestSchema,
@@ -659,7 +661,13 @@ export class DockerExecutorIpcServer {
 
       const observedMatch = /^\/v1\/services\/([^/]+)\/observed-state$/.exec(pathname);
       if (method === "GET" && observedMatch && observedMatch[1]) {
-        const serviceInstanceId = decodeURIComponent(observedMatch[1]);
+        let serviceInstanceId: string;
+        try {
+          serviceInstanceId = decodeURIComponent(observedMatch[1]);
+        } catch {
+          // A malformed escape is a bad request; left untyped, the URIError would end as a 500.
+          throw new ExecutorCodedError("Malformed percent-escape in serviceInstanceId", "VALIDATION_ERROR");
+        }
         assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
         const state = await this.executor.getObservedState(serviceInstanceId);
         if (state === null) {
@@ -782,7 +790,7 @@ export class DockerExecutorIpcServer {
         case "/v1/app-stacks/prepare":
           return post(AppStackPlanIpcRequestSchema, "prepare", (s, req) => s.prepareAppStack(req));
         case "/v1/app-stacks/create":
-          return post(AppStackPlanIpcRequestSchema, "create", (s, req) => s.createAppStackComponents(req));
+          return post(AppStackCreateIpcRequestSchema, "create", (s, req) => s.createAppStackComponents(req));
         case "/v1/app-stacks/start":
           return post(AppStackComponentIpcRequestSchema, "start", (s, req) => s.startAppStackComponent(req));
         case "/v1/app-stacks/restart":
@@ -816,6 +824,9 @@ export class DockerExecutorIpcServer {
         return value;
       }
     };
+    if (pathname === "/v1/app-stacks/image-digest") {
+      return (s) => s.resolveAppStackImage(this.parseAppStackValue(AppStackImageResolveIpcRequestSchema, { image: param("image") }, "image"));
+    }
     const status = /^\/v1\/app-stacks\/([^/]+)\/status$/.exec(pathname);
     if (status?.[1] !== undefined) {
       const stackId = segment(status[1]);

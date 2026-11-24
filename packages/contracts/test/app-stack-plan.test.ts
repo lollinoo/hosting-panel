@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  type ApprovedStackPlan,
-  type AppStackPlanComponent,
+  type ApprovedStackPlanV1 as ApprovedStackPlan,
+  type AppStackPlanComponentV1 as AppStackPlanComponent,
   ApprovedStackPlanSchema,
   AppStackPreviewSchema,
   appStackComponentHashInput,
@@ -18,7 +18,7 @@ const fixture = (name: string): unknown =>
 const PLAN_FIXTURE = fixture("plan.json");
 const PREVIEW_FIXTURE = fixture("preview.json");
 const SPEC_FIXTURE = fixture("spec.json");
-const PLAN = ApprovedStackPlanSchema.parse(PLAN_FIXTURE);
+const PLAN = ApprovedStackPlanSchema.parse(PLAN_FIXTURE) as ApprovedStackPlan;
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] extends object ? Mutable<T[K]> : T[K] };
 /** A deep copy of the fixture plan changed by `change` (components: cache, app). */

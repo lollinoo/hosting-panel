@@ -14,19 +14,22 @@ import {
 } from "../src/index.js";
 
 describe("@hosting-panel/database - built-in app templates", () => {
-  it("validates and hashes the five seeds", () => {
+  it("validates and hashes the six seeds, each in the format it was written in", () => {
     const items = builtInAppTemplateItems();
     expect(items.map((i) => [i.templateId, i.versionId, i.slug, i.category])).toEqual([
       ["atpl_http_cache", "atv_http_cache_1", "http-cache", "web"],
       ["atpl_worker_storage", "atv_worker_storage_1", "worker-storage", "jobs"],
+      ["atpl_wordpress_mariadb", "atv_wordpress_mariadb_1", "wordpress-mariadb", "content"],
       ["atpl_mariadb", "atv_mariadb_1", "mariadb", "database"],
       ["atpl_postgresql", "atv_postgresql_1", "postgresql", "database"],
       ["atpl_valkey", "atv_valkey_1", "valkey", "database"],
     ]);
+    expect(items.map((i) => i.version.specVersion)).toEqual([1, 1, 2, 1, 1, 1]);
     items.forEach((item, index) => {
       const t = APP_BUILT_IN_TEMPLATES[index]!;
       expect(item).toMatchObject({ name: t.name, description: t.description });
-      expect(item.version).toMatchObject({ source: t.source, specVersion: 1 });
+      expect(item.version).toMatchObject({ source: t.source });
+      expect((item.version.compiledSchema as AppTemplateSpec).schemaVersion).toBe(item.version.specVersion);
       expect(item.version.specHash).toBe(computeAppTemplateSpecHash(item.version.compiledSchema as AppTemplateSpec));
       expect(item.version.specHash).toMatch(/^[a-f0-9]{64}$/);
     });
@@ -34,6 +37,15 @@ describe("@hosting-panel/database - built-in app templates", () => {
 
   it("throws naming the slug and the issue codes only when a seed does not validate", () => {
     expect(() => builtInAppTemplateItems([])).toThrow(/^built-in app template http-cache is invalid: IMAGE_NOT_ALLOWLISTED(,IMAGE_NOT_ALLOWLISTED)*$/);
+  });
+
+  it("stores no value for the secrets the WordPress seed generates: only their rule", () => {
+    const item = builtInAppTemplateItems().find((i) => i.slug === "wordpress-mariadb")!;
+    const spec = item.version.compiledSchema as AppTemplateSpec;
+    expect(spec.parameters.map((p) => [p.key, p.type, p.customer, "generate" in p ? p.generate : undefined])).toEqual([
+      ["db_password", "secret", false, { kind: "password", length: 32 }],
+      ["db_root_password", "secret", false, { kind: "password", length: 32 }],
+    ]);
   });
 
   describe("seeded on PGlite", () => {
@@ -49,7 +61,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       await client.close();
     });
 
-    it("seeds five disabled built-in templates with one version each, twice without change, keeping an admin rename", async () => {
+    it("seeds six disabled built-in templates with one version each, twice without change, keeping an admin rename", async () => {
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
       await updateAppTemplate(db(), { templateId: "atpl_http_cache", name: "Il mio sito" });
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
@@ -60,8 +72,18 @@ describe("@hosting-panel/database - built-in app templates", () => {
         ["atpl_mariadb", true, false, "atv_mariadb_1"],
         ["atpl_postgresql", true, false, "atv_postgresql_1"],
         ["atpl_valkey", true, false, "atv_valkey_1"],
+        ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_1"],
         ["atpl_worker_storage", true, false, "atv_worker_storage_1"],
       ]);
+      const stored = await db().select({ id: appTemplateVersions.id, specVersion: appTemplateVersions.specVersion }).from(appTemplateVersions);
+      expect(Object.fromEntries(stored.map((v) => [v.id, v.specVersion]))).toEqual({
+        atv_http_cache_1: 1,
+        atv_worker_storage_1: 1,
+        atv_wordpress_mariadb_1: 2,
+        atv_mariadb_1: 1,
+        atv_postgresql_1: 1,
+        atv_valkey_1: 1,
+      });
       expect(await getAppTemplate(db(), "atpl_http_cache")).toMatchObject({ name: "Il mio sito" });
       expect(await getAppTemplate(db(), "atpl_worker_storage")).toMatchObject({ name: "Lavoro periodico con archivio" });
       for (const t of templates) {

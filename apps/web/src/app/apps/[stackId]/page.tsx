@@ -96,7 +96,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackLinks {...ids} initial={links} />
       </Section>
       <Section id="domains" title={d.section.domains}>
-        <AppStackDomains {...ids} initial={domains} ingress={s.ingress} />
+        <AppStackDomains {...ids} initial={domains} ingress={s.ingress} pathTargets={s.pathTargets} pending={s.routesPending} />
       </Section>
       <Section id="data" title={d.section.data}>
         <AppStackData volumes={s.volumes} m={m} />

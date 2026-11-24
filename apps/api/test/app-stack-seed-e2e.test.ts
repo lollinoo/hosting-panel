@@ -20,11 +20,18 @@ import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import { DOCKER_EXECUTOR_TOKEN } from "../src/tokens.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness } from "./fixtures/app-stack-harness.js";
 
-// Q-SEED-E2E (arch-assurance §12, A1, A14, A18): the two built-in applications, seeded disabled at boot, from the
-// administrator's switch to a running stack and its deletion, on the simulator.
+// Q-SEED-E2E (arch-assurance §12, A1, A14, A18): the two built-in applications of the first format, seeded disabled at
+// boot, from the administrator's switch to a running stack and its deletion, on the simulator. The WordPress one of the
+// extended format has its own file (app-stack-wordpress-e2e.test.ts).
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const [HTTP_CACHE, WORKER_STORAGE] = APP_BUILT_IN_TEMPLATES as readonly [(typeof APP_BUILT_IN_TEMPLATES)[number], (typeof APP_BUILT_IN_TEMPLATES)[number]];
+const seedOf = (slug: string) => {
+  const found = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug);
+  if (!found) throw new Error(`no built-in template ${slug}`);
+  return found;
+};
+const HTTP_CACHE = seedOf("http-cache");
+const WORKER_STORAGE = seedOf("worker-storage");
 
 describe("the built-in applications end to end (Q-SEED-E2E)", () => {
   let h: AppStackHarness;
@@ -80,7 +87,7 @@ describe("the built-in applications end to end (Q-SEED-E2E)", () => {
     throw new Error("the operation never settled");
   }
 
-  it("a freshly booted app offers the customer nothing, and the built-in templates are there disabled", async () => {
+  it("a freshly booted app offers the customer nothing, and every built-in template is there disabled", async () => {
     const empty = await catalogue();
     expect(empty.status, empty.raw).toBe(200);
     expect(empty.body.data).toEqual({ templates: [], categories: [] });

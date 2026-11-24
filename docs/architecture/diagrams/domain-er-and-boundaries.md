@@ -543,6 +543,7 @@ erDiagram
         text desired_revision_id FK "composita con id"
         text applied_revision_id FK "composita con id"
         text applied_routes_hash "NULL o sha256"
+        text applied_addresses_hash "0026: NULL o sha256 degli indirizzi pubblicati"
         text idempotency_key "con request_hash, o entrambi NULL"
         timestamptz deleted_at "non NULL se e solo se status = deleted"
     }
@@ -670,7 +671,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stack_domains`, `domains` | `TRIGGER trg_app_stack_domains_hostname_claim` e `trg_domains_app_stack_hostname_claim` (errore `uq_panel_hostname_claim`), più `UNIQUE (hostname)` su `app_stack_domains` (`0025`) | **Invariante Host Collision esteso**: un hostname appartiene a un solo sito, a un solo stack o al pannello. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
-| `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`. |
+| `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`; il cancello `app-format-v2` (`ADR-0036`) conta, tra quelle, gli stack su una versione di modello con `spec_version >= 2` o con una revisione il cui piano non ha `schemaVersion` 1. |
 | `app_stack_links` | `FOREIGN KEY fk_app_stack_links_consumer_org (consumer_stack_id, organization_id)` e `fk_app_stack_links_provider_org (provider_stack_id, organization_id) REFERENCES app_stacks(id, organization_id) ON DELETE CASCADE` (`0028`) | **Invariante BOLA dei collegamenti**: un database e l'applicazione che lo usa appartengono alla stessa organizzazione; nessuna riga può unire due clienti. |
 | `app_stack_links` | `UNIQUE uq_app_stack_links_pair (consumer_stack_id, provider_stack_id)`, `CHECK ck_app_stack_links_distinct (consumer_stack_id <> provider_stack_id)` e `CHECK app_stack_links_state_check (state IN ('pending', 'active', 'removing'))` (`0028`) | Una coppia ha al più un collegamento e un'applicazione non si collega a se stessa; il cancello del downgrade `app-stack-links` conta ogni riga, in qualunque stato. |
 
@@ -693,7 +694,13 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Dieci tabelle: `app_templates`, `app_template_versions` (immutabili), `app_stacks`, `app_stack_parameters`, `app_stack_secrets` (immutabili), `app_stack_revisions` (immutabili), `app_stack_components`, `app_stack_volumes`, `app_stack_domains` e `app_stack_deployments`.
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
-  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I modelli integrati (`atpl_http_cache`, `atpl_worker_storage` e, con `ADR-0039`, `atpl_mariadb`, `atpl_postgresql` e `atpl_valkey`; tutti disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, con `ADR-0036` `atpl_wordpress_mariadb` e, con `ADR-0039`, `atpl_mariadb`, `atpl_postgresql` e `atpl_valkey`; tutti disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0026 (`0026_app_routing_options.sql`, `ADR-0037`, additiva)**:
+  - Cinque colonne su `app_stack_domains`: `redirect_to_domain_id` (nulla), `compression` (`BOOLEAN NOT NULL DEFAULT FALSE`), `access_username` e `access_password_hash` (nulle; un verificatore `$apr1$`, mai la password), `path_routes` (`JSONB NOT NULL DEFAULT '[]'`).
+  - Chiave esterna `fk_app_stack_domains_redirect` `(stack_id, redirect_to_domain_id)` → `app_stack_domains (stack_id, id)` con `ON DELETE SET NULL (redirect_to_domain_id)`: la destinazione di un reindirizzamento è un indirizzo della stessa applicazione; il vincolo `uq_app_stack_domains_stack_id` `UNIQUE (stack_id, id)` la rende possibile.
+  - Cinque `CHECK`: `ck_app_stack_domains_redirect_not_self`, `ck_app_stack_domains_access_pair` (nome utente e verificatore insieme), `ck_app_stack_domains_access_shape` (le stesse forme dei contratti: una password in chiaro non può finire nella colonna), `ck_app_stack_domains_path_routes` (un array di al massimo quattro regole) e `ck_app_stack_domains_redirect_alone` (un indirizzo che reindirizza non ha protezione né regole di percorso).
+  - Una colonna nulla su `app_stacks`: `applied_addresses_hash`, l'impronta degli indirizzi e delle opzioni da cui è stata fatta l'ultima pubblicazione riuscita delle route, legata ad `applied_routes_hash`; `routesPending` confronta con essa gli indirizzi salvati.
+  - Nessun backfill: un indirizzo senza opzioni resta la riga che era; la release precedente, dopo un rollback automatico, ignora le colonne.
 - **Versione 0028 (`0028_app_stack_links.sql`, `ADR-0039`, additiva)**:
   - Una tabella: `app_stack_links` (un collegamento fra un database e un'applicazione dello stesso cliente, con lo stato `pending`, `active` o `removing`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora la tabella nuova.

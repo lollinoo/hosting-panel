@@ -172,6 +172,8 @@ async function startFakeExecEngine(apiPrefix = "/v1.45"): Promise<FakeExecEngine
   server.on("upgrade", (req, socket, head) => {
     openSockets.add(socket);
     socket.once("close", () => openSockets.delete(socket));
+    // The HTTP server drops its own error handler on upgrade.
+    socket.on("error", () => undefined);
     const urlPath = stripPrefix((req.url ?? "/").split("?")[0] ?? "/");
     const startMatch = /^\/exec\/([^/]+)\/start$/.exec(urlPath);
     const execId = startMatch?.[1] ? decodeURIComponent(startMatch[1]) : "";

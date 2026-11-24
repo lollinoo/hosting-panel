@@ -33,6 +33,7 @@ const EXPECTED_ROUTES = [
   "app/api/admin/app-templates/[templateId]/archive/route.ts",
   "app/api/admin/app-templates/[templateId]/route.ts",
   "app/api/admin/app-templates/[templateId]/versions/route.ts",
+  "app/api/admin/app-templates/import-compose/route.ts",
   "app/api/admin/app-templates/route.ts",
   "app/api/admin/app-templates/validate/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/[action]/route.ts",
@@ -65,7 +66,9 @@ describe("M6 web guards: the scans really see the new files", () => {
       expect.arrayContaining([
         "components/admin/template-catalog.tsx",
         "components/admin/app-template-editor.tsx",
+        "components/admin/app-template-compose-import.tsx",
         "app/admin/templates/apps/page.tsx",
+        "app/admin/templates/apps/import/page.tsx",
       ]),
     );
   });
