@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { OperationKind } from "../operations.js";
+import type { PermissionKey } from "../permissions.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_STATUSES, type AppStackStatus } from "./stack-status.js";
 
@@ -133,4 +134,34 @@ export const APP_STACK_ENQUEUE_TRANSITIONS: Readonly<
 /** The status the request transaction writes, or null when the kind is not allowed from `current`. */
 export function appStackEnqueueTarget(kind: AppStackOperationKind, current: AppStackStatus): AppStackStatus | null {
   return APP_STACK_ENQUEUE_TRANSITIONS[kind][current] ?? null;
+}
+
+/** The permission the route of each kind asks of the caller; a deploy that carries settings also asks `app.update`. */
+export const APP_STACK_KIND_PERMISSIONS: Readonly<Record<AppStackOperationKind, PermissionKey>> = Object.freeze({
+  "stack.deploy": "app.control",
+  "stack.start": "app.control",
+  "stack.stop": "app.control",
+  "stack.restart": "app.control",
+  "stack.upgrade": "app.update",
+  "stack.rollback": "app.update",
+  "stack.delete": "app.delete",
+});
+
+/**
+ * Why the request transaction refuses `kind` now, or null when it accepts it: an active operation holding the stack's
+ * lock refuses every kind (`locked`, retryable), then the table decides from the stored status (`status`). The status
+ * the page shows (health included) never enters: only an operation changes the stored one.
+ */
+export function appStackEnqueueRefusal(kind: AppStackOperationKind, stored: AppStackStatus, locked: boolean): "locked" | "status" | null {
+  if (locked) return "locked";
+  return appStackEnqueueTarget(kind, stored) === null ? "status" : null;
+}
+
+/** The kinds the API accepts now from a caller who holds the permissions `may` grants, in APP_STACK_OPERATION_KINDS order. */
+export function appStackAllowedActions(
+  stored: AppStackStatus,
+  locked: boolean,
+  may: (permission: PermissionKey) => boolean,
+): AppStackOperationKind[] {
+  return APP_STACK_OPERATION_KINDS.filter((kind) => appStackEnqueueRefusal(kind, stored, locked) === null && may(APP_STACK_KIND_PERMISSIONS[kind]));
 }

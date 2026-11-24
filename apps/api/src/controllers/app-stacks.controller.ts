@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
 import {
+  APP_STACK_KIND_PERMISSIONS,
   APP_STACK_LOG_TAIL_DEFAULT,
   AppStackActionInputSchema,
   AppStackListQuerySchema,
@@ -82,8 +83,10 @@ export class AppStacksController {
     @Param("orgId") orgId: string,
     @Param("stackId") stackId: string,
   ): Promise<{ data: AppStackDetailDto }> {
-    const stack = await this.#read(req, orgId, stackId, "app.read");
-    return { data: await this.stacks.detail(stack) };
+    const auth = await this.#guard(req, orgId, "app.read", stackId);
+    const stack = await this.stacks.require(orgId, stackId);
+    // The actions on offer are this caller's: the permission each route asks, decided as its guard decides.
+    return { data: await this.stacks.detail(stack, (permission) => this.authz.allowsOrgPermission(auth, orgId, permission)) };
   }
 
   /** Writes nothing: the diff whose `planHash` an upgrade or rollback must send back; secrets appear by name only. */
@@ -113,7 +116,8 @@ export class AppStacksController {
   ): Promise<AppStackAcceptedEnvelope> {
     const body = peekBody(raw);
     const settings = typeof body === "object" && body !== null && "parameters" in body;
-    return this.#queue(req, orgId, stackId, settings ? ["app.control", "app.update"] : "app.control", (ctx, stack) =>
+    const permission = APP_STACK_KIND_PERMISSIONS["stack.deploy"];
+    return this.#queue(req, orgId, stackId, settings ? [permission, "app.update"] : permission, (ctx, stack) =>
       this.stacks.deploy(ctx, stack, DeployAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -144,7 +148,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.upgrade"], (ctx, stack) =>
       this.stacks.upgrade(ctx, stack, UpgradeAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -157,7 +161,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.rollback"], (ctx, stack) =>
       this.stacks.rollback(ctx, stack, RollbackAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -171,7 +175,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.delete", (ctx, stack) =>
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.delete"], (ctx, stack) =>
       this.stacks.remove(ctx, stack, DeleteAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -268,7 +272,7 @@ export class AppStacksController {
   }
 
   #act(req: FastifyRequest, orgId: string, stackId: string, raw: unknown, kind: "stack.start" | "stack.stop" | "stack.restart") {
-    return this.#queue(req, orgId, stackId, "app.control", (ctx, stack) => {
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS[kind], (ctx, stack) => {
       AppStackActionInputSchema.parse(raw ?? {});
       return this.stacks.act(ctx, stack, kind);
     });

@@ -8,7 +8,7 @@ import {
   AppTemplateSpecSchema,
   PLATFORM_OPS_ORG_ID,
   ApprovedStackPlanSchema,
-  appStackLockKey,
+  appStackAllowedActions,
   appStackPlanImageProblems,
   appTemplateHiddenSecretKeys,
   effectiveComponentHealth,
@@ -29,13 +29,13 @@ import {
   type CursorPage,
   type DeleteAppStackInput,
   type DeployAppStackInput,
+  type PermissionKey,
   type PlanAppStackInput,
   type RollbackAppStackInput,
   type SetAppStackSecretInput,
   type UpgradeAppStackInput,
 } from "@hosting-panel/contracts";
 import {
-  ACTIVE_OPERATION_LOCK_STATUSES,
   addAppStackDomainsTransactional,
   and,
   appStackComponents,
@@ -52,6 +52,7 @@ import {
   findAppStackAllocation,
   getAppStack,
   getAppStackDeployment,
+  getAppStackLockHolder,
   getAppStackRevision,
   getAppTemplateVersion,
   getPublishedAppTemplateVersion,
@@ -344,13 +345,14 @@ export class AppStacksService {
     return { data, total, page: { nextCursor: hasMore ? kept[kept.length - 1]!.id : null, hasMore } };
   }
 
-  public async detail(stack: AppStackRow): Promise<AppStackDetailDto> {
+  /** `may`: whether the caller holds a permission, as the routes' guard decides; the actions on offer are the caller's. */
+  public async detail(stack: AppStackRow, may: (permission: PermissionKey) => boolean): Promise<AppStackDetailDto> {
     const db = this.dbClient.db;
     const scope = { organizationId: stack.organizationId, stackId: stack.id };
     const version = await this.#version(stack);
     const [template] = await db.select().from(appTemplates).where(eq(appTemplates.id, stack.templateId));
     if (!template) throw damaged("The stored application is damaged.");
-    const [desired, components, volumes, domains, parameters, secrets, revisions, [active], ran] = await Promise.all([
+    const [desired, components, volumes, domains, parameters, secrets, revisions, active, ran] = await Promise.all([
       this.#desired(stack),
       listAppStackComponents(db, scope),
       listAppStackVolumes(db, scope),
@@ -359,11 +361,7 @@ export class AppStacksService {
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
       // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7).
-      db
-        .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
-        .from(operations)
-        .where(and(eq(operations.lockKey, appStackLockKey(stack.id)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
-        .limit(1),
+      getAppStackLockHolder(db, stack.id),
       // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
       // (only the routes were refused, and that revision was applied).
       db
@@ -418,6 +416,8 @@ export class AppStacksService {
       parameters,
       secrets,
       activeOperationId: own?.id ?? null,
+      // Read with the lock as it is now: a second later it may be taken, and the request then answers 409.
+      allowedActions: appStackAllowedActions(stack.status, active !== null, may),
       installed,
       platformWork,
       upgrade:

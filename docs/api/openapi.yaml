@@ -5900,8 +5900,10 @@ paths:
       operationId: restartAppStack
       summary: Restart an application (app.control; audited as app.stack.restart)
       description: >-
-        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
-        `applicationStacksAvailable` is false.
+        Restarts every component in order, which also starts again one that stopped or crashed: from a stored
+        `running`, `degraded`, `failed` or `unknown`, it is the action that brings back an application whose component
+        crashed (start is accepted only from `stopped`, `failed` and `unknown`). Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -14353,7 +14355,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, platformWork, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, platformWork, allowedActions, outcomeUnknown, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -14372,6 +14374,26 @@ components:
                 The application is held by work of the platform (`backups_cleanup`: the nightly clean-up of its
                 backups, ADR-0038). Only the kind of work is given, never the operation, which the organisation cannot
                 read; its actions answer `409 RESOURCE_LOCKED` until it ends
+            allowedActions:
+              type: array
+              description: >-
+                The actions the API accepts now from the caller, decided as the queueing request decides (issue #106):
+                none while an operation holds the application (whoever queued it), else those the transition table allows
+                from the stored status, kept to the ones the caller's permissions allow (`app.control` for deploy, start,
+                stop and restart, `app.update` for upgrade and rollback, `app.delete` for delete; none for a suspended
+                organisation). The `status` shown here also reflects the health of the components (a crashed essential
+                component reads `failed`, a stale reading `unknown`) and never widens this list: an application that
+                crashed keeps its stored `running` or `degraded`, so it offers `stack.restart`, not `stack.start`.
+                Upgrade and rollback also need their target (`upgrade`, `rollback`). Read at the time of the request: an
+                operation queued a moment later still makes a request answer `409 RESOURCE_LOCKED`
+              items:
+                type: string
+                enum: [stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete]
+            outcomeUnknown:
+              type: boolean
+              description: >-
+                The outcome of an operation of the application is not known (its stored status is `unknown` until recovery
+                settles it). `false` when `status` reads `unknown` only because the components could not be read lately
             revisionNumber:
               type: integer
               minimum: 1

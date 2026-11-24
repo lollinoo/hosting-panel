@@ -147,6 +147,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDetailDtoSchema,
     {
       ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, platformWork: "backups_cleanup", revisionNumber: 1,
+      allowedActions: ["stack.stop", "stack.restart"], outcomeUnknown: false,
       installed: null,
       components: [{ key: "app", health: "healthy", healthObservedAt: AT, dependsOn: ["cache"], ingress: true, cpuMilli: 1000, memoryBytes: "536870912" }],
       parameters: [{ key: "workers", label: "Workers", value: 2 }],
@@ -197,7 +198,7 @@ defaultVersionNumber installations componentCount hasIngress hasVolumes updatedA
 versionId created templateId source stacks organizationId organizationName status truncated cpuMilli memoryBytes volumeCount templates
 categories ingress components key componentKey port hostname templateVersionId domains deploy revisionId planHash confirmName
 destroyData parameterKey value limit cursor tail stackId operationId deploymentId links stack operation templateName
-templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork revisionNumber health healthObservedAt dependsOn label
+templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork allowedActions outcomeUnknown revisionNumber health healthObservedAt dependsOn label
 secretParameters required isSet version setAt volumes retentionPolicy upgrade rollback kind problem startedAt endedAt certificateStatus
 certificateProblem certificateExpiresAt checkedAt fromRevisionId fromVersionNumber toTemplateVersionId toVersionNumber newRevision
 change restart downtime dataRisk lines at stream text observedAt stale`.split(/\s+/);
