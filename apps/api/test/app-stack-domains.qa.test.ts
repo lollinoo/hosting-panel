@@ -1124,5 +1124,27 @@ describe("B3: application web addresses touch only the application's own route f
         expect(await pending(appId)).toBe(false);
       }
     });
+
+    it("the first address of an application, and the first one of an entry point, are queued in the request like any other", async () => {
+      const appId = await running();
+      const first = "first-c.example.test";
+      const door = "door-c.example.test";
+      for (const n of [first, door]) lookup.set(n, []);
+      for (const [hostname, target] of [
+        [first, WEB],
+        [door, CACHE],
+      ] as const) {
+        const before = await refreshesOf(appId);
+        await unreachable(async () => {
+          const added = await owner("POST", base(appId), { hostname, ...target });
+          expect(added.status, added.raw).toBe(201);
+          expect(await refreshesOf(appId)).toBe(before + 1);
+          expect(await pending(appId)).toBe(true);
+        });
+        await drain();
+        expect(await fileOf(appId)).toContain(hostname);
+        expect(await pending(appId)).toBe(false);
+      }
+    });
   });
 });
