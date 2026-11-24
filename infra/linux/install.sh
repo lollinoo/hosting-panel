@@ -14,8 +14,9 @@ Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name
 
   --acme-email   Let's Encrypt contact email (default: --admin-email). Must be a real address:
                  Let's Encrypt rejects example.com, *.test and similar reserved domains.
-  --ipv4         Public IPv4 of this server (default: the one the last run recorded, else the
-                 source address of the default route).
+  --ipv4         Public IPv4 of this server; once the panel has recorded one, only this flag
+                 changes it (default: the one the last run used, else the source address of the
+                 default route, recorded only if the panel has none yet).
   --ipv6         Public IPv6 of this server, never detected; none removes the recorded one
                  (default: the recorded IPv6, if any, stays as it is).
   --version      Release to install (default: latest GitHub release).
@@ -364,9 +365,10 @@ main() {
     apt-get install -y -q --no-install-recommends "${HP_OS_PACKAGES[@]}"
     install -d -m 0755 /etc/apt/keyrings
   fi
-  local ipv4_from="given with --ipv4" saved_ipv4
+  local ipv4_from="given with --ipv4" ipv4_flag=--ipv4 saved_ipv4
   # Behind NAT the default route leaves from a private address: a rerun keeps what the last run recorded.
   saved_ipv4="$(env_value "${STATE_DIR}/executor.env" HP_PANEL_IPV4)"
+  [[ -n "${ipv4}" ]] || ipv4_flag=--ipv4-default
   if [[ -z "${ipv4}" && "${saved_ipv4}" =~ ${ipv4_re} ]]; then
     ipv4="${saved_ipv4}"
     ipv4_from="kept from the last run, HP_PANEL_IPV4 in ${STATE_DIR}/executor.env; pass --ipv4 to change it"
@@ -596,23 +598,26 @@ SQL
   # ---------------------------------------------------------------- 11
   step 11 "Server addresses and first administrator"
   local totp_secret="" totp_uri=""
-  local setup_args=(--name "${hostname}" --hostname "${hostname}" --ipv4 "${ipv4}")
+  local setup_args=(--name "${hostname}" --hostname "${hostname}" "${ipv4_flag}" "${ipv4}")
   if ((ipv6_given)); then setup_args+=(--ipv6 "${ipv6}"); fi
   if ((dry_run)); then
     local setup_note=""
+    [[ "${ipv4_flag}" == --ipv4 ]] || setup_note="the recorded IPv4, if any, stays as it is; "
     if ((ipv6_given == 0)); then
-      setup_note=" (the recorded IPv6 stays as it is)"
+      setup_note+="the recorded IPv6 stays as it is"
     elif [[ "${ipv6}" == none ]]; then
-      setup_note=" (removes the recorded IPv6)"
+      setup_note+="removes the recorded IPv6"
     fi
-    plan "would run hp-accounts setup ${setup_args[*]}${setup_note}"
+    setup_note="${setup_note%; }"
+    plan "would run hp-accounts setup ${setup_args[*]}${setup_note:+ (${setup_note})}"
     if ((admin_done)); then
       plan "skip: administrator already created (${STATE_DIR}/admin-created)"
     else
       plan "would create the first administrator ${admin_email} (password via env, not shown) and print the TOTP enrolment once"
     fi
   else
-    # Every run: a rerun is how the administrator changes the addresses the panel records (NAT, --ipv6).
+    # Every run, so --ipv4 and --ipv6 given on a rerun reach the panel. An IPv4 the installer kept or detected
+    # (--ipv4-default) is recorded only if the panel has none: behind NAT it would replace the public one.
     /usr/local/sbin/hp-accounts setup "${setup_args[@]}" >/dev/null
     if ((admin_done == 0)); then
       local has_admin

@@ -82,18 +82,30 @@ function parseHostIpv6(value: string): string {
   return new URL(`http://[${value}]/`).hostname.slice(1, -1);
 }
 
-/** `hostIpv6`: an address records it, null removes it, undefined leaves the recorded one as it is. */
+/**
+ * `hostIpv4Kind`: "given" (typed by the administrator, the default) records the IPv4; "default" (what the installer
+ * kept or detected) records it only when there is no host row yet.
+ * `hostIpv6`: an address records it, null removes it, undefined leaves the recorded one as it is.
+ */
 export async function setupInstallation(
   db: HostingPanelDatabase,
-  input: { installationName: string; hostHostname: string; hostIpv4: string; hostIpv6?: string | null },
+  input: {
+    installationName: string;
+    hostHostname: string;
+    hostIpv4: string;
+    hostIpv4Kind?: "given" | "default";
+    hostIpv6?: string | null;
+  },
 ): Promise<{ installationId: string; hostId: string }> {
-  const ipv4 = parseHostIpv4(input.hostIpv4);
+  const inputIpv4 = parseHostIpv4(input.hostIpv4);
   const ipv6 = input.hostIpv6 === undefined || input.hostIpv6 === null ? input.hostIpv6 : parseHostIpv6(input.hostIpv6);
   await ensurePresetRolesAndPermissions(db);
   await ensureWordpressTemplate(db);
   const [inst] = await db.select().from(platformInstallations).limit(1);
   const [host] = await db.select().from(hosts).limit(1);
   if (inst && host) {
+    // Webhooks may not name the recorded IPv4: behind NAT a detected one is private, so it never replaces it.
+    const ipv4 = input.hostIpv4Kind === "default" ? host.ipv4Address : inputIpv4;
     const ipv6Changed = ipv6 !== undefined && host.ipv6Address !== ipv6;
     // A rerun with a new --ipv4/--ipv6/--hostname (for example behind NAT) must reach the row sites read.
     if (
@@ -139,7 +151,7 @@ export async function setupInstallation(
     platformInstallationId: installationId,
     name: input.hostHostname,
     hostname: input.hostHostname,
-    ipv4Address: ipv4,
+    ipv4Address: inputIpv4,
     ipv6Address: ipv6 ?? null,
     hostingMode: "dedicated",
     totalCpuMilli: os.cpus().length * 1000,
@@ -280,12 +292,16 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
     const db = dbClient.db;
     const key = () => resolveSecretsMasterKey("linux-systemd");
     if (command === "setup") {
+      // --ipv4 is typed by the administrator; --ipv4-default is what the installer kept or detected.
+      const ipv4Default = argv.includes("--ipv4-default");
+      if (ipv4Default && argv.includes("--ipv4")) throw new Error("Give --ipv4 or --ipv4-default, not both.");
       const ipv6 = argv.includes("--ipv6") ? required(argv, "--ipv6") : undefined;
       out(
         await setupInstallation(db, {
           installationName: required(argv, "--name"),
           hostHostname: required(argv, "--hostname"),
-          hostIpv4: required(argv, "--ipv4"),
+          hostIpv4: required(argv, ipv4Default ? "--ipv4-default" : "--ipv4"),
+          hostIpv4Kind: ipv4Default ? "default" : "given",
           hostIpv6: ipv6 === "none" ? null : ipv6,
         }),
       );
@@ -307,7 +323,7 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
       out({ ok: true });
     } else {
       throw new Error(
-        "Usage: accounts <setup --name N --hostname H --ipv4 IP [--ipv6 IP|none] | create-admin --email E --name N | reset-password --email E | reset-totp --email E | unlock --email E>",
+        "Usage: accounts <setup --name N --hostname H --ipv4 IP|--ipv4-default IP [--ipv6 IP|none] | create-admin --email E --name N | reset-password --email E | reset-totp --email E | unlock --email E>",
       );
     }
   } finally {
