@@ -390,9 +390,10 @@ names only the key of a task, and the command is read from the template version 
    ```bash
    node infra/linux/accept-app-stack-wordpress.mjs --imported
    ```
-   The built-in run is made for the newest version of the template (procedure 15). With
-   `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where `address-follows-host` and `uploads-limit` fail
-   (`no-redirect-loop` is expected to fail too): that run reproduces what version 2 fixes:
+   The built-in run is made for the newest version of the template (procedure 15); without root it ends with
+   `RESULT 25/25 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
+   `address-follows-host`, `address-follows-https` and `uploads-limit` fail (`no-redirect-loop` is expected to fail
+   too, so `RESULT 21/25`): that run reproduces what version 2 fixes:
    ```bash
    HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs
    ```
