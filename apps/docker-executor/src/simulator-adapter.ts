@@ -22,8 +22,10 @@ import {
   PINNED_PANEL_CONTAINERS,
   type PanelContainer,
   PanelMailIpcRequestSchema,
+  type NotificationMailRequest,
   type PanelMailRequest,
   type PanelMailResult,
+  type PasswordResetMailRequest,
   type SiteTypeKey,
   type WordpressImportLoadResult,
   type WordpressStateResult,
@@ -33,9 +35,11 @@ import {
   type AppStackComponentsRemoveIpcRequest,
   type AppStackCreateIpcRequest,
   type AppStackImageResolveIpcRequest,
+  type AppStackLinksIpcRequest,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPullIpcRequest,
+  type AppStackTerminalOpenIpcRequest,
   type AppStackRefIpcRequest,
   type AppStackRemoveIpcRequest,
   type AppStackRoutesIpcRequest,
@@ -66,6 +70,7 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  AppStackTerminalPort,
   StackExecutorPort,
   StackTaskExecutorPort,
   StoredCertificate,
@@ -226,7 +231,7 @@ function simulatedLeafNames(cert: X509Certificate): string[] {
   return traefikCertificateNames({ commonName: cn, dnsNames, ipAddresses });
 }
 
-export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort, StackTaskExecutorPort {
+export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
   private readonly virtualSecretsRoot: string;
@@ -286,8 +291,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public readonly mailRelayApplies: Array<MailRelayApplyRequest | null> = [];
   public readonly mailDeliveries: SimulatedMailDelivery[] = [];
   public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
-  /** Every panel mail request in order. */
-  public readonly panelMails: PanelMailRequest[] = [];
+  /** Every password reset mail request in order. */
+  public readonly panelMails: PasswordResetMailRequest[] = [];
+  /** Every notification mail request in order. */
+  public readonly notificationMails: NotificationMailRequest[] = [];
   private failingMailApplies = 0;
   public dnsProvider: DnsProviderApplyRequest | null = null;
   public dnsProviderApplies = 0;
@@ -328,6 +335,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       ingress: this.ingressFileManager,
       ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
       assertEngineAvailable: () => this.assertEngineAvailable(),
+      onComponentGone: (stackId, componentKey) => this.terminals.endAppStack(stackId, componentKey, "container_gone"),
       holdBackupLane: (stackId) => this.backupState.holdAppStackLane(stackId),
     });
   }
@@ -454,7 +462,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
     const parsed = PanelMailIpcRequestSchema.safeParse(req);
     if (!parsed.success) throw new ExecutorCodedError("Invalid panel mail", "VALIDATION_ERROR");
-    this.panelMails.push(parsed.data);
+    if (parsed.data.kind === "notification") this.notificationMails.push(parsed.data);
+    else this.panelMails.push(parsed.data);
     return { outcome: this.mailRelay ? "queued" : "failed" };
   }
 
@@ -940,8 +949,27 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       this.terminalSinks.set(req.sessionId, sink);
       // The sink holds the session's output: let go of it however the session ends.
       const forget = () => this.terminalSinks.delete(req.sessionId);
-      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } }, type);
+      const shell = startSimulatedShell(
+        { data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } },
+        { folder: type.def.files.mountPath, id: type.shellId },
+      );
       return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name.slice(1) };
+    });
+  }
+
+  /** A fake shell in the running container of one component of an application, as the user its payload names (ADR-0041). */
+  public async openAppStackTerminal(req: AppStackTerminalOpenIpcRequest): Promise<TerminalOpenResult> {
+    this.assertEngineAvailable();
+    return this.terminals.open(req, async (sink) => {
+      const container = this.appStacks.runningAppStackComponent(req);
+      this.terminalSinks.set(req.sessionId, sink);
+      const forget = () => this.terminalSinks.delete(req.sessionId);
+      const shell = startSimulatedShell(
+        { data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } },
+        // No user and no folder are named: the shell is whoever the container runs as, where its image starts.
+        { folder: "/", id: container.user === null ? "uid=(the image's own user)" : `uid=${container.user.replace(":", " gid=")}` },
+      );
+      return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name };
     });
   }
 
@@ -1372,6 +1400,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public unpublishAppStackRoutes(req: AppStackRefIpcRequest) { return this.appStacks.unpublishAppStackRoutes(req); }
   public removeAppStack(req: AppStackRemoveIpcRequest) { return this.appStacks.removeAppStack(req); }
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest) { return this.appStacks.removeAppStackComponents(req); }
+  public syncAppStackLinks(req: AppStackLinksIpcRequest) { return this.appStacks.syncAppStackLinks(req); }
   public getAppStackStatus(req: AppStackRefIpcRequest) { return this.appStacks.getAppStackStatus(req); }
   public getAppStackComponentLogs(req: AppStackLogsIpcRequest) { return this.appStacks.getAppStackComponentLogs(req); }
   public runAppStackTask(req: AppStackTaskRunIpcRequest) { return this.appStackTasks.runAppStackTask(req); }

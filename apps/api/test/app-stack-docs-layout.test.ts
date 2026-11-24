@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { APP_BUILT_IN_TEMPLATES } from "@hosting-panel/contracts";
+import { APP_BUILT_IN_TEMPLATES, APP_DATABASE_TEMPLATE_CATEGORY } from "@hosting-panel/contracts";
 
 const root = resolve(__dirname, "../../..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -15,16 +15,20 @@ const between = (text: string, from: string, to?: string) => {
 const digestsOf = (templates: readonly (typeof APP_BUILT_IN_TEMPLATES)[number][]) => [
   ...new Set(templates.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))),
 ];
-// The seeds of the first format are recorded in ADR-0035, the one of the extended format in ADR-0036.
+// The seeds of the first format are recorded in ADR-0035, the one of the extended format in ADR-0036;
+// the databases came with ADR-0039, which names their images itself.
 const isExtended = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.source.startsWith("x-hp-stack:\n  schemaVersion: 2\n");
-const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t)));
+const isDatabase = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.category === APP_DATABASE_TEMPLATE_CATEGORY;
+const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t) && !isDatabase(t)));
 const extendedDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter(isExtended));
+const databaseDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter(isDatabase));
 const scripts = [
   "accept-app-stack-engine.mjs",
   "accept-app-stack-http-cache.mjs",
   "accept-app-stack-worker-storage.mjs",
   "accept-app-stack-wordpress.mjs",
   "accept-app-routing-options.mjs",
+  "accept-app-stack-databases.mjs",
 ];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
@@ -78,6 +82,16 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
     expect([...paths], file).toContain("infra/linux/accept-app-stack-wordpress.mjs");
     for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+  });
+
+  it("ADR-0039 names the image of every built-in database and cites existing paths", () => {
+    const file = "docs/architecture/adr/0039-application-databases.md";
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    expect(databaseDigests.length).toBeGreaterThanOrEqual(3);
+    for (const s of ["0028_app_stack_links.sql", "APP_IMAGE_ALLOWLIST", "D12", ...databaseDigests]) expect(adr, s).toContain(s);
   });
 
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
@@ -159,6 +173,15 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
         "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left",
         // The steps of the `--imported` run (the draft the Compose importer writes).
         "compose-imports-to-draft", "plan-compiles-from-draft", "registry-lookup-reads-only"
+      ],
+      // ADR-0039: the built-in databases and the private link between a database and an application.
+      "accept-app-stack-databases.mjs": [
+        "gate-self-test", "preflight", "snapshot-before", "plans-compile-from-seeds", "applications-deploy",
+        "mariadb-starts-hardened", "postgresql-starts-hardened", "valkey-starts-hardened", "data-survives-restart",
+        "unlinked-application-cannot-reach", "link-reaches-by-alias", "link-idempotent", "two-applications-stay-apart",
+        "link-follows-a-replaced-database", "application-removal-detaches-running-database",
+        "stopped-database-survives-application-removal", "stale-attachment-repaired", "refuses-foreign-targets",
+        "detach-removes-reachability", "remove-everything", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
       ]
     };
     const harness = read("HARNESS.md");
@@ -174,7 +197,15 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).not.toMatch(/:latest\b/);
       expect(script, file).not.toMatch(/["']-p["']|["']--publish["']/);
       const anyHost = script.split("\n").filter((l) => l.includes("0.0.0.0"));
-      if (name.includes("worker-storage")) expect(anyHost, file).toEqual([]);
+      // Only the scripts that run a throwaway proxy hold an any-host line (the rewrite of its loopback HostIp).
+      if (!name.includes("http-cache") && !name.includes("wordpress")) expect(anyHost, file).toEqual([]);
+      if (name.includes("databases")) {
+        // Private networks only, and no image download: a live panel on the machine attaches its proxy to every edge network.
+        for (const s of ["body.Internal === true", 'body.Labels?.[ROLE_LABEL] === "app_internal"', 'return deny("image change")']) {
+          expect(script, `${file} ${s}`).toContain(s);
+        }
+        expect(script, file).not.toContain("appStackEdgeNetworkName");
+      }
       // A script that carries secrets has its gate refuse them anywhere but the environment of an own container.
       if (name.includes("wordpress")) for (const s of ['deny("secret in the address")', 'deny("secret outside Env")']) expect(script, `${file} ${s}`).toContain(s);
       for (const line of anyHost) expect(line, file).toContain("HostIp");

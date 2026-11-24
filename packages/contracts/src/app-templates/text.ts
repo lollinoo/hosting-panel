@@ -10,11 +10,22 @@ import {
 
 /** Pure, total rules; a result never echoes the text checked. */
 
-export type AppStackTextProblem = "control_character" | "docker_socket" | "metadata_endpoint" | "url_credentials";
+export type AppStackTextProblem = "control_character" | "docker_socket" | "metadata_endpoint" | "url_credentials" | "process_mark";
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cs}]/u;
 const METADATA_ENDPOINTS = [/169\.254\./, /fd00:ec2::/i, /metadata\.google\.internal/i];
+
+/**
+ * The environment variables that mark what a platform feature started in a component: a terminal session (ADR-0041)
+ * and a run of a scheduled task. A clean-up finds those programs by "<mark>=" as text in /proc/<pid>/environ read
+ * without its separators, with nothing that bounds it on the left, so no value of a component may hold that text. A
+ * closed list: a feature that adds a mark adds it here, and every check below follows.
+ */
+export const APP_STACK_PROCESS_MARKS = ["HP_TERMINAL_SESSION", "HP_TASK_RUN"] as const;
+
+/** "<mark>=" for any mark of the list, anywhere in the text; literals only, so linear on any input. */
+export const APP_STACK_PROCESS_MARK_PATTERN = new RegExp(APP_STACK_PROCESS_MARKS.map((mark) => `${mark}=`).join("|"));
 
 /** First matching rule in the order of AppStackTextProblem, else null. */
 export function appStackTextProblem(text: string): AppStackTextProblem | null {
@@ -23,6 +34,7 @@ export function appStackTextProblem(text: string): AppStackTextProblem | null {
   if (METADATA_ENDPOINTS.some((pattern) => pattern.test(text))) return "metadata_endpoint";
   // scheme://user:password@host; the user may be empty (redis://:password@host).
   if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(text)) return "url_credentials";
+  if (APP_STACK_PROCESS_MARK_PATTERN.test(text)) return "process_mark";
   return null;
 }
 

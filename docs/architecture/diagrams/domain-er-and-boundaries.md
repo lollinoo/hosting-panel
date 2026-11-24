@@ -518,7 +518,7 @@ erDiagram
     }
 
     app_templates {
-        text id PK "atpl_<id>; integrati atpl_http_cache e atpl_worker_storage"
+        text id PK "atpl_<id>; cinque integrati (ADR-0035 e ADR-0039)"
         text slug UK "^[a-z][a-z0-9-]{1,47}$"
         text category "^[a-z][a-z0-9-]{0,31}$"
         boolean built_in "DEFAULT false; mai archiviato"
@@ -685,6 +685,121 @@ Note di lettura:
 - `left_incomplete` ha senso solo sulle righe `pre_restore`, `incomplete_data` su tutte (K5): finché l'ultima operazione dell'applicazione che decide (un ripristino non annullato o un'altra azione riuscita; mai un backup o una pulizia) è un ripristino il cui backup di sicurezza ha `left_incomplete`, la più recente di dati interi non è mai rimossa (K7) e la pagina la indica per tornare indietro.
 - `snapshot_id` non esce mai dal database verso un DTO, una riga di audit o un payload dell'outbox.
 
+### 2.5 Estensione ADR-0039: collegamenti fra un database e un'applicazione
+
+La migrazione `0028_app_stack_links.sql` (`ADR-0039`) è additiva: una tabella nuova, nessuna tabella esistente cambia forma e nessuna riga è riscritta.
+
+```mermaid
+erDiagram
+    app_stacks ||--o{ app_stack_links : "consumer (consumer_stack_id, organization_id) CASCADE"
+    app_stacks ||--o{ app_stack_links : "provider (provider_stack_id, organization_id) CASCADE"
+    users |o--o{ app_stack_links : "created_by (SET NULL)"
+
+    app_stack_links {
+        text id PK "slnk_<id>"
+        text organization_id "la stessa per le due applicazioni"
+        text consumer_stack_id FK "l'applicazione che usa il database"
+        text provider_stack_id FK "il database"
+        text state "pending, active, removing"
+        text created_by FK "NULL se l'utente non esiste più"
+        timestamptz updated_at "l'ultimo passaggio sul server"
+    }
+```
+
+Note di lettura:
+
+- Le due chiavi esterne composte `(…_stack_id, organization_id)` verso `app_stacks` impediscono di registrare un collegamento fra applicazioni di due organizzazioni.
+- Il componente e la porta del database non sono nella riga: si leggono dal suo piano quando il collegamento viene applicato, così un aggiornamento del database non lascia qui un nome vecchio.
+- `active` è l'ultima risposta del server, non una lettura continua di Docker; `removing` resta finché il server conferma lo stacco, poi la riga è cancellata.
+- Quale delle due applicazioni è il database non è un vincolo della tabella: lo decide la categoria `database` del modello, controllata dall'API alla creazione del collegamento.
+
+### 2.6 Estensione ADR-0040: notifiche
+
+La migrazione `0029_notifications.sql` (`ADR-0040`) è additiva: tre tabelle nuove con i loro indici, nessuna modifica a una tabella esistente. La release precedente non le legge mai.
+
+```mermaid
+erDiagram
+    organizations |o--o{ notification_channels : "organization_id (CASCADE); NULL = ambito server"
+    users |o--o{ notification_channels : "updated_by_user_id (SET NULL)"
+    notification_channels ||--o{ notification_channel_alerts : "cio che il canale sa (CASCADE)"
+    notification_channels ||--o{ notification_deliveries : "messaggi (CASCADE)"
+
+    notification_channels {
+        text id PK "nch_<id>"
+        text organization_id FK "NULL = canale del server; CASCADE"
+        text kind "email, webhook, telegram; uno per tipo e per ambito"
+        boolean enabled "DEFAULT true"
+        jsonb groups "i gruppi di avvisi scelti"
+        jsonb recipients "solo email del server, altrimenti NULL"
+        text display_host "solo webhook: il nome host mostrato"
+        text chat "solo telegram: la chat mostrata"
+        boolean signed "il webhook ha una chiave di firma"
+        text locale "it o en"
+        text config_ciphertext_base64 "busta cifrata; NULL solo per email"
+        timestamptz last_tested_at "ultimo messaggio di prova"
+        text updated_by_user_id FK "SET NULL"
+    }
+
+    notification_channel_alerts {
+        text channel_id PK "FK, CASCADE"
+        text alert_key PK "<tipo>:<soggetto>"
+        text kind "senza CHECK: la lista sta nei contratti"
+        text severity "warning o critical"
+        jsonb event "l'evento com'era all'apertura"
+        timestamptz first_seen_at "primo passaggio che lo ha visto"
+        timestamptz announced_at "NULL = visto una volta, non ancora detto"
+    }
+
+    notification_deliveries {
+        text id PK "ndl_<id>"
+        text channel_id FK "CASCADE"
+        jsonb events "al piu 50 eventi"
+        integer omitted "eventi oltre il limite"
+        boolean test "messaggio di prova"
+        text recipient "solo email: un destinatario per riga"
+        text locale "it o en"
+        text status "pending, sent, failed"
+        integer attempts "tentativi fatti"
+        timestamptz next_attempt_at "solo se pending"
+        text problem "codice stabile; obbligatorio se failed"
+        integer http_status "NULL o 100..599"
+        timestamptz finished_at "NULL solo se pending"
+    }
+```
+
+Note di lettura:
+
+- `notification_channels.organization_id` vuoto è l'ambito del server. Un `UNIQUE (organization_id, kind)` non varrebbe per le righe con `NULL`: l'unicità è data da due indici parziali, uno per ambito.
+- L'indirizzo di un webhook, la sua chiave di firma e il token di un bot stanno solo nella busta cifrata (`config_*`), legata all'ambito e al tipo del canale; `display_host` e `chat` sono ciò che una pagina può mostrare.
+- `notification_channel_alerts` è lo stato del confronto, non uno storico: una riga esiste finché l'avviso è aperto per quel canale. Il ripristino del pannello (`infra/linux/hp-restore-panel.sql`) la svuota.
+- `notification_deliveries` tiene l'esito di ogni messaggio per trenta giorni; il testo non è salvato, si riscrive dagli eventi.
+
+### 2.7 Estensione ADR-0041: sessioni di terminale nei componenti
+
+La migrazione `0030_app_terminal_sessions.sql` (`ADR-0041`) è additiva e non crea tabelle: nella tabella `admin_terminal_sessions` (`0016`, `ADR-0027`) `site_id` diventa facoltativa e si aggiungono due colonne nulle. La tabella non ha chiavi esterne, di proposito: una riga resta anche quando il sito, l'applicazione, l'utente o l'organizzazione non ci sono più.
+
+```mermaid
+erDiagram
+    admin_terminal_sessions {
+        text id PK "term_<id>"
+        text user_id "chi ha aperto; nessuna chiave esterna"
+        text site_id "sessione in un sito; NULL per un componente"
+        text stack_id "sessione in un componente; NULL per un sito"
+        text component_key "il componente; NULL per un sito"
+        text organization_id "il cliente del sito o dell'applicazione"
+        text container_name "il nome che il pannello ricava, mai un id di Docker"
+        timestamptz opened_at "DEFAULT NOW()"
+        timestamptz closed_at "NULL finche e aperta"
+        text close_reason "closed, shell_exited, idle, time_limit, container_gone, executor_gone, not_started"
+    }
+```
+
+Note di lettura:
+
+- Una sessione appartiene a un sito oppure a un componente di un'applicazione, mai a entrambi e mai a nessuno (`admin_terminal_sessions_target_check`).
+- I due limiti si contano sulle righe aperte, sotto un blocco della tabella: quattro sul server, siti e applicazioni insieme, e una per sito o per coppia applicazione e componente.
+- La riga non tiene niente di ciò che è stato digitato o stampato.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -721,6 +836,14 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stack_backups` | `UNIQUE uq_app_stack_backups_operation (operation_id)` e nessuna chiave esterna verso `app_stacks` (`0027`) | Un'operazione crea al più un backup; i backup sopravvivono alla cancellazione dell'applicazione, e il cancello del downgrade `app-stack-backups` conta ogni riga. |
 | `app_stack_backup_copies` | `FOREIGN KEY (backup_id) REFERENCES app_stack_backups(id) ON DELETE CASCADE`, `FOREIGN KEY (target_id) REFERENCES backup_targets(id) ON DELETE RESTRICT`, `UNIQUE uq_app_stack_backup_copies_backup_target (backup_id, target_id)` e `uq_app_stack_backup_copies_backup_priority (backup_id, priority)` (`0027`) | Un backup ha al più una copia per destinazione e per priorità (1 o 2); una destinazione con copie di applicazioni non si cancella. |
 | `app_stack_backup_copies` | `CHECK ck_app_stack_backup_copies_snapshot (status <> 'succeeded' OR snapshot_id IS NOT NULL)` e `UNIQUE INDEX uq_app_stack_backup_copies_job (job_id) WHERE job_id IS NOT NULL` (`0027`) | Una copia riuscita ha sempre il suo snapshot; un lavoro dell'esecutore appartiene a una sola copia. |
+| `app_stack_links` | `FOREIGN KEY fk_app_stack_links_consumer_org (consumer_stack_id, organization_id)` e `fk_app_stack_links_provider_org (provider_stack_id, organization_id) REFERENCES app_stacks(id, organization_id) ON DELETE CASCADE` (`0028`) | **Invariante BOLA dei collegamenti**: un database e l'applicazione che lo usa appartengono alla stessa organizzazione; nessuna riga può unire due clienti. |
+| `app_stack_links` | `UNIQUE uq_app_stack_links_pair (consumer_stack_id, provider_stack_id)`, `CHECK ck_app_stack_links_distinct (consumer_stack_id <> provider_stack_id)` e `CHECK app_stack_links_state_check (state IN ('pending', 'active', 'removing'))` (`0028`) | Una coppia ha al più un collegamento e un'applicazione non si collega a se stessa; il cancello del downgrade `app-stack-links` conta ogni riga, in qualunque stato. |
+| `notification_channels` | `UNIQUE INDEX uq_notification_channels_server_kind (kind) WHERE organization_id IS NULL` e `UNIQUE INDEX uq_notification_channels_org_kind (organization_id, kind) WHERE organization_id IS NOT NULL` (`0029`) | Un canale per tipo nell'ambito del server e uno per tipo per ogni cliente. |
+| `notification_channels` | `CHECK ck_notification_channels_config`, `ck_notification_channels_recipients` e `ck_notification_channels_shown` (`0029`) | Un webhook e un bot hanno sempre la loro busta cifrata intera e la mail non ne ha; indirizzi scritti a mano esistono solo per la mail del server; il nome host mostrato è del solo webhook e la chat del solo bot. |
+| `notification_channels` | `organization_id ... REFERENCES organizations(id) ON DELETE CASCADE` (`0029`) | I canali di un cliente spariscono con il cliente; il cancello del downgrade `notifications` conta ogni riga, accesa o spenta. |
+| `notification_channel_alerts`, `notification_deliveries` | `channel_id ... REFERENCES notification_channels(id) ON DELETE CASCADE` (`0029`) | Rimuovere un canale porta via ciò che sapeva e i suoi messaggi. |
+| `notification_deliveries` | `CHECK ck_notification_deliveries_pending`, `ck_notification_deliveries_sent` e `ck_notification_deliveries_failed` (`0029`) | Un messaggio è in attesa esattamente finché ha un prossimo tentativo e nessuna fine; uno consegnato non ha un motivo di errore e uno non consegnato ne ha sempre uno. |
+| `admin_terminal_sessions` | `CHECK admin_terminal_sessions_target_check` (`0030`) | Una sessione di terminale ha esattamente un bersaglio: un sito (`site_id`), oppure un componente di un'applicazione (`stack_id` e `component_key`). Le righe e le scritture della release precedente mettono sempre `site_id` e lo rispettano. |
 
 ---
 
@@ -737,16 +860,11 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 - **Versioni 0023 e 0024 (`ADR-0034` e `ADR-0033`, additive)**:
   - `0023_organization_site_limit.sql`: colonna `organizations.max_sites` (`NULL` = nessun limite, `CHECK >= 0`).
   - `0024_site_templates.sql`: tabelle `site_templates` e `site_template_versions` (immutabili), colonne `sites.template_version_id` (chiave esterna `RESTRICT`) e `sites.template_parameters` (array JSONB), indice parziale `idx_sites_template_version`; il modello integrato WordPress (`stpl_wordpress`, versione `stv_wordpress_1`) è garantito a ogni avvio dell'API da `ensureBuiltInSiteTemplates` (`packages/database`), non dalla migrazione.
-- **Versione 0031 (`0031_app_stack_tasks.sql`, `ADR-0042`, additiva)**:
-  - Due tabelle: `app_stack_task_schedules` (quando un'attività parte da sola; nessuna riga vuol dire «mai») e `app_stack_task_runs` (una riga per esecuzione, con ciò che ha stampato: mascherato e limitato dall'esecutore, non sta in nessun'altra tabella). Il comando di un'attività non è in nessuna delle due: si legge dalla versione del modello quando l'esecuzione comincia.
-  - Un indice unico parziale `uq_app_stack_task_runs_slot (stack_id, task_key, slot_at)`: un orario programmato ha al più un'esecuzione alla volta. Un'esecuzione programmata che non è potuta partire viene cancellata e il suo orario torna in coda: un orario **parte** al più una volta.
-  - Un trigger su `app_stacks` (`trg_app_stacks_forget_tasks`): quando un'applicazione viene cancellata (`deleted_at` passa da `NULL` a un istante) le sue righe nelle due tabelle spariscono; la riga di `app_stacks` resta, quindi la cascata della chiave esterna da sola non basterebbe.
-  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le due tabelle e il trigger continua a togliere ciò che le attività hanno lasciato. I numeri da `0026` a `0030` sono di altre modifiche in corso.
 - **Versione 0025 (`0025_app_stacks.sql`, `ADR-0035`, additiva)**:
   - Dieci tabelle: `app_templates`, `app_template_versions` (immutabili), `app_stacks`, `app_stack_parameters`, `app_stack_secrets` (immutabili), `app_stack_revisions` (immutabili), `app_stack_components`, `app_stack_volumes`, `app_stack_domains` e `app_stack_deployments`.
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
-  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, con `ADR-0036` `atpl_wordpress_mariadb` e, con `ADR-0039`, `atpl_mariadb`, `atpl_postgresql` e `atpl_valkey`; tutti disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
 - **Versione 0026 (`0026_app_routing_options.sql`, `ADR-0037`, additiva)**:
   - Cinque colonne su `app_stack_domains`: `redirect_to_domain_id` (nulla), `compression` (`BOOLEAN NOT NULL DEFAULT FALSE`), `access_username` e `access_password_hash` (nulle; un verificatore `$apr1$`, mai la password), `path_routes` (`JSONB NOT NULL DEFAULT '[]'`).
   - Chiave esterna `fk_app_stack_domains_redirect` `(stack_id, redirect_to_domain_id)` → `app_stack_domains (stack_id, id)` con `ON DELETE SET NULL (redirect_to_domain_id)`: la destinazione di un reindirizzamento è un indirizzo della stessa applicazione; il vincolo `uq_app_stack_domains_stack_id` `UNIQUE (stack_id, id)` la rende possibile.
@@ -757,6 +875,21 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Due tabelle: `app_stack_backups` (un backup di un'applicazione, con l'esito dell'ultimo ripristino fatto da quel backup) e `app_stack_backup_copies` (una copia per destinazione, al più due).
   - Nessuna chiave esterna verso `app_stacks`: i backup restano dopo la cancellazione dell'applicazione, fino alla pulizia notturna.
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
+- **Versione 0028 (`0028_app_stack_links.sql`, `ADR-0039`, additiva)**:
+  - Una tabella: `app_stack_links` (un collegamento fra un database e un'applicazione dello stesso cliente, con lo stato `pending`, `active` o `removing`).
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora la tabella nuova.
+- **Versione 0029 (`0029_notifications.sql`, `ADR-0040`, additiva)**:
+  - Tre tabelle: `notification_channels` (un canale per tipo e per ambito), `notification_channel_alerts` (ciò che un canale sa già) e `notification_deliveries` (i messaggi con il loro esito).
+  - Due indici unici parziali sui canali e due indici sui messaggi (`idx_notification_deliveries_due`, `idx_notification_deliveries_channel_created`).
+  - Nessuna colonna, indice o trigger cambia su una tabella esistente e non c'è backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
+- **Versione 0030 (`0030_app_terminal_sessions.sql`, `ADR-0041`, additiva)**:
+  - `admin_terminal_sessions.site_id` diventa facoltativa; due colonne nulle, `stack_id` e `component_key`; il vincolo `admin_terminal_sessions_target_check`.
+  - Nessuna tabella nuova, nessun backfill e nessun cancello del downgrade: la release precedente, dopo un rollback automatico, continua a scrivere righe con `site_id` e chiude come `executor_gone` una riga di applicazione rimasta aperta.
+- **Versione 0031 (`0031_app_stack_tasks.sql`, `ADR-0042`, additiva)**:
+  - Due tabelle: `app_stack_task_schedules` (quando un'attività parte da sola; nessuna riga vuol dire «mai») e `app_stack_task_runs` (una riga per esecuzione, con ciò che ha stampato: mascherato e limitato dall'esecutore, non sta in nessun'altra tabella). Il comando di un'attività non è in nessuna delle due: si legge dalla versione del modello quando l'esecuzione comincia.
+  - Un indice unico parziale `uq_app_stack_task_runs_slot (stack_id, task_key, slot_at)`: un orario programmato ha al più un'esecuzione alla volta. Un'esecuzione programmata che non è potuta partire viene cancellata e il suo orario torna in coda: un orario **parte** al più una volta.
+  - Un trigger su `app_stacks` (`trg_app_stacks_forget_tasks`): quando un'applicazione viene cancellata (`deleted_at` passa da `NULL` a un istante) le sue righe nelle due tabelle spariscono; la riga di `app_stacks` resta, quindi la cascata della chiave esterna da sola non basterebbe.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le due tabelle e il trigger continua a togliere ciò che le attività hanno lasciato. I numeri da `0026` a `0030` sono di altre modifiche in corso.
 - **Versione 0032 (`0032_app_stack_deployment_replaced.sql`, `ADR-0035` §2.10, additiva)**:
   - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
   - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito (`NULL` per il primo deploy e per l'avvio che segue un backup o un ripristino, `ADR-0038`); un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.

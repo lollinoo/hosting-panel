@@ -13,6 +13,7 @@ import {
   APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_PROCESS_MARKS,
   APP_STACK_RUN_PROFILES,
   APP_STACK_SECRET_ENV_LIMITS,
   APP_TEMPLATE_CATEGORY_PATTERN,
@@ -507,6 +508,9 @@ function checkVariable(ctx: Context, name: string, path: TemplatePath): Paramete
   return null;
 }
 
+/** "HP_TERMINAL_SESSION=, HP_TASK_RUN=": the marks a value may not hold, as a message names them. */
+const PROCESS_MARKS_TEXT = APP_STACK_PROCESS_MARKS.map((mark) => `${mark}=`).join(", ");
+
 /**
  * The command of a component, or of a task when `fixed`: a task takes no placeholder, and what comes back is then the
  * arguments as they are run (a "$$" already "$"), not the raw items.
@@ -527,7 +531,7 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath, fixed =
     const itemPath = [...path, index];
     if (typeof item !== "string") return issues.add("ARGV_ITEM_NOT_STRING", itemPath, "Every command item must be a string: quote it.");
     if (item === "" || item.length > LIMITS.argvItemLength || appStackTextProblem(item) !== null) {
-      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints or URL credentials.`);
+      return issues.add("ARGV_ITEM_INVALID", itemPath, `A command item is 1 to ${LIMITS.argvItemLength} characters without control characters, the Docker socket, metadata endpoints, URL credentials or a platform mark (${PROCESS_MARKS_TEXT}).`);
     }
     const scan = scanInterpolation(item);
     if (!scan.ok) return issues.add(scan.code, itemPath, scan.message);
@@ -650,9 +654,12 @@ function validateEnvValue(ctx: Context, name: string, value: unknown, entryPath:
   // Without a secret reference the whole value is checked as written; with one, each stretch of text around them is.
   const checked = secretReferences > 0 && scan.ok ? textAroundSecrets(scan.pieces, isSecret) : [value];
   const valueProblem = checked.map((text) => envValueProblem(text)).find((problem) => problem !== null) ?? null;
+  const textProblems = valueProblem === null ? checked.map((text) => appStackTextProblem(text)) : [];
   if (valueProblem !== null) issues.add(valueProblem, path, VALUE_PROBLEM_MESSAGES[valueProblem]);
-  else if (checked.some((text) => appStackTextProblem(text) === "metadata_endpoint")) {
+  else if (textProblems.includes("metadata_endpoint")) {
     issues.add("ENV_VALUE_METADATA_ENDPOINT", path, "The value names a cloud metadata endpoint, which is never reachable from a stack.");
+  } else if (textProblems.includes("process_mark")) {
+    issues.add("ENV_VALUE_PROCESS_MARK", path, `The value holds a mark the platform sets on its own programs (${PROCESS_MARKS_TEXT}).`);
   }
   if (!scan.ok) {
     issues.add(scan.code, path, scan.message);

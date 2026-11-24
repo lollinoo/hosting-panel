@@ -4,9 +4,11 @@ import {
   APP_STACK_HASH_PATTERN,
   APP_STACK_ID_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_LINKS_DISCONNECTED_MAX,
   APP_STACK_LOG_TAIL_MAX,
   APP_STACK_NETWORK_ROLES,
   appStackImageLookupProblem,
+  appStackLinkAlias,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
@@ -18,6 +20,8 @@ import {
   type AppStackExecutorReason,
   type AppStackImageResolveIpcRequest,
   type AppStackImageResolveIpcResult,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackNetworkRole,
   type AppStackPlanIpcRequest,
@@ -132,9 +136,16 @@ interface ContainerInspect {
     readonly StartedAt?: string;
   };
   readonly RestartCount?: number;
-  readonly NetworkSettings?: { readonly Networks?: Readonly<Record<string, { readonly IPAddress?: string }>> };
+  readonly NetworkSettings?: { readonly Networks?: Readonly<Record<string, EndpointView | null>> | null };
+}
+interface EndpointView {
+  readonly IPAddress?: string;
+  readonly NetworkID?: string;
+  readonly Aliases?: readonly string[] | null;
+  readonly DNSNames?: readonly string[] | null;
 }
 interface NetworkView {
+  readonly Id?: string;
   readonly Name?: string;
   readonly Driver?: string;
   readonly Internal?: boolean;
@@ -235,6 +246,18 @@ const rolesOf = (plan: ApprovedStackPlan): AppStackNetworkRole[] =>
 
 const labelFilter = (stackId: string) => enc(JSON.stringify({ label: [`${APP_STACK_LABELS.stackId}=${stackId}`] }));
 
+const INTERNAL_NETWORK_PREFIX = appStackInternalNetworkName("x").slice(0, -1);
+
+/** The application a private network name belongs to; null when the name is not a private network of an application. */
+function internalNetworkStackId(name: string): string | null {
+  if (!name.startsWith(INTERNAL_NETWORK_PREFIX)) return null;
+  const stackId = name.slice(INTERNAL_NETWORK_PREFIX.length);
+  return APP_STACK_ID_PATTERN.test(stackId) ? stackId : null;
+}
+
+const done = (res: EngineResponse) => res.statusCode === 200 || res.statusCode === 204;
+const says = (res: EngineResponse, text: string) => res.body.toString("utf8").toLowerCase().includes(text);
+
 /** The component key of an own container (Docker names carry a leading "/"), else null. */
 export function ownComponentKey(
   labels: Readonly<Record<string, string>> | null | undefined,
@@ -288,6 +311,8 @@ function reverseStartOrder(containers: readonly OwnContainer[]): OwnContainer[] 
 export class AppStackEngine implements StackExecutorPort {
   private readonly deps: AppStackEngineDeps;
   private readonly busy = new Set<string>();
+  /** Databases whose links are being applied. No other call looks at it: a link never makes a change wait or fail. */
+  private readonly linking = new Set<string>();
 
   public constructor(deps: AppStackEngineDeps) {
     this.deps = deps;
@@ -383,7 +408,12 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const listed = await this.listContainers(plan);
       // Every body and every derived name is checked before the first removal or create.
-      const ctx = { secretsRootDir: this.deps.secretsRootDir, plan, secretContents };
+      const ctx = {
+        secretsRootDir: this.deps.secretsRootDir,
+        plan,
+        secretContents,
+        ...(this.deps.allowlist === undefined ? {} : { allowlist: this.deps.allowlist }),
+      };
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);
@@ -505,8 +535,15 @@ export class AppStackEngine implements StackExecutorPort {
           await this.deps
             .request("POST", `/networks/${enc(name)}/disconnect`, { Container: this.deps.proxy.containerName, Force: true })
             .catch(() => undefined);
+        } else {
+          await this.detachLinkedComponents(req, name);
         }
-        const res = await this.deps.request("DELETE", `/networks/${enc(name)}`);
+        let res = await this.deps.request("DELETE", `/networks/${enc(name)}`);
+        if (role === "app_internal" && (res.statusCode === 403 || res.statusCode === 409)) {
+          // A database linked between the list and the removal: once more, then the refusal stands.
+          await this.detachLinkedComponents(req, name);
+          res = await this.deps.request("DELETE", `/networks/${enc(name)}`);
+        }
         if (res.statusCode === 403 || res.statusCode === 409) {
           refuse("STACK_NAMESPACE_CONFLICT", "A stack network is still used by another container");
         }
@@ -541,6 +578,24 @@ export class AppStackEngine implements StackExecutorPort {
     });
   }
 
+  /**
+   * Makes the private networks of other applications the only component of a database is attached to equal to
+   * `consumerStackIds` (ADR-0039). Every name is derived here; the container and each network are checked from the
+   * labels the engine holds before anything changes. Never starts, stops, restarts or recreates a container. It gives
+   * way to a change of the database that is running (STACK_BUSY) and holds nothing a change waits for.
+   */
+  public async syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    if (this.busy.has(req.stackId) || this.linking.has(req.stackId)) {
+      refuse("STACK_BUSY", "Another change of this application stack is running");
+    }
+    this.linking.add(req.stackId);
+    try {
+      return await this.applyLinks(req);
+    } finally {
+      this.linking.delete(req.stackId);
+    }
+  }
+
   public async getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {
     const listed = await this.listAll(req);
     const observed = await Promise.all(listed.containers.map((c) => this.observe(req.stackId, c)));
@@ -561,12 +616,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
-    const target = await this.get<ContainerInspect>(
-      `/containers/${enc(appStackContainerName(req.stackId, req.componentKey))}/json`,
-      "inspect an application container",
-    );
-    if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-    if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
+    const target = await this.inspectAppStackComponentContainer(req);
     // Established before any line is read; the environment secrets come from this container, which outlives the tmpfs.
     const values = appStackLogMaskValues(
       req.componentKey,
@@ -583,6 +633,25 @@ export class AppStackEngine implements StackExecutorPort {
     if (res.statusCode === 404) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (res.statusCode !== 200) throw engineError("read service logs", res.statusCode);
     return maskedLogLines(res.body, values);
+  }
+
+  /**
+   * The container of one component, found by the name derived here and refused unless its labels say it is that
+   * component of that application of that customer (logs, and the terminal of ADR-0041). The id stays in the executor.
+   */
+  public async findAppStackComponentContainer(req: Ids & { readonly componentKey: string }): Promise<{ readonly id: string }> {
+    const target = await this.inspectAppStackComponentContainer(req);
+    return { id: target.Id };
+  }
+
+  private async inspectAppStackComponentContainer(req: Ids & { readonly componentKey: string }): Promise<ContainerInspect> {
+    const target = await this.get<ContainerInspect>(
+      `/containers/${enc(appStackContainerName(req.stackId, req.componentKey))}/json`,
+      "inspect an application container",
+    );
+    if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+    if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
+    return target;
   }
 
   /** A call of this executor is changing the application (the task runner asks before it starts a task). */
@@ -603,6 +672,114 @@ export class AppStackEngine implements StackExecutorPort {
       return await fn();
     } finally {
       this.busy.delete(stackId);
+    }
+  }
+
+  private async applyLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    const alias = appStackLinkAlias(req.stackId);
+    if (alias === null || !APP_STACK_KEY_PATTERN.test(req.componentKey)) refuse("STACK_PLAN_INVALID", "This application cannot be linked");
+    const desired = [...new Set(req.consumerStackIds)];
+    if (desired.includes(req.stackId) || desired.some((id) => !APP_STACK_ID_PATTERN.test(id))) {
+      refuse("STACK_PLAN_INVALID", "The list of linked applications is invalid");
+    }
+    const waiting = (): AppStackLinksIpcResult => ({
+      container: false,
+      links: desired.map((consumerStackId) => ({ consumerStackId, outcome: "pending" })),
+      disconnected: [],
+    });
+    const own = await this.listContainers(req);
+    if (own.length === 0) return waiting();
+    const [only] = own;
+    if (only === undefined || own.length > 1 || only.key !== req.componentKey) {
+      refuse("STACK_PLAN_INVALID", "Only an application with one component can be linked");
+    }
+    const inspected = await this.get<ContainerInspect>(`/containers/${enc(only.id)}/json`, "inspect an application container");
+    if (inspected === null) return waiting();
+    if (ownComponentKey(inspected.Config?.Labels, inspected.Name, req) !== req.componentKey) throw conflict();
+
+    // Every attached network is named before anything changes: besides its own two, only private networks of applications.
+    const ownNetworks = new Set<string>(APP_STACK_NETWORK_ROLES.map((role) => networkName(req.stackId, role)));
+    const attached = new Map<string, EndpointView>();
+    for (const [name, endpoint] of Object.entries(inspected.NetworkSettings?.Networks ?? {})) {
+      if (ownNetworks.has(name)) continue;
+      const consumer = internalNetworkStackId(name);
+      if (consumer === null || consumer === req.stackId) throw conflict();
+      attached.set(consumer, endpoint ?? {});
+    }
+    // Every network to attach is the private network of an application of the same customer, by its labels.
+    const networks = new Map<string, NetworkView | null>();
+    for (const consumer of desired) {
+      const view = await this.get<NetworkView>(`/networks/${enc(appStackInternalNetworkName(consumer))}`, "inspect a stack network");
+      if (view !== null && !isOwnNetwork(view, { stackId: consumer, organizationId: req.organizationId }, "app_internal")) throw conflict();
+      networks.set(consumer, view);
+    }
+
+    const detach = async (consumer: string) => {
+      const res = await this.deps.request("POST", `/networks/${enc(appStackInternalNetworkName(consumer))}/disconnect`, {
+        Container: only.id,
+        Force: true,
+      });
+      if (!done(res) && !says(res, "is not connected")) throw engineError("detach a database from an application", res.statusCode);
+    };
+    const disconnected: string[] = [];
+    for (const consumer of [...attached.keys()].sort()) {
+      if (desired.includes(consumer)) continue;
+      await detach(consumer);
+      disconnected.push(consumer);
+    }
+
+    const links: AppStackLinksIpcResult["links"] = [];
+    for (const consumer of desired) {
+      const view = networks.get(consumer) ?? null;
+      const endpoint = attached.get(consumer);
+      if (endpoint !== undefined) {
+        // Attached to a network that is gone or was made again under the same name: the database could not start.
+        // The engine records the id of the network only once the container runs on it; with none recorded the
+        // attachment follows the name.
+        const stale = view === null || (Boolean(endpoint.NetworkID) && Boolean(view.Id) && endpoint.NetworkID !== view.Id);
+        const names = [endpoint.Aliases, endpoint.DNSNames].filter((list): list is readonly string[] => Array.isArray(list));
+        const named = names.length === 0 || names.some((list) => list.includes(alias));
+        if (!stale && named) {
+          links.push({ consumerStackId: consumer, outcome: "already_connected" });
+          continue;
+        }
+        await detach(consumer);
+      }
+      // No private network yet, or a change of the application is running (it may be removing this very network):
+      // nothing is attached now. Asked right before the request, with nothing awaited in between.
+      if (view === null || this.busy.has(consumer)) {
+        links.push({ consumerStackId: consumer, outcome: "pending" });
+        continue;
+      }
+      const res = await this.deps.request("POST", `/networks/${enc(appStackInternalNetworkName(consumer))}/connect`, {
+        Container: only.id,
+        EndpointConfig: { Aliases: [alias] },
+      });
+      if (done(res)) links.push({ consumerStackId: consumer, outcome: "connected" });
+      else if ((res.statusCode === 403 || res.statusCode === 409) && says(res, "already exists")) {
+        links.push({ consumerStackId: consumer, outcome: "already_connected" });
+      } else if (res.statusCode === 404) links.push({ consumerStackId: consumer, outcome: "pending" });
+      else throw engineError("attach a database to an application", res.statusCode);
+    }
+    return { container: true, links, disconnected: disconnected.slice(0, APP_STACK_LINKS_DISCONNECTED_MAX) };
+  }
+
+  /**
+   * Before an application's private network is removed: the components of other applications of the same customer
+   * that are attached to it (databases linked to it, ADR-0039) are detached, running or stopped. A stopped one would
+   * not stop the removal, and could not start afterwards. Anything else is left where it is, and the removal refuses.
+   */
+  private async detachLinkedComponents(ids: Ids, name: string): Promise<void> {
+    const attached = await this.list<{ Id: string; Names?: string[]; Labels?: Labels | null }[]>(
+      `/containers/json?all=true&filters=${enc(JSON.stringify({ network: [name] }))}`,
+      "list the containers on a stack network",
+    );
+    for (const c of attached) {
+      const other = c.Labels?.[APP_STACK_LABELS.stackId];
+      if (other === undefined || other === ids.stackId || !APP_STACK_ID_PATTERN.test(other)) continue;
+      if (ownComponentKey(c.Labels, c.Names?.[0], { stackId: other, organizationId: ids.organizationId }) === null) continue;
+      const res = await this.deps.request("POST", `/networks/${enc(name)}/disconnect`, { Container: c.Id, Force: true });
+      if (!done(res) && !says(res, "is not connected")) throw engineError("detach a database from an application", res.statusCode);
     }
   }
 

@@ -42,6 +42,9 @@ export interface FakeContainer {
   index: number;
   /** network name -> IPAddress */
   networks: Map<string, string>;
+  /** network name -> what Docker keeps of the attachment: the id of the network (recorded once the container runs on
+   *  it, "" before; it outlives the network) and the names asked for. aliases null = an Engine that reports no names. */
+  endpoints: Map<string, { networkId: string; aliases: string[] | null }>;
   /** volume names */
   mounts: string[];
   /** Raw frame payloads of GET /logs, newest last ("<timestamp> <text>\n"; no "\n" = a frame Docker split). */
@@ -102,10 +105,13 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
 
   const findNetwork = (ref: string) => networks.get(ref) ?? [...networks.values()].find((n) => n.Id === ref);
   const findContainer = (ref: string) => containers.get(ref) ?? [...containers.values()].find((c) => c.Id === ref);
-  const connect = (network: FakeNetwork, container: FakeContainer) => {
+  const connect = (network: FakeNetwork, container: FakeContainer, aliases: string[] = []) => {
     network.members.add(container.Name);
     container.networks.set(network.Name, `10.${network.index}.0.${container.index}`);
+    container.endpoints.set(network.Name, { networkId: container.State.Running ? network.Id : "", aliases });
   };
+  const notConnected = (status: number, container: FakeContainer, name: string) =>
+    reply(status, { message: `container ${container.Id} is not connected to the network ${name}` });
   const networkView = (n: FakeNetwork) => ({ Id: n.Id, Name: n.Name, Driver: n.Driver, Internal: n.Internal, Labels: n.Labels, Options: n.Options });
   const volumeView = (v: FakeVolume) => ({ Name: v.Name, Driver: v.Driver, Labels: v.Labels, Options: v.Options, Scope: "local" });
 
@@ -157,6 +163,25 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
         return reply(201, { Id: `net${counter}` });
       }
       const network = findNetwork(ref);
+      if (method === "POST" && action === "disconnect") {
+        // As the Engine does it: a stopped container, or a forced call for a network that is gone, loses the
+        // attachment it holds under that name, whether or not the network still exists.
+        const container = findContainer(String(input.Container));
+        if (!container) return reply(404, { message: "No such container" });
+        const name = network?.Name ?? ref;
+        if (!container.State.Running || (!network && input.Force === true)) {
+          if (!container.networks.has(name)) return notConnected(500, container, name);
+        } else if (!network) {
+          return reply(404, { message: `network ${ref} not found` });
+        } else if (!network.members.has(container.Name)) {
+          return notConnected(403, container, name);
+        }
+        const recorded = container.endpoints.get(name)?.networkId;
+        if (network && (recorded === "" || recorded === network.Id)) network.members.delete(container.Name);
+        container.networks.delete(name);
+        container.endpoints.delete(name);
+        return reply(200);
+      }
       if (!network) return reply(404, { message: `network ${ref} not found` });
       if (method === "GET" && action === undefined) return reply(200, networkView(network));
       if (method === "DELETE" && action === undefined) {
@@ -165,17 +190,12 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
         return reply(204);
       }
       const container = findContainer(String(input.Container));
-      if (method === "POST" && (action === "connect" || action === "disconnect")) {
+      if (method === "POST" && action === "connect") {
         if (!container) return reply(404, { message: "No such container" });
-        if (action === "disconnect") {
-          network.members.delete(container.Name);
-          container.networks.delete(network.Name);
-          return reply(200);
-        }
-        if (network.members.has(container.Name)) {
+        if (network.members.has(container.Name) || container.networks.has(network.Name)) {
           return reply(403, { message: `endpoint with name ${container.Name} already exists in network ${network.Name}` });
         }
-        connect(network, container);
+        connect(network, container, [...((input.EndpointConfig as { Aliases?: string[] } | undefined)?.Aliases ?? [])]);
         return reply(200);
       }
     }
@@ -206,10 +226,13 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     if (kind === "containers") {
       if (method === "GET" && ref === "json") {
         const matches = labelFilter(url);
+        const raw = url.searchParams.get("filters");
+        const onNetworks = raw === null ? undefined : (JSON.parse(raw) as { network?: string[] }).network;
         return reply(
           200,
           [...containers.values()]
             .filter((c) => matches(c.Labels))
+            .filter((c) => onNetworks === undefined || onNetworks.some((n) => c.networks.has(findNetwork(n)?.Name ?? n)))
             .map((c) => ({ Id: c.Id, Names: [`/${c.Name}`], Image: c.Image, Labels: c.Labels, State: c.State.Status })),
         );
       }
@@ -236,11 +259,13 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           RestartCount: 0,
           index: counter,
           networks: new Map(),
+          endpoints: new Map(),
           mounts: (host.Mounts ?? []).map((m) => m.Source),
           logs: [],
         };
         containers.set(name, container);
-        for (const n of joined) connect(findNetwork(n) as FakeNetwork, container);
+        const asked = (input.NetworkingConfig as { EndpointsConfig?: Record<string, { Aliases?: string[] } | null> } | undefined)?.EndpointsConfig;
+        for (const n of joined) connect(findNetwork(n) as FakeNetwork, container, [...(asked?.[n]?.Aliases ?? [])]);
         return reply(201, { Id: container.Id, Warnings: [] });
       }
       const container = findContainer(ref);
@@ -253,7 +278,13 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           State: container.State,
           RestartCount: container.RestartCount,
           NetworkSettings: {
-            Networks: Object.fromEntries([...container.networks].map(([n, ip]) => [n, { IPAddress: ip }])),
+            Networks: Object.fromEntries(
+              [...container.networks].map(([n, ip]) => {
+                const endpoint = container.endpoints.get(n);
+                const names = endpoint?.aliases == null ? {} : { Aliases: endpoint.aliases, DNSNames: [container.Name, ...endpoint.aliases] };
+                return [n, { IPAddress: ip, NetworkID: endpoint?.networkId ?? "", ...names }];
+              }),
+            ),
           },
         });
       }
@@ -276,6 +307,18 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
       };
       if (method === "POST" && action === "start") {
         if (container.State.Running) return reply(304);
+        // A stored attachment is looked up by the id recorded for it, by name when none was recorded yet.
+        const found = [...container.endpoints].map(([n, endpoint]) => ({
+          endpoint,
+          wanted: endpoint.networkId === "" ? n : endpoint.networkId,
+          network: endpoint.networkId === "" ? networks.get(n) : [...networks.values()].find((x) => x.Id === endpoint.networkId),
+        }));
+        const gone = found.find((f) => f.network === undefined);
+        if (gone !== undefined) return reply(404, { message: `network ${gone.wanted} not found` });
+        for (const f of found) {
+          f.endpoint.networkId = (f.network as FakeNetwork).Id;
+          (f.network as FakeNetwork).members.add(container.Name);
+        }
         run();
         return reply(204);
       }

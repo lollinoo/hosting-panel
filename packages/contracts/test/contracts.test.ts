@@ -113,9 +113,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 44 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(44);
-    expect(new Set(PERMISSION_KEYS).size).toBe(44);
+  it("defines exactly 46 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(46);
+    expect(new Set(PERMISSION_KEYS).size).toBe(46);
     expect(PERMISSION_KEYS[PERMISSION_KEYS.indexOf("site.backups.manage") + 1]).toBe(
       "site.certificates.manage",
     );
@@ -1159,7 +1159,7 @@ describe("@hosting-panel/contracts — Panel mail IPC", () => {
   };
 
   it("accepts a reset link of 43 url-safe characters", () => {
-    expect(PANEL_MAIL_KINDS).toEqual(["password_reset"]);
+    expect(PANEL_MAIL_KINDS).toEqual(["password_reset", "notification"]);
     expect(PanelMailIpcRequestSchema.parse(valid)).toEqual(valid);
   });
 

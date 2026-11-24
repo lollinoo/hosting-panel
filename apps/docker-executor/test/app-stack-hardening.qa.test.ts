@@ -140,8 +140,23 @@ const FORBIDDEN_TOP_KEYS = [
   "OnBuild", "StopSignal", "Shell", "AttachStdin", "AttachStdout", "AttachStderr", "Tty", "OpenStdin", "StdinOnce",
 ] as const;
 
-/** Every property of the designed body (arch-executor §5.4) for one component of `plan`. */
-function expectHardenedBody(body: AppStackContainerCreatePayload, plan: ApprovedStackPlan, key: string, root = ROOT): void {
+/** The temporary areas written out, not derived: /tmp for every image, and one more only for the image whose row in the
+ *  real allowlist declares it (ADR-0039: the directory of PostgreSQL's socket). A test allowlist declares none. */
+function expectedTmpfs(image: string, allowlist: readonly AppImageAllowlistEntry[] | undefined): Record<string, string> {
+  const base = { "/tmp": "rw,noexec,nosuid,nodev,size=64m" };
+  if (allowlist !== undefined || !image.startsWith("docker.io/library/postgres@")) return base;
+  return { ...base, "/run/postgresql": "rw,noexec,nosuid,nodev,size=1m" };
+}
+
+/** Every property of the designed body (arch-executor §5.4) for one component of `plan`. `allowlist` is the one the
+ *  body was built under (none: the real one). */
+function expectHardenedBody(
+  body: AppStackContainerCreatePayload,
+  plan: ApprovedStackPlan,
+  key: string,
+  root = ROOT,
+  allowlist?: readonly AppImageAllowlistEntry[],
+): void {
   const c = plan.components.find((component) => component.key === key);
   if (c === undefined) throw new Error("fixture: unknown component");
   const host = body.HostConfig as Record<string, unknown>;
@@ -167,7 +182,7 @@ function expectHardenedBody(body: AppStackContainerCreatePayload, plan: Approved
   expect(Number.isSafeInteger(host.Memory)).toBe(true);
   expect(host.NanoCpus).toBe(c.resources.cpuMilli * 1_000_000);
   expect(host.LogConfig).toStrictEqual({ Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } });
-  expect(host.Tmpfs).toStrictEqual({ "/tmp": "rw,noexec,nosuid,nodev,size=64m" });
+  expect(host.Tmpfs).toStrictEqual(expectedTmpfs(c.image, allowlist));
   expect(host.RestartPolicy).toStrictEqual({ Name: "unless-stopped" });
   expect(body.StopTimeout).toBe(10);
 
@@ -214,8 +229,8 @@ function expectHardenedBody(body: AppStackContainerCreatePayload, plan: Approved
     ...c.secretFiles.map((s) => `${s.envName}=/run/secrets/${s.parameterKey}`),
   ]);
 
-  // the belt-and-braces check accepts the body
-  assertAppStackPayloadHardening(body, { secretsRootDir: root });
+  // the belt-and-braces check accepts the body, under the allowlist it was built with
+  assertAppStackPayloadHardening(body, { secretsRootDir: root, ...(allowlist === undefined ? {} : { allowlist }) });
 }
 
 describe("container body hardening matrix (builder)", () => {
@@ -229,6 +244,21 @@ describe("container body hardening matrix (builder)", () => {
   it.each(variants.map((v) => [label(v), v] as const))("holds every property: %s", (_name, v) => {
     const plan = planFor(v);
     expectHardenedBody(buildAppStackContainerCreatePayload(plan, KEY, ctx), plan, KEY);
+  });
+
+  it("gives a second temporary area to one image name only, and only under the real allowlist", () => {
+    const areas = (image: string, allowlist?: readonly AppImageAllowlistEntry[]) => {
+      const plan = planFor({ image, user: true, argv: false, mounts: "none", secrets: "none", edge: false });
+      return buildAppStackContainerCreatePayload(plan, KEY, { ...ctx, ...(allowlist === undefined ? {} : { allowlist }) }).HostConfig.Tmpfs ?? {};
+    };
+    for (const image of [...CAP_TRAP_IMAGES, "docker.io/library/postgres", "docker.io/library/mariadb"]) {
+      expect(Object.keys(areas(image)).sort()).toStrictEqual(image === "docker.io/library/postgres" ? ["/run/postgresql", "/tmp"] : ["/tmp"]);
+      expect(Object.keys(areas(image, [{ repository: image, runAsUser: USER, note: "QA hardening matrix image." }]))).toStrictEqual(["/tmp"]);
+    }
+    expect(areas("docker.io/library/postgres")).toStrictEqual({
+      "/tmp": "rw,noexec,nosuid,nodev,size=64m",
+      "/run/postgresql": "rw,noexec,nosuid,nodev,size=1m",
+    });
   });
 
   it.each(CAP_TRAP_IMAGES.map((image) => [image] as const))(
@@ -415,7 +445,7 @@ async function deployVariant(v: Variant) {
   await engine.prepareAppStack({ plan });
   await engine.createAppStackComponents({ plan });
   await engine.startAppStackComponent({ plan, componentKey: KEY, secretFileContents: unique });
-  return { plan, fake, engine, secretsRootDir, unique };
+  return { plan, fake, engine, secretsRootDir, unique, allowlist };
 }
 
 const ENGINE_ROWS: Variant[] = [
@@ -431,12 +461,12 @@ const ENGINE_ROWS: Variant[] = [
 
 describe("engine create bodies and secret files (A8, A11)", () => {
   it.each(ENGINE_ROWS.map((v) => [label(v), v] as const))("sends a hardened body and no secret value anywhere: %s", async (_name, v) => {
-    const { plan, fake, secretsRootDir, unique } = await deployVariant(v);
+    const { plan, fake, secretsRootDir, unique, allowlist } = await deployVariant(v);
     const [createKey] = [...fake.bodies.keys()].filter((line) => line.startsWith("POST /containers/create"));
     expect(createKey).toBeDefined();
     const sent = fake.bodies.get(createKey as string) as AppStackContainerCreatePayload[];
     expect(sent).toHaveLength(1);
-    expectHardenedBody(sent[0] as AppStackContainerCreatePayload, plan, KEY, secretsRootDir);
+    expectHardenedBody(sent[0] as AppStackContainerCreatePayload, plan, KEY, secretsRootDir, allowlist);
 
     // the Engine now holds this body as the container's config: Config.Env is its Env
     const stored = fake.containers.get(`hp_app_${ID}_${KEY}`)?.body as AppStackContainerCreatePayload;
@@ -514,11 +544,12 @@ describe("engine create bodies and secret files (A8, A11)", () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), "hp-app-hardening-"));
     cleanups.push(() => rm(parent, { recursive: true, force: true }));
     const secretsRootDir = path.join(parent, "secrets");
+    const allowlist: readonly AppImageAllowlistEntry[] = [{ repository: "redis", runAsUser: USER, note: "QA hardening matrix image." }];
     const engine = new AppStackEngine({
       request: fake.request,
       secretsRootDir,
       pullMissingImages: true,
-      allowlist: [{ repository: "redis", runAsUser: USER, note: "QA hardening matrix image." }],
+      allowlist,
       routes: { write: vi.fn(async () => ({ changed: false, hostnames: [] as string[] })), remove: vi.fn(async () => false), read: vi.fn(async () => []) },
       proxy: { containerName: "hp_ingress_proxy_test", ensure: vi.fn(async () => undefined) },
       readLogs: vi.fn(async () => []),
@@ -534,7 +565,7 @@ describe("engine create bodies and secret files (A8, A11)", () => {
     for (const key of ["cache", "web"]) {
       const sent = fake.bodies.get(`POST /containers/create?name=hp_app_${ID}_${key}`) as AppStackContainerCreatePayload[];
       expect(sent).toHaveLength(1);
-      expectHardenedBody(sent[0] as AppStackContainerCreatePayload, plan, key, secretsRootDir);
+      expectHardenedBody(sent[0] as AppStackContainerCreatePayload, plan, key, secretsRootDir, allowlist);
     }
     expect(JSON.stringify([...fake.bodies.entries()])).not.toContain("CACHE-ONLY-TOKEN");
     expect(await readdir(secretsRootDir)).toStrictEqual([`app_${ID}__cache`]);

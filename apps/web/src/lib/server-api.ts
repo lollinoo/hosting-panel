@@ -24,6 +24,7 @@ import type {
   HostDaemonHeartbeatDto,
   RuntimeBackend,
   MailRelaySettingsDto,
+  NotificationSettingsDto,
   DnsProviderSettingsDto,
   BackupSettingsDto,
   AdminSiteBackupStatusDto,
@@ -47,6 +48,7 @@ import type {
   AdminAppTemplateDetailDto,
   AdminAppTemplateVersionDto,
   AdminAppTemplateUsageDto,
+  AdminAppStackDto,
   AdminAppStacksDto,
   CustomerAppTemplatesDto,
   CustomerAppTemplateDto,
@@ -55,6 +57,7 @@ import type {
   AppStackDeploymentDto,
   AppStackDomainDto,
   AppStackBackupsDto,
+  AppStackLinksDto,
   AppStackTaskDto,
   AppStackTasksDto,
 } from "@hosting-panel/contracts";
@@ -219,6 +222,16 @@ export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto 
   return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
 }
 
+export async function fetchServerAdminNotifications(): Promise<NotificationSettingsDto | null> {
+  return orNull(await serverGet<NotificationSettingsDto>("v1/admin/notifications"));
+}
+
+/** The whole result: a customer without the permission gets 403, and the page says so instead of an error. */
+export async function fetchServerOrgNotifications(orgId: string): Promise<ServerResult<NotificationSettingsDto>> {
+  if (!isValidPathSegment(orgId)) return { ok: false, outcome: "notFound" };
+  return serverGet<NotificationSettingsDto>(`v1/organizations/${orgId}/notifications`);
+}
+
 export async function fetchServerAdminDnsProvider(): Promise<DnsProviderSettingsDto | null> {
   return orNull(await serverGet<DnsProviderSettingsDto>("v1/admin/dns-provider"));
 }
@@ -333,6 +346,12 @@ export async function fetchServerAdminAppStacks(): Promise<ServerResult<AdminApp
   return serverGet<AdminAppStacksDto>("v1/admin/app-stacks");
 }
 
+/** One customer's application for the server administrator (ADR-0041): who it belongs to and its components. */
+export async function fetchServerAdminAppStack(stackId: string): Promise<ServerResult<AdminAppStackDto>> {
+  if (!segments(stackId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppStackDto>(`v1/admin/app-stacks/${enc(stackId)}`);
+}
+
 export async function fetchServerOrgAppTemplates(orgId: string): Promise<ServerResult<CustomerAppTemplatesDto>> {
   return serverGet<CustomerAppTemplatesDto>(`v1/organizations/${enc(orgId)}/app-templates`);
 }
@@ -368,6 +387,12 @@ export async function fetchServerOrgAppStackDomains(orgId: string, stackId: stri
 export async function fetchServerOrgAppStackBackups(orgId: string, stackId: string): Promise<AppStackBackupsDto | null> {
   if (!segments(stackId)) return null;
   return orNull(await serverGet<AppStackBackupsDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/backups`));
+}
+
+/** The databases an application uses, or the applications that use a database. */
+export async function fetchServerOrgAppStackLinks(orgId: string, stackId: string): Promise<AppStackLinksDto | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackLinksDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/links`));
 }
 
 /** The tasks of the installed version (ADR-0042); null when the read failed. */

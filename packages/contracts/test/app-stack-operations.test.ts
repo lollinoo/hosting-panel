@@ -93,6 +93,6 @@ describe("application stack operations", () => {
     for (const prefix of Object.values(APP_ID_PREFIXES)) {
       expect(`${prefix}_0123456789abcdef01234567`).toMatch(APP_STACK_ID_PATTERN);
     }
-    expect(Object.values(APP_ID_PREFIXES)).toEqual(["atpl", "atv", "stk", "srev", "sdep", "sdom", "ssec", "sbak", "sbkc", "srun"]);
+    expect(Object.values(APP_ID_PREFIXES)).toEqual(["atpl", "atv", "stk", "srev", "sdep", "sdom", "ssec", "sbak", "sbkc", "slnk", "srun"]);
   });
 });

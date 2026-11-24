@@ -8,12 +8,14 @@ import {
   AppStackComponentsRemoveIpcRequestSchema,
   AppStackCreateIpcRequestSchema,
   AppStackImageResolveIpcRequestSchema,
+  AppStackLinksIpcRequestSchema,
   AppStackLogsIpcRequestSchema,
   AppStackPlanIpcRequestSchema,
   AppStackPullIpcRequestSchema,
   AppStackRefIpcRequestSchema,
   AppStackRemoveIpcRequestSchema,
   AppStackRoutesIpcRequestSchema,
+  AppStackTerminalOpenIpcRequestSchema,
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
@@ -58,6 +60,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
+  isAppStackTerminalExecutor,
   isStackExecutor,
   type DockerExecutionResult,
   type DockerExecutorPort,
@@ -634,6 +637,17 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      // A terminal in one component of an application (ADR-0041). It is its own optional port, so it is answered here,
+      // before the application routes; the session then lives with the sites' ones (write, read, close and list below).
+      if (method === "POST" && pathname === "/v1/app-stacks/terminal/open") {
+        if (!isAppStackTerminalExecutor(this.executor)) {
+          throw new ExecutorCodedError("Application terminals are not supported by the active executor backend", "NOT_SUPPORTED");
+        }
+        const req = this.parseBody(AppStackTerminalOpenIpcRequestSchema, rawBody, "application terminal open");
+        writeJson(res, 200, { data: await this.executor.openAppStackTerminal(req) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/terminal/write") {
         // The schema's messages are fixed sentences, so a refusal never carries the input.
         const req = this.parseBody(TerminalWriteIpcRequestSchema, rawBody, "terminal write");
@@ -812,6 +826,8 @@ export class DockerExecutorIpcServer {
           return post(AppStackRemoveIpcRequestSchema, "remove", (s, req) => s.removeAppStack(req));
         case "/v1/app-stacks/remove-components":
           return post(AppStackComponentsRemoveIpcRequestSchema, "remove-components", (s, req) => s.removeAppStackComponents(req));
+        case "/v1/app-stacks/links":
+          return post(AppStackLinksIpcRequestSchema, "links", (s, req) => s.syncAppStackLinks(req));
         default:
           return null;
       }

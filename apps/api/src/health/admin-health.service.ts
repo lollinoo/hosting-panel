@@ -64,6 +64,16 @@ type Part = AdminHealthDto["components"][number];
 type HeartbeatRow = typeof hostAgentHeartbeats.$inferSelect;
 type DownSite = { siteId: string; siteName: string; observed: AdminHealthDto["siteContainers"][number]["observed"]; since: string };
 
+/** The open alerts, and what this look could not see. */
+export interface AlertObservation {
+  readonly alerts: AdminAlertDto[];
+  /**
+   * Alerts whose absence says nothing, as `<kind>:<subject>`, or a bare kind when no subject of it could be read:
+   * the part that reports them did not answer, or the alert is held back while a restart or a deploy runs.
+   */
+  readonly unseen: ReadonlySet<string>;
+}
+
 const PanelContainersSnapshotSchema = z.object({ containers: z.array(PanelContainerStatusWireSchema) });
 const DisksSnapshotSchema = z.object({ disks: z.array(HostDiskWireSchema) });
 const HOST_SERVICES_READ_MS = 3_000;
@@ -115,9 +125,16 @@ export class AdminHealthService {
 
   /** Open alerts, critical first. */
   public async alerts(now = new Date()): Promise<AdminAlertDto[]> {
+    return (await this.observe(now)).alerts;
+  }
+
+  /** The open alerts, critical first, with the ones this look cannot call closed (ADR-0040 N4). */
+  public async observe(now = new Date()): Promise<AlertObservation> {
     const db = this.dbClient.db;
-    const { health, downSites } = await this.#read(now);
+    const { health, downSites, unseenSites, disksRead } = await this.#read(now);
     const alerts: AdminAlertDto[] = [];
+    const unseen = new Set<string>(unseenSites.map((siteId) => `site_container_down:${siteId}`));
+    if (!disksRead) unseen.add("disk_high");
     const push = <A extends AdminAlertDto>(a: Omit<A, "severity"> & { severity?: A["severity"] }) =>
       alerts.push({ severity: ALERT_SEVERITY[a.kind], ...a } as A);
 
@@ -137,6 +154,9 @@ export class AdminHealthService {
     for (const c of health.components) {
       if ((c.state === "down" || c.state === "degraded") && !restarting(c)) {
         push({ kind: "component_down", subject: c.component, since: c.observedAt, details: { component: c.component, state: c.state, reason: c.reason } });
+      } else if (c.state !== "ok" && c.state !== "not_in_use") {
+        // Unknown, or down while its restart runs: not an alert, and not the end of one either.
+        unseen.add(`component_down:${c.component}`);
       }
     }
     for (const s of downSites) {
@@ -236,10 +256,10 @@ export class AdminHealthService {
     }
 
     const rank = (a: AdminAlertDto) => (a.severity === "critical" ? 0 : 1) * ALERT_KINDS.length + ALERT_KINDS.indexOf(a.kind);
-    return alerts.sort((a, b) => rank(a) - rank(b) || (a.since ?? "￿").localeCompare(b.since ?? "￿"));
+    return { alerts: alerts.sort((a, b) => rank(a) - rank(b) || (a.since ?? "￿").localeCompare(b.since ?? "￿")), unseen };
   }
 
-  async #read(now: Date): Promise<{ health: AdminHealthDto; downSites: DownSite[] }> {
+  async #read(now: Date): Promise<{ health: AdminHealthDto; downSites: DownSite[]; unseenSites: string[]; disksRead: boolean }> {
     const db = this.dbClient.db;
     const disabled = this.config.runtimeBackend === "disabled";
     const generatedAt = now.toISOString();
@@ -314,6 +334,8 @@ export class AdminHealthService {
       .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
     const downSites: DownSite[] = [];
+    // Sites whose container nobody looked at lately, or whose alert is held back while they deploy or are in maintenance.
+    const unseenSites: string[] = [];
     const siteContainers = siteRows.map((s) => {
       const obs = s.obs;
       const reason = obs
@@ -322,6 +344,7 @@ export class AdminHealthService {
       const raw = (obs?.rawState ?? {}) as { restartCount?: unknown; notRunningSince?: unknown; lastRestartAt?: unknown };
       const stale = !obs || now.getTime() - obs.observedAt.getTime() > HEALTH_STALE_AFTER_MS;
       const since = typeof raw.notRunningSince === "string" ? raw.notRunningSince : null;
+      if (stale || s.siteStatus === "deploying" || s.siteStatus === "maintenance") unseenSites.push(s.siteId);
       // R189 1.3: seen running while the clock runs means restarting.
       const observed = obs?.observedStatus === "running" && since !== null ? "degraded"
         : SITE_CONTAINER_STATES.find((x) => x === obs?.observedStatus) ?? "unknown";
@@ -356,6 +379,6 @@ export class AdminHealthService {
       engine,
       ...containerParts,
     ];
-    return { health: { generatedAt, components, siteContainers, disks, hostServices: null }, downSites };
+    return { health: { generatedAt, components, siteContainers, disks, hostServices: null }, downSites, unseenSites, disksRead: disksParsed?.success === true };
   }
 }

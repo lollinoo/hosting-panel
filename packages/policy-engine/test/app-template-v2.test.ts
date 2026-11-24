@@ -405,6 +405,14 @@ describe("secrets in the environment", () => {
     refused(document, code, path);
   });
 
+  // ADR-0041 §4: the marks of the platform's processes are refused in the text around a secret, as in any other value.
+  it.each(["HP_TERMINAL_SESSION=${db_password}", "x${db_password}HP_TASK_RUN=1", "${db_password}${api_token}HP_TERMINAL_SESSION=term_"])(
+    "refuses the mark of a platform process beside a secret reference: %s",
+    (value) => {
+      refused(build([env(1, "value"), value]), "ENV_VALUE_PROCESS_MARK", "services.web.environment[1].value");
+    },
+  );
+
   it("lets a value that carries a secret have a name that looks like one", () => {
     expect(validateAppTemplate(build([env(1, "name"), "DATABASE_PASSWORD"])).ok).toBe(true);
     expect(validateAppTemplate(build([env(2, "name"), "ADMIN_SECRET_KEY"])).ok).toBe(true);
@@ -566,6 +574,14 @@ describe("compiling a v2 source", () => {
     if (result.ok) throw new Error("expected the compile to be refused");
     expect(result.issues.map(({ path, code }) => ({ path, code }))).toEqual([{ path: "parameters.site_title", code: "RENDERED_VALUE_FORBIDDEN" }]);
     expect(JSON.stringify(result.issues)).not.toContain("docker.sock");
+  });
+
+  it("refuses a customer value that turns the text around a secret into the mark of a platform process", () => {
+    const source = edit(SOURCE, '"postgres://blog:${db_password}@db:5432/${site_title}"', '"x${site_title}=${db_password}"');
+    expect(compileAppStackPlan(input({ source })).ok).toBe(true);
+    const result = compileAppStackPlan(input({ source, parameters: [{ key: "site_title", value: "HP_TASK_RUN" }] }));
+    if (result.ok) throw new Error("expected the compile to be refused");
+    expect(result.issues.map(({ path, code }) => ({ path, code }))).toEqual([{ path: "parameters.site_title", code: "RENDERED_VALUE_FORBIDDEN" }]);
   });
 
   it("leaves out every variable of an optional secret nobody set, and needs the required ones", () => {

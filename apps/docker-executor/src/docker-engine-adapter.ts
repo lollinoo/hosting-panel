@@ -58,8 +58,11 @@ import {
   type AppStackCreateIpcResult,
   type AppStackImageResolveIpcRequest,
   type AppStackImageResolveIpcResult,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
+  type AppStackTerminalOpenIpcRequest,
   type AppStackPrepareIpcResult,
   type AppStackPullIpcRequest,
   type AppStackPullIpcResult,
@@ -95,6 +98,7 @@ import {
   type SiteJobRequest,
   type SiteJobResult,
   type SiteRoutesRequest,
+  type AppStackTerminalPort,
   type StackExecutorPort,
   type StackTaskExecutorPort,
   type TerminalEnded,
@@ -114,7 +118,7 @@ import {
 } from "./phpmyadmin-platform.js";
 import type { DockerExecTarget } from "./docker-exec.js";
 import { PANEL_RESTART_STOP_SECONDS, restartContainerByName } from "./panel-restart.js";
-import { reapTerminalShells, startDockerTerminal } from "./terminal-docker.js";
+import { reapAppStackTerminalShells, reapTerminalShells, startAppStackTerminal, startDockerTerminal } from "./terminal-docker.js";
 import { type TerminalLimits, TerminalSessions } from "./terminal-sessions.js";
 import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
 import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
@@ -1284,7 +1288,7 @@ interface ManualColdInput {
 const ACME_PLAN_READ_RETRIES = 3;
 const ACME_PLAN_READ_RETRY_MS = 50;
 
-export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecutorPort, StackTaskExecutorPort {
+export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly dockerClient: DockerSocketHttpClient;
   private readonly secretsRootDir: string;
@@ -1570,6 +1574,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
 
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
     return this.appStackEngine.removeAppStackComponents(req);
+  }
+
+  public syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    return this.appStackEngine.syncAppStackLinks(req);
   }
 
   public getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {
@@ -3551,10 +3559,29 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     return this.terminals.list();
   }
 
-  /** At start: ends the shells a previous executor left in site containers, as each type's file owner. */
+  /** At start: ends the shells a previous executor left in site containers, as each type's file owner, and in components. */
   public async reapTerminalShells(): Promise<void> {
-    // A site container does not carry its type, so each type's user ends the shells it owns.
-    for (const key of SITE_TYPE_KEYS) await reapTerminalShells(this.execTarget, this.resolveSiteType(key));
+    let failure: unknown = null;
+    try {
+      // A site container does not carry its type, so each type's user ends the shells it owns.
+      for (const key of SITE_TYPE_KEYS) await reapTerminalShells(this.execTarget, this.resolveSiteType(key));
+    } catch (err) {
+      failure = err; // the components are cleaned all the same
+    }
+    // A component's shells end as the user the component runs as (ADR-0041).
+    await reapAppStackTerminalShells(this.execTarget);
+    if (failure !== null) throw failure;
+  }
+
+  /**
+   * /bin/sh in the container of one component of an application (ADR-0041). The request names no container: the name is
+   * derived here, the labels are checked, and the exec sets no user and no folder. No Docker id is returned.
+   */
+  public async openAppStackTerminal(req: AppStackTerminalOpenIpcRequest): Promise<TerminalOpenResult> {
+    return this.terminals.open(req, async (sink) => {
+      const { id } = await this.appStackEngine.findAppStackComponentContainer(req);
+      return startAppStackTerminal(this.execTarget, id, req.sessionId, sink);
+    });
   }
 
   /** The image each panel container is pinned to. */

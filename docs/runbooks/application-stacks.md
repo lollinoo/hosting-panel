@@ -4,7 +4,8 @@ Operator procedures for application stacks (`ADR-0035`). Design record:
 `docs/architecture/adr/0035-application-stacks.md`. Acceptance evidence and what is still pending:
 `docs/security/hcp-spec-005-acceptance-report.md`. The routing options of a stack's addresses (`ADR-0037`,
 `docs/architecture/adr/0037-application-routing-options.md`) are procedure 10. Backup and restore of an application
-(`ADR-0038`): `docs/architecture/adr/0038-application-backups.md`.
+(`ADR-0038`): `docs/architecture/adr/0038-application-backups.md`. Databases and the private links between a database
+and an application (`ADR-0039`, `docs/architecture/adr/0039-application-databases.md`) are in procedure 12.
 
 `<stackId>` is the id in the address of the application page (`/apps/<stackId>`, it starts with `stk_`);
 `<componentKey>` and `<volumeKey>` are the names the template gives a component and a volume. The database commands
@@ -28,8 +29,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   someone creates a backup from its page (procedure 11); no backup of an application runs on a schedule.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
   `app.create`, `app.update`, `app.control`, `app.delete`). The server administrator's console has the template catalog
-  (**Modelli**, kind «Applicazione multi-servizio») and a read-only list of every stack in **Applicazioni**; it has no
-  stack actions; collaborators and support access have no stack permission.
+  (**Modelli**, kind «Applicazione multi-servizio») and the list of every stack in **Applicazioni**. A row opens the
+  stack's page, where the administrator reads a component's logs and opens a terminal in it (procedures 13 and 14,
+  `ADR-0041`). The administrator cannot start, stop, change or delete a customer's stack from that page; collaborators
+  and support access have no stack permission.
 - **Never run `docker rm`, `docker volume rm`, `docker network rm` or any `prune` on a stack's objects by hand**, except
   where a step below says so. The panel owns them; removing one by hand leaves the panel's view wrong.
 - **Stack data is in no backup unless someone creates one.** The site and panel backups (S3 or local) do not include
@@ -159,7 +162,7 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026` and `0027` are additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026`, `0027`, `0028` and `0030` are additive.
 6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
    knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
    with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
@@ -192,6 +195,16 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    period, or keep the current release. With `--allow-feature-loss` the older release has no code for these backups: it
    does not list, restore or remove them. Their rows stay in the database and their copies on the destinations, and
    the database still refuses to delete a destination that holds one.
+9. The links between a database and an application (procedure 12) are a feature of their own, `app-stack-links`:
+   the same command exits with **code 8** while a row exists in `app_stack_links`, whatever its state, and the
+   target release does not list that feature. See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, consumer_stack_id, provider_stack_id, state from app_stack_links"
+   ```
+   To go back without forcing: the customer presses **Scollega** on each link, and the query lists nothing once the
+   server has confirmed. With `--allow-feature-loss` the older release does not know the links: a database stays
+   attached only until its container is replaced, nothing attaches it again, and an application cannot be deleted
+   while a running database is still attached to its private network (`STACK_NAMESPACE_CONFLICT`).
 
 ## 4a. Tasks of an application (ADR-0042)
 
@@ -284,6 +297,9 @@ names only the key of a task, and the command is read from the template version 
    **Ripristina**, procedure 11) **was not tried**: `ADR-0038` leaves it out of scope. Try it on the application whose
    data matters least before relying on it.
 5. A `delete_failed` stack: delete it again from the panel (procedure 3).
+6. Links between a database and an application (procedure 12): the restore SQL sets every `active` link back to
+   `pending`, because the new server has no container to attach. Nothing needs doing by hand: a link becomes
+   `active` again by itself once the database and the application are both installed again.
 
 ## 6. Incident: a stack misbehaves
 
@@ -300,7 +316,8 @@ names only the key of a task, and the command is read from the template version 
 2. **Nobody installs it again.** In **Modelli**, open the template and switch off **Offerto ai clienti** (archive it if it is not built-in).
    Installed stacks keep running; a deploy or upgrade that needs a new revision of that template is refused
    (`STACK_TEMPLATE_UNPUBLISHED`).
-3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. For more:
+3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. A server
+   administrator reads the same masked lines without the customer (procedure 13). For more:
    `sudo docker logs --tail 500 hp_app_<stackId>_<componentKey>`; that output is **not** masked and may hold a secret
    value: never paste it into a ticket.
 4. What the panel never does for a stack: the drift reconciler never restarts or recreates a stack container; a stack
@@ -354,8 +371,12 @@ names only the key of a task, and the command is read from the template version 
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
    templates of the first format), `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
    template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
-   the images are local) and `infra/linux/accept-app-stack-backups.mjs` (backup and restore of an application,
-   `ADR-0038`). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
+   the images are local), `infra/linux/accept-app-stack-backups.mjs` (backup and restore of an application,
+   `ADR-0038`), `infra/linux/accept-app-stack-databases.mjs` (the three built-in databases and their private
+   links) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own
+   prefix is `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the
+   «Lavoro periodico con archivio» template on the machine: its `preflight` step fails and names the image when it is
+   missing). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
    next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
@@ -372,8 +393,9 @@ names only the key of a task, and the command is read from the template version 
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
    prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
-   throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
-   never prune, and clean up at the end, also on Ctrl-C.
+   throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`;
+   the databases script uses the same prefix for a temp folder and `/dev/shm/<prefix>-secrets` only: it starts no
+   proxy and creates no edge network), never prune, and clean up at the end, also on Ctrl-C.
    One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
    is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
    it (in Docker that label has another value, which the script's gate translates in both directions). The engine
@@ -394,8 +416,10 @@ names only the key of a task, and the command is read from the template version 
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
    for the template scripts, the test image or the backup tool's image for the backups script), it prints
-   `SKIP … nothing was created` and exits 1. Without a build a template script prints
-   `FAIL preflight: run corepack pnpm run build first`.
+   `SKIP … nothing was created` and exits 1. Without a build a template script and the databases script print
+   `FAIL preflight: run corepack pnpm run build first`. The databases script downloads nothing: when the image of a
+   built-in database is not on the server, its `preflight` step fails and names the missing images; fetch each first
+   (`docker pull <repository>@sha256:<digest>`, the references are in `ADR-0039`) and run it again.
 4. The last line is `RESULT <n>/<m> passed`, followed by `, <k> skipped (not counted in n/m)` when steps were skipped,
    and the time. The exit code is 0 only when every counted step passed.
 5. A `FAIL` of `gate-clean` means the script sent a Docker request the gate refused; that request never reached
@@ -613,3 +637,140 @@ approval.
     stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: hard links, extended
     attributes, file capabilities, device files, an S3 destination, two destinations at once. A copy is taken with the
     application stopped, so a database inside it is saved as its files on disk.
+
+## 12. Databases and private links
+
+1. A database is an application like the others, installed from a template of category `database`. Three come with
+   the panel, disabled until the server administrator publishes them: «Database MariaDB» (`atpl_mariadb`), «Database
+   PostgreSQL» (`atpl_postgresql`) and «Archivio Valkey» (`atpl_valkey`). A database has one component, one port and no
+   web address: nothing outside the server reaches it, and no other application does until it is linked to it.
+2. **Linking.** On the page of an application, section «Database», the customer picks one of their own databases and
+   presses **Collega**; the page of either side has **Scollega**. Both need `app.update`. A link joins two
+   applications of the same customer; an application has at most 4 databases and a database at most 8 applications.
+   The page of the database (section «Collegamento») shows the address and the port to type into the application.
+   The panel copies no address, user or password from one to the other: the customer does.
+3. **What a link is on the server.** The executor attaches the database's container to the private network of the
+   application, under the name `stk-<…>` (the database's id with `-` in place of `_`). Nothing else changes: no
+   container is restarted or recreated, no port is published, the proxy is not involved. What Docker has (read-only):
+   ```bash
+   sudo docker inspect hp_app_<databaseStackId>_<componentKey> --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{println}}{{end}}'
+   ```
+   It lists the database's own network (`hp_appnet_<databaseStackId>`) and one `hp_appnet_<stackId>` for each
+   application the database is attached to.
+4. **The state of a link.** What the panel recorded:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, consumer_stack_id, provider_stack_id, state, updated_at from app_stack_links order by provider_stack_id, created_at"
+   ```
+   `consumer_stack_id` is the application, `provider_stack_id` the database. `active` («Attivo»): the server
+   confirmed the attachment. `pending` («In attesa»): recorded, not confirmed. `removing` («Scollegamento in corso»):
+   the row goes away once the server has confirmed the detach. The panel brings the server to the rows by itself:
+   when a link is created or removed, at every installation, start or restart of the database or of an application
+   linked to it, and about once a minute for whatever still waits (at most 20 databases per pass, and no new database
+   after 45 seconds of the pass: the next pass begins with the databases it did not reach). There is no button to
+   retry, and none is needed. A backup of a database (procedure 11) stops it for the copy: the applications linked to
+   it cannot reach it until it runs again. Its links stay as they are (an attachment outlives a stop, and a link
+   call never starts a container), and the start that follows the backup applies them before the database runs.
+5. **A link that stays `pending`** is waiting for one of these: the database or the application has never been
+   installed (the database has no container, or the application has no private network yet); one of the two is in the
+   middle of an operation; the executor did not answer; the installed version of the database has more than one
+   component. A waiting link never fails or delays a start: the application starts without it and cannot reach the
+   database until the link is `active`. Check both applications (procedure 1) and the executor
+   (`sudo journalctl -u hp-docker-executor`).
+6. **Deleting.** A database that an application still uses cannot be deleted, and cannot move to a template version
+   that is not linkable (more than one component, or no single port): the panel answers `database_in_use`. Disconnect
+   it from every application first. Deleting an application removes its links; the executor detaches the databases
+   from its private network before it removes that network, and the databases keep running.
+7. **Never run `docker network connect` or `docker network disconnect` on a stack's container by hand.** The panel
+   does not notice: its state stays as it was until the next pass for that database (a link created or removed, a
+   start of the database or of one of its applications), which puts the server back to what the rows say.
+
+## 13. Administrator: the page and the logs of a customer's application
+
+Only a server administrator, and only where `applicationStacksAvailable` is `true` (`ADR-0041`). No support visit is
+needed, and a support visit gives none of this.
+
+1. **Amministrazione › Applicazioni**, then **Apri** on the application's row. The page (`/admin/apps/<stackId>`)
+   shows the customer, the template and its version, the status the customer sees, the web address («Nessun indirizzo
+   web» when the application has none) and every component with its last observed health. It shows no parameter, no
+   secret and no plan.
+2. **Registri** on that page: choose a component and read its last lines, 1 to 500. They are the lines the customer
+   sees on their own page, with the application's secret values masked.
+3. **Every read is recorded.** The audit action is `admin.app_stack.logs.read`, on the application, with the customer's
+   organisation, the component and the number of lines asked; it never holds a line that was read:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select timestamp, actor_id, organization_id, target_id, details from audit_events where action = 'admin.app_stack.logs.read' order by timestamp desc limit 20"
+   ```
+4. What the answers mean: `403` the caller is not a server administrator (also recorded); `422` applications are off
+   on this server; `404` the application is unknown or deleted, or it has no component of that name; `503` the
+   executor is not running.
+
+## 14. Administrator: a terminal in a component
+
+A text shell (`/bin/sh`) inside the container of one component, for a server administrator (`ADR-0041`). It is the
+terminal of the sites (`ADR-0027`) with a different place and a different user.
+
+1. **Open it.** On the application's page (procedure 13), **Terminale** on the component's row. The account needs
+   two-step authentication, and every open asks for a **new** six-digit code: a code already used, also for signing
+   in, is refused until the next one. Wrong codes count like the ones of a sign-in: the fifth locks the account for 15
+   minutes.
+2. **What the shell is.** It runs as the user the component runs as, in the component's own container: no capability,
+   a read-only base file system, the component's memory and process limits, only the component's volumes and networks.
+   The panel never opens a shell on the host and never starts a helper container for this. The tools are the ones in
+   the image, often very few; full-screen programs (editors, pagers, `top`) do not work. **Ctrl-C** stops a command,
+   **Ctrl-D** ends the shell, **Chiudi** ends the session.
+3. **What it can reach.** The secret files of the application in `/run/secrets`, and the secrets a template of the
+   extended format gives in the component's environment (the shell inherits it: `env` prints them), are readable from
+   the shell and are **not** masked: never paste what a session prints into a ticket. The shell can change the
+   application's data in its volumes; the panel records that a session took place, never what it did.
+4. **Limits, shared with the sites.** Four sessions on the server, counting sites and applications together; one per
+   component (two components of one application may each have one). A session ends by itself 60 seconds after the
+   page stops reading (tab closed or asleep) or 30 minutes after it was opened.
+5. **When an open is refused**, no code is spent unless the code itself was wrong:
+
+   | The page says | Reason | What to do |
+   | :--- | :--- | :--- |
+   | the component is not running | `container_down` | The application was never installed or is stopped: its customer starts it (**Avvia**), then try again. |
+   | the application is being changed | `site_changing` | An operation holds the application (install, start, stop, upgrade, delete). Wait for it. |
+   | a session is already open in this component | `site_busy` | Close that session, or wait 60 seconds after its page was closed. |
+   | the server has no free session | `server_full` | Four sessions are open on sites and applications. Close one. |
+   | the server cannot run applications now | `503` | The executor is stopped, or older than the API: `systemctl status hp-docker-executor`. |
+
+6. **How a session ends.** `closed` (the administrator), `shell_exited` (Ctrl-D or `exit`; also an image with no
+   `/bin/sh`, where the session ends at once), `idle`, `time_limit`, `container_gone` (the application was stopped,
+   restarted, upgraded, rolled back or deleted while the session was open: open a new one with a new code),
+   `executor_gone` (the executor stopped or was restarted), `not_started` (the executor refused the open). At every
+   end where the container is still there, the executor kills what the session started, also what was left in the
+   background with `&`, `nohup` or `setsid`; it never touches the component's own processes. In an image with no
+   `/bin/sh` the engine refuses that clean-up too (`OCI runtime exec failed`, exit 127 or 126): no shell ever ran
+   there, so the executor counts it as done and logs no `terminal_kill_failed`.
+7. **What is recorded.** `admin.terminal.open` and one `admin.terminal.close` per session, on the application, with the
+   component, the container's name, the duration and the reason; `admin.terminal.denied` for every refused code.
+   Nothing typed and nothing printed is stored or logged anywhere. The sessions and their audit rows:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, user_id, stack_id, component_key, opened_at, closed_at, close_reason from admin_terminal_sessions where stack_id is not null order by opened_at desc limit 20"
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select timestamp, action, actor_id, target_id, details from audit_events where target_type = 'app_stack' and action like 'admin.terminal.%' order by timestamp desc limit 20"
+   ```
+8. **After the executor was restarted.** Nothing to do. The open sessions end as `executor_gone`, and at its start the
+   executor kills what a session left in every running component that still has a command open, without restarting
+   any component. If that pass fails, the executor logs one line with `"event":"terminal_reap_failed"` and a code
+   (`journalctl -u hp-docker-executor`); it tries again at its next start. In a component whose own environment
+   spells the session's mark (step 10), that pass kills nothing: the executor logs one line with
+   `"event":"terminal_own_mark"` and the number of such components, and what a session left there stays until the
+   customer's **Riavvia**.
+9. **Known limits.** A process that deliberately leaves the session and removes the session's mark from its own
+   environment survives the end of the session; a background program can also survive when the executor dies within
+   one second after a shell ended by itself. Either stays inside the component's limits, and nobody is connected to
+   it: the customer's **Riavvia** on the application ends it. After a downgrade to the previous release, a shell left
+   in a component is not cleaned by the old executor (it cleans sites only): **Riavvia** ends it as well.
+10. **A value that holds a platform mark.** No value of an application (a setting, a private value, a template's text
+    or argument) may contain `HP_TERMINAL_SESSION=` or `HP_TASK_RUN=`: the clean-up finds what a session or a task run
+    started by that text, so a component that carried it could have its own programs killed (`ADR-0041` §4). Other
+    `HP_` or `PHP_` text is accepted. A new value is refused with its reason. A value made of two private values (an
+    environment secret of the extended format) is checked once joined too: when the two together form a mark, the
+    action that creates the component's container (install, **Reinstalla**, upgrade, rollback) fails with a generic
+    reason, and the executor logs one line with `"event":"app_stack_env_mark_refused"`, the application and the
+    component, never a value (`journalctl -u hp-docker-executor`); the customer replaces one of the two private
+    values, then presses **Reinstalla**. A revision or a private value saved before this rule that holds such text is
+    refused after the update: the application's page answers an error and a start is refused. Applications were first
+    switched on in release 0.10.0, so none is expected. If one exists, correct the value (the customer replaces a
+    private value from the application's page), or stop the application or delete it (procedure 3).

@@ -1,6 +1,8 @@
 import { z } from "zod";
+import { AppStackKeySchema } from "./app-templates/limits.js";
+import { AppEntityIdSchema } from "./app-templates/stack-ids.js";
 
-export const TERMINAL_SESSIONS_MAX = 4; // one per site is a rule, enforced in the repository
+export const TERMINAL_SESSIONS_MAX = 4; // sites and applications together; one per container is a rule, enforced in the repository
 export const TERMINAL_SESSION_MAX_MS = 30 * 60_000;
 export const TERMINAL_IDLE_MS = 60_000;
 export const TERMINAL_INPUT_MAX_BYTES = 4096;
@@ -30,9 +32,15 @@ export const ReadTerminalInputSchema = z.object({ cursor: z.number().int().min(0
 export const TerminalSessionDtoSchema = z.object({
   sessionId: TerminalSessionIdSchema, siteId: z.string(), containerName: z.string(), openedAt: Iso, expiresAt: Iso,
 }).strict();
+/** A session open in one component of an application (ADR-0041); the site DTO above does not change. */
+export const AppTerminalSessionDtoSchema = z.object({
+  sessionId: TerminalSessionIdSchema, stackId: AppEntityIdSchema, componentKey: AppStackKeySchema,
+  containerName: z.string(), openedAt: Iso, expiresAt: Iso,
+}).strict();
 export const TerminalEndedSchema = z.object({ reason: z.enum(TERMINAL_END_REASONS), at: Iso }).strict();
 export const TerminalReadDtoSchema = z.object({
   output: z.string(), cursor: z.number().int().min(0), dropped: z.boolean(), ended: TerminalEndedSchema.nullable(),
 }).strict();
 export type TerminalSessionDto = z.infer<typeof TerminalSessionDtoSchema>;
+export type AppTerminalSessionDto = z.infer<typeof AppTerminalSessionDtoSchema>;
 export type TerminalReadDto = z.infer<typeof TerminalReadDtoSchema>;

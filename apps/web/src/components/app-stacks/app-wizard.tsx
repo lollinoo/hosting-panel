@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  APP_STACK_PROCESS_MARK_PATTERN,
   APP_TEMPLATE_LIMITS,
   AppStackDomainEntrySchema,
   MAX_APP_STACK_DOMAINS,
@@ -145,6 +146,13 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     if (step === "configure") {
       if (!name.trim()) errors.name = t.required;
       for (const k of missingSecretKeys(params, new Set(typedSecrets))) errors[`param:${k}`] = t.required;
+      // The server refuses a platform mark with no reason a page can show: say it here (ADR-0041).
+      for (const k of typedSecrets) {
+        if (APP_STACK_PROCESS_MARK_PATTERN.test(secretValues.current.get(k) ?? "")) errors[`param:${k}`] = t.valueReserved;
+      }
+      for (const [k, v] of Object.entries(inputs)) {
+        if (typeof v === "string" && APP_STACK_PROCESS_MARK_PATTERN.test(v)) errors[`param:${k}`] = t.valueReserved;
+      }
     }
     if (step === "domains") {
       // The same hostname rules the server applies, so a refusal never lands on a step without the field.

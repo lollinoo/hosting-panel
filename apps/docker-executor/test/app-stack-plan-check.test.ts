@@ -19,7 +19,7 @@ import {
   assertExecutableAppStackPlan,
   isOwnAppStackResource,
 } from "../src/app-stacks/index.js";
-import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
+import { TEST_ALLOWLIST, appStackTestPlan, appStackTestPlanV2, rehash } from "./support/app-stack-plans.js";
 
 const plan = appStackTestPlan();
 const [web, worker] = plan.components as [ApprovedStackPlan["components"][number], ApprovedStackPlan["components"][number]];
@@ -182,6 +182,14 @@ describe("assertExecutableAppStackPlan", () => {
     ["9 components", () => rehash({ ...plan, volumes: [], ingress: [], components: Array.from({ length: 9 }, (_, i) => ({ ...web, key: `c${i}` })) }), "components"],
     ["a /tmp mount", () => withComponents(web, { ...worker, volumes: [{ volumeKey: "data", containerPath: "/tmp", readOnly: false }] }), "components.1.volumes.0.containerPath"],
     ["sh as argv[0]", () => withComponents(web, { ...worker, argv: ["sh", "-c", "worker"] }), "components.1.argv.0"],
+    // ADR-0041: the executor does not trust the API to keep a terminal's mark out of a component's environment.
+    [
+      "a terminal's mark in an env value",
+      () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "x HP_TERMINAL_SESSION=term_" }] }, worker),
+      "components.0.environment.0.value",
+    ],
+    ["a task run's mark in an env value", () => withComponents({ ...web, environment: [{ name: "APP_MODE", value: "xHP_TASK_RUN=srun_1" }] }, worker), "components.0.environment.0.value"],
+    ["a task run's mark in argv", () => withComponents(web, { ...worker, argv: ["worker", "HP_TASK_RUN=srun_1"] }), "components.1.argv.1"],
   ])("A12: %s is refused before Docker", (_name, build, at) => {
     expect(refusal(check(build()))).toEqual({
       reason: "STACK_PLAN_INVALID",
@@ -189,6 +197,14 @@ describe("assertExecutableAppStackPlan", () => {
       message: `The application plan is invalid at ${at}`,
     });
   });
+
+  it.each(["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "SHP_X=1", "HP_HOME=/x", "ends with HP_TERMINAL_"])(
+    "accepts %j in an env value and in argv: only the marks of the platform's processes are refused",
+    (text) => {
+      const accepted = withComponents({ ...web, environment: [{ name: "APP_MODE", value: text }] }, { ...worker, argv: ["worker", text] });
+      expect(check(accepted)()).toEqual(accepted);
+    },
+  );
 
   it("refuses a component whose hp_app_<stackId>_<key> name would not fit one DNS label", () => {
     const named = (idLength: number) =>
@@ -238,6 +254,33 @@ describe("assertExecutableAppStackPlan", () => {
     const expected = { reason: "STACK_PLAN_HASH_MISMATCH", code: "HOST_POLICY_DENIED", message: "The application plan does not match its hash" };
     expect(refusal(check(tampered))).toEqual(expected);
     expect(refusal(check({ ...plan, planHash: "f".repeat(64) }))).toEqual(expected);
+  });
+
+  // ADR-0039: the rows of the database images are written in full. A stored plan of the WordPress template of release
+  // 0.10.0 names `mariadb` short with the image's own user, and must stay executable.
+  describe("with the code allowlist, a database image is judged by its name exactly as written", () => {
+    const v2 = appStackTestPlanV2();
+    const db = v2.components[0]!;
+    const extended = (image: string, runAsUser: string | null) =>
+      rehash({ ...v2, components: [{ ...db, image, runAsUser }], ingress: [], volumes: [{ key: "dbdata" }] });
+    const first = (image: string, runAsUser: string | null) => rehash({ ...plan, components: [{ ...web, image, runAsUser }], volumes: [] });
+
+    it.each(["mariadb", "postgres"])("%s: written short, the image's own user only", (name) => {
+      expect(assertExecutableAppStackPlan(extended(`${name}@${DIGEST}`, null)).components[0]?.runAsUser).toBeNull();
+      expect(refusal(() => assertExecutableAppStackPlan(extended(`${name}@${DIGEST}`, "999:999"))).message).toBe(
+        "The image of component db is not allowed (user_mismatch)",
+      );
+      expect(refusal(() => assertExecutableAppStackPlan(first(`${name}@${DIGEST}`, "999:999"))).message).toBe(
+        "The image of component web is not allowed (not_allowlisted)",
+      );
+    });
+
+    it.each(["mariadb", "postgres"])("docker.io/library/%s: the row's user, in both formats", (name) => {
+      const image = `docker.io/library/${name}@${DIGEST}`;
+      expect(assertExecutableAppStackPlan(extended(image, "999:999")).components[0]?.runAsUser).toBe("999:999");
+      expect(assertExecutableAppStackPlan(first(image, "999:999")).components[0]?.image).toBe(image);
+      expect(refusal(() => assertExecutableAppStackPlan(extended(image, null))).message).toBe("The image of component db is not allowed (user_mismatch)");
+    });
   });
 });
 

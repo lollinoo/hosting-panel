@@ -10,6 +10,7 @@ import {
 } from "@nestjs/platform-fastify";
 import {
   LEGACY_SITE_TYPE,
+  NOTIFICATION_PASS_INTERVAL_MS,
   findForbiddenPublicDtoKeys,
   type AppFeatureFlags,
   type IpcSigningKey,
@@ -47,6 +48,8 @@ import type { TlsValidatorOptions } from "./certificates/tls-certificate-validat
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { NotificationDispatchService } from "./notifications/notification-dispatch.service.js";
+import type { OutboundHttpPort } from "./notifications/outbound-http.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import { TlsPublishService } from "./certificates/tls-publish.service.js";
@@ -239,6 +242,8 @@ export interface CreateControlPlaneAppOptions {
   readonly appFeatures?: Partial<AppFeatureFlags>;
   /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production passes nothing. No environment variable sets it. */
   readonly appTemplateValidation?: AppTemplateValidationOptions;
+  /** Tests only: what stands in for the calls a notification makes to the outside. No environment variable sets it. */
+  readonly notificationOutbound?: OutboundHttpPort;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly jwtSigningKeyPem?: string;
@@ -251,6 +256,8 @@ export interface CreateControlPlaneAppOptions {
   readonly backupScheduleIntervalMs?: number | null;
   /** Manual TLS converge tick (also the hourly expiry audit); null turns the loop off. */
   readonly tlsConvergeIntervalMs?: number | null;
+  /** The pass of the notifications; null turns the loop off. No environment variable sets it. */
+  readonly notificationsIntervalMs?: number | null;
   readonly terminalSweepIntervalMs?: number | null;
   /** The pass that queues the tasks of applications that are due (ADR-0042); null turns the loop off. */
   readonly appTaskScheduleIntervalMs?: number | null;
@@ -281,6 +288,7 @@ export interface ControlPlaneAppHandle {
   readonly siteSftp: SiteSftpService;
   readonly backupScheduler: BackupSchedulerService;
   readonly tlsPublish: TlsPublishService;
+  readonly notifications: NotificationDispatchService;
   close(): Promise<void>;
 }
 
@@ -453,6 +461,13 @@ export async function createControlPlaneApp(
         ? (envTlsIntervalRaw && /^\d+$/.test(envTlsIntervalRaw) ? Number.parseInt(envTlsIntervalRaw, 10) : 60_000)
         : null;
 
+  const notificationsIntervalMs =
+    options?.notificationsIntervalMs !== undefined
+      ? options.notificationsIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? NOTIFICATION_PASS_INTERVAL_MS
+        : null;
+
   // No environment variable: one pass a minute wherever the panel runs applications.
   const appTaskScheduleIntervalMs =
     options?.appTaskScheduleIntervalMs !== undefined
@@ -554,6 +569,7 @@ export async function createControlPlaneApp(
       ...(options?.tlsValidatorOptions ? { tlsValidatorOptions: options.tlsValidatorOptions } : {}),
       ...(options?.appFeatures ? { appFeatures: options.appFeatures } : {}),
       ...(options?.appTemplateValidation ? { appTemplateValidation: options.appTemplateValidation } : {}),
+      ...(options?.notificationOutbound ? { notificationOutbound: options.notificationOutbound } : {}),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
@@ -594,6 +610,7 @@ export async function createControlPlaneApp(
   const backupScheduler = nestApp.get(BackupSchedulerService);
   const terminal = nestApp.get(AdminTerminalService);
   const tlsPublish = nestApp.get(TlsPublishService);
+  const notifications = nestApp.get(NotificationDispatchService);
   const firewall = nestApp.get(FirewallService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
@@ -615,6 +632,7 @@ export async function createControlPlaneApp(
   siteSftp.startBackgroundLoop();
   backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
   tlsPublish.startBackgroundLoop(tlsConvergeIntervalMs);
+  notifications.startBackgroundLoop(notificationsIntervalMs);
   terminal.startBackgroundLoop(options?.terminalSweepIntervalMs !== undefined ? options.terminalSweepIntervalMs : TERMINAL_SWEEP_INTERVAL_MS);
 
   let isClosed = false;
@@ -638,6 +656,7 @@ export async function createControlPlaneApp(
     siteSftp,
     backupScheduler,
     tlsPublish,
+    notifications,
     async close(): Promise<void> {
       if (isClosed) {
         return;
@@ -645,6 +664,7 @@ export async function createControlPlaneApp(
       isClosed = true;
 
       await terminal.stop();
+      await notifications.stop();
       await firewall.stop();
       await backupScheduler.stop();
       await tlsPublish.stop();

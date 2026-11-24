@@ -150,6 +150,7 @@ export {
 export {
   APP_STACK_COMPONENT_TIMEOUT_MS,
   APP_STACK_CREATE_TIMEOUT_MS,
+  APP_STACK_LINKS_TIMEOUT_MS,
   APP_STACK_LOGS_TIMEOUT_MS,
   APP_STACK_RESOLVE_TIMEOUT_MS,
   APP_STACK_PREPARE_TIMEOUT_MS,
@@ -315,11 +316,15 @@ export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps
 export type { TerminalLimits } from "./terminal-sessions.js";
 
 export {
+  APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT,
+  APP_STACK_TERMINAL_KILL_SCRIPT,
   TERMINAL_CONSOLE_SIZE,
   TERMINAL_END_SETTLE_MS,
   TERMINAL_KILL_SCRIPT,
   TERMINAL_KILL_TIMEOUT_MS,
+  reapAppStackTerminalShells,
   reapTerminalShells,
+  startAppStackTerminal,
   startDockerTerminal,
 } from "./terminal-docker.js";
 

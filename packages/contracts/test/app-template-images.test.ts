@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   APP_IMAGE_ALLOWLIST,
+  APP_IMAGE_SCRATCH_PATH_PATTERN,
+  APP_IMAGE_SCRATCH_PATHS_MAX,
   appStackImageProblem,
+  appStackImageScratchPaths,
   appStackPlanImageProblems,
   findAppImageAllowlistEntry,
   type AppImageAllowlistEntry,
@@ -63,12 +66,55 @@ describe("appStackImageProblem", () => {
     expect(appStackImageProblem(image, user, ALLOWLIST)).toBe(problem);
   });
 
-  it("holds exactly the three seed rows by default", () => {
+  it("holds exactly the five seed rows by default", () => {
     expect(APP_IMAGE_ALLOWLIST.map(({ repository, runAsUser }) => ({ repository, runAsUser }))).toEqual([
       { repository: "nginxinc/nginx-unprivileged", runAsUser: null },
       { repository: "memcached", runAsUser: null },
       { repository: "valkey/valkey", runAsUser: "999:1000" },
+      { repository: "docker.io/library/mariadb", runAsUser: "999:999" },
+      { repository: "docker.io/library/postgres", runAsUser: "999:999" },
     ]);
+  });
+});
+
+describe("scratch areas", () => {
+  it("only the postgres row declares one, and it is the socket directory", () => {
+    expect(APP_IMAGE_ALLOWLIST.filter((entry) => entry.scratchPaths !== undefined).map(({ repository, scratchPaths }) => ({ repository, scratchPaths }))).toEqual([
+      { repository: "docker.io/library/postgres", scratchPaths: ["/run/postgresql"] },
+    ]);
+  });
+
+  it("every declared area is frozen, bounded and directly under /run", () => {
+    for (const entry of APP_IMAGE_ALLOWLIST) {
+      const paths = entry.scratchPaths ?? [];
+      expect(Object.isFrozen(paths) || paths.length === 0, entry.repository).toBe(true);
+      expect(paths.length).toBeLessThanOrEqual(APP_IMAGE_SCRATCH_PATHS_MAX);
+      expect(new Set(paths).size).toBe(paths.length);
+      for (const path of paths) expect(path).toMatch(APP_IMAGE_SCRATCH_PATH_PATTERN);
+    }
+  });
+
+  it.each(["/tmp", "/run", "/run/", "/run/secrets", "/run/secrets/x", "/run/a/b", "/var/run/postgresql", "/run/../etc", "/run/Postgresql", "run/postgresql", "/run/a b", `/run/${"a".repeat(33)}`])(
+    "%s is not a scratch area",
+    (path) => {
+      expect(APP_IMAGE_SCRATCH_PATH_PATTERN.test(path)).toBe(false);
+    },
+  );
+
+  it("accepts a plain directory under /run", () => {
+    for (const path of ["/run/postgresql", "/run/secrets-x", "/run/a", "/run/my_dir-2"]) expect(APP_IMAGE_SCRATCH_PATH_PATTERN.test(path)).toBe(true);
+  });
+
+  it("reads the areas of a plan image from its row", () => {
+    const rows: readonly AppImageAllowlistEntry[] = [...ALLOWLIST, { repository: "postgres", runAsUser: "999:999", note: "test row", scratchPaths: ["/run/postgresql"] }];
+    expect(appStackImageScratchPaths(`postgres@${DIGEST}`, rows)).toEqual(["/run/postgresql"]);
+    expect(appStackImageScratchPaths(`memcached@${DIGEST}`, rows)).toEqual([]);
+    expect(appStackImageScratchPaths(`evil/postgres@${DIGEST}`, rows)).toEqual([]);
+    expect(appStackImageScratchPaths(`postgres2@${DIGEST}`, rows)).toEqual([]);
+    expect(appStackImageScratchPaths("postgres", rows)).toEqual(["/run/postgresql"]);
+    expect(appStackImageScratchPaths(`docker.io/library/postgres@${DIGEST}`)).toEqual(["/run/postgresql"]);
+    expect(appStackImageScratchPaths(`postgres@${DIGEST}`)).toEqual([]);
+    expect(appStackImageScratchPaths(`docker.io/library/mariadb@${DIGEST}`)).toEqual([]);
   });
 });
 

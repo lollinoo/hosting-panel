@@ -56,6 +56,9 @@ UPDATE app_stack_deployments SET status = 'failed', problem = 'OPERATION_INTERRU
  WHERE status IN ('queued','running','unknown');
 UPDATE app_stack_components SET health = 'missing', health_observed_at = NULL, updated_at = now() WHERE health <> 'missing';
 UPDATE app_stack_volumes SET status = 'missing', updated_at = now() WHERE status IN ('pending','present','retained');
+-- Links between a database and an application (ADR-0039): nothing is attached on the new host, so none is active.
+-- A link the customer disconnected stays as it is: the first pass of the panel confirms it gone.
+UPDATE app_stack_links SET state = 'pending', updated_at = now() WHERE state = 'active';
 UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expires_at = NULL, dns_next_check_at = now(),
        updated_at = now() WHERE status <> 'pending' OR cert_status <> 'none';
 UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, applied_addresses_hash = NULL, updated_at = now()
@@ -90,4 +93,11 @@ UPDATE app_stack_backups s SET left_incomplete = (s.status IN ('succeeded','part
  WHERE src.restore_status = 'running' AND src.restore_operation_id = s.operation_id AND s.kind = 'pre_restore';
 UPDATE app_stack_backups SET restore_status = 'failed', restore_problem = 'interrupted', restored_at = COALESCE(restored_at, now())
  WHERE restore_status = 'running';
+-- Notifications (ADR-0040): the alerts a channel was told belong to the host the copy was made on. Forgetting them
+-- makes the first passes tell what is open here as new, and tell no alert of the old host as closed. A message that
+-- was still waiting when the copy was made is old news: it is not sent. The channels and their secrets stay.
+DELETE FROM notification_channel_alerts;
+UPDATE notification_deliveries SET status = 'failed', problem = 'expired', next_attempt_at = NULL,
+       finished_at = COALESCE(finished_at, now())
+ WHERE status = 'pending';
 DELETE FROM user_sessions;

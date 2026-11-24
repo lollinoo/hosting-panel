@@ -42,6 +42,8 @@ const EXPECTED_ROUTES = [
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route.ts",
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/[linkId]/route.ts",
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/plan/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/secrets/route.ts",
@@ -98,7 +100,7 @@ describe("M6 web guards: browser-side hazards", () => {
 });
 
 describe("M6 web guards: the BFF route inventory", () => {
-  it("is exactly the seventeen routes of the design, no more (no ports, Git, health, admin stack routes)", () => {
+  it("is exactly the fifteen routes of the design, the two of the database links (ADR-0039) and the two of the tasks (ADR-0042), no more (no ports, Git, health, admin stack routes)", () => {
     expect(routeFiles.map(rel).sort()).toEqual(EXPECTED_ROUTES);
   });
 
@@ -144,8 +146,8 @@ describe("M6 web guards: the BFF route inventory", () => {
     for (const a of ["delete", "plan", "secrets", "domains", "logs", "ports", "backups", "git"]) expect(c).not.toMatch(new RegExp(`\\b${a}:\\s*\\{`));
   });
 
-  it("only the synchronous routes of the design carry no Idempotency-Key (secrets, domains, plan, logs, the schedule of a task)", () => {
-    const sync = ["secrets", "domains", "plan", "components", "schedule"];
+  it("only the synchronous routes carry no Idempotency-Key (secrets, domains, links, plan, logs, the schedule of a task)", () => {
+    const sync = ["secrets", "domains", "links", "plan", "components", "schedule"];
     for (const f of customerRoutes) {
       const r = rel(f);
       const isSync = sync.some((s) => r.includes(`/${s}/`) || r.includes(`/${s}`));

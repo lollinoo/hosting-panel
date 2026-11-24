@@ -238,6 +238,10 @@ describe("A7: interpolation and injection", () => {
     ["URL credentials in env", env("https://u:pw1234@db.example.invalid"), "ENV_VALUE_SECRET_LIKE", "services.app.environment[0].value"],
     ["metadata endpoint in env", env("http://169.254.169.254/latest"), "ENV_VALUE_METADATA_ENDPOINT", "services.app.environment[0].value"],
     ["docker socket in env", env("unix:///var/run/docker.sock"), "ENV_VALUE_DOCKER_SOCKET", "services.app.environment[0].value"],
+    // ADR-0041: a value never carries the mark of a platform process, which a clean-up looks for.
+    ["terminal mark in env", env("a HP_TERMINAL_SESSION=term_ b"), "ENV_VALUE_PROCESS_MARK", "services.app.environment[0].value"],
+    ["task run mark in env", env("xHP_TASK_RUN=srun_1"), "ENV_VALUE_PROCESS_MARK", "services.app.environment[0].value"],
+    ["terminal mark in argv", command("--env=HP_TERMINAL_SESSION=term_"), "ARGV_ITEM_INVALID", "services.app.command[1]"],
     ["number in env", env(1), "ENV_VALUE_NOT_STRING", "services.app.environment[0].value"],
     ["4097-char env literal", env("x".repeat(4_097)), "ENV_VALUE_TOO_LONG", "services.app.environment[0].value"],
   ];
@@ -261,6 +265,14 @@ describe("A7: interpolation and injection", () => {
   it("treats shell metacharacters in a literal argv item as inert text", () => {
     expect(accepted(command("a;b|c&&$$(rm -rf /)`x`"))).toBe(true);
   });
+
+  it.each(["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "SHP_X=1", "HP_HOME=/x", "ends with HP_TERMINAL_"])(
+    "accepts %j in an env value and in argv: only the marks of the platform's processes are refused",
+    (text) => {
+      expect(accepted(env(text))).toBe(true);
+      expect(accepted(command(text))).toBe(true);
+    },
+  );
 
   it("accepts argv items that only contain a shell name", () => {
     expect(accepted(command("--shell=sh", "bashful", "/srv/sh.d"))).toBe(true);
