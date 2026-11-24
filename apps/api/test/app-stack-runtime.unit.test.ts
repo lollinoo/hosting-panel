@@ -581,6 +581,133 @@ describe("AppStackRuntime (RT3)", () => {
     });
   });
 
+  describe("a stopped application whose deploy, upgrade or rollback is refused before create (#129)", () => {
+    // A further variable makes this plan different from the one that runs.
+    const WEB_V2 = { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] };
+    const STOPPED = { cache: "stopped", web: "stopped" };
+    const touched = () => trace().filter((c) => /^(create|start|restart|remove)AppStack|^publishAppStackRoutes/.test(c));
+
+    /** A running application its owner stopped, the fake's trace cleared. */
+    async function stopped(components = [CACHE, WEB]) {
+      const created = await running(components);
+      expect(await run(await enqueue(created.stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(created.stackId)).status).toBe("stopped");
+      fake.calls.length = 0;
+      return created;
+    }
+
+    it("an upgrade refused at pull leaves it stopped and takes its target back; the operation fails with its reason", async () => {
+      const { stackId, rev } = await stopped();
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("pullAppStackImage", "definite", "STACK_IMAGE_PULL_FAILED");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toEqual(["pullAppStackImage", "getAppStackStatus"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId, appliedRoutesHash: null });
+      expect(await healthOf(stackId)).toEqual(STOPPED);
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2.revisionId, replacedStatus: "stopped" });
+      expect((await opOf(upgrade.operation!.id)).status).toBe("failed");
+      expect((await stepsOf(upgrade))["pull"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+    });
+
+    it("an upgrade that is not taken back (an address now points at a part only the new version has) leaves it stopped too", async () => {
+      const { stackId, rev } = await stopped();
+      const v2 = revision(stackId, [CACHE, WEB, component("extra")], [{ componentKey: "extra", port: 8080 }, ...INGRESS]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      await addDomain(stackId, "extra");
+      fake.failNext("pullAppStackImage", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(touched()).toEqual([]);
+      // The new version stays the one asked for, as after a deploy with new settings; nothing was started.
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed" });
+    });
+
+    it("a rollback refused at prepare leaves it stopped on the revision that runs", async () => {
+      const { stackId, rev } = await running();
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      fake.calls.length = 0;
+      const rollback = await enqueue(stackId, "stack.rollback", revision(stackId, rev.plan.components as AppStackPlanComponent[]));
+      fake.failNext("prepareAppStack", "definite");
+
+      expectFailure(await run(rollback), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(touched()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: v2.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await healthOf(stackId)).toEqual(STOPPED);
+      expect(await deploymentOf(rollback)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+      expect((await opOf(rollback.operation!.id)).status).toBe("failed");
+    });
+
+    it("a deploy with new settings refused at pull leaves it stopped; the target stays, a deploy is not taken back", async () => {
+      const { stackId, rev } = await stopped();
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const deploy = await enqueue(stackId, "stack.deploy", v2);
+      fake.failNext("pullAppStackImage", "definite", "STACK_IMAGE_NOT_ALLOWED");
+
+      expectFailure(await run(deploy), "STACK_IMAGE_NOT_ALLOWED");
+
+      expect(touched()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await healthOf(stackId)).toEqual(STOPPED);
+      expect(await deploymentOf(deploy)).toMatchObject({ status: "failed", problem: "STACK_IMAGE_NOT_ALLOWED" });
+      expect((await opOf(deploy.operation!.id)).errorCode).toBe("HOST_POLICY_DENIED");
+
+      // A plain redeploy refused the same way.
+      fake.calls.length = 0;
+      const again = await enqueue(stackId, "stack.deploy");
+      fake.failNext("pullAppStackImage", "definite", "STACK_IMAGE_NOT_ALLOWED");
+      expectFailure(await run(again), "STACK_IMAGE_NOT_ALLOWED");
+      expect(touched()).toEqual([]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+    });
+
+    it("a deploy refused at validate leaves it stopped, with or without a reading", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      fake.calls.length = 0;
+
+      const deploy = await enqueue(stackId, "stack.deploy", revision(stackId, [CACHE, { ...web, environment: [{ name: "CACHE_HOST", value: "cache" }] }]));
+      expectFailure(await run(deploy), "STACK_SECRET_MISSING");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await healthOf(stackId)).toEqual(STOPPED);
+      expect(await deploymentOf(deploy)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await stepsOf(deploy))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+
+      // The executor cannot be read: nothing was touched either, so it stays stopped.
+      fake.failNext("getAppStackStatus", "definite");
+      const again = await enqueue(stackId, "stack.deploy");
+      expectFailure(await run(again), "STACK_SECRET_MISSING");
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await deploymentOf(again)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
+    it("a failure at create still ends failed: the executor may have replaced a component", async () => {
+      const { stackId, rev } = await stopped();
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("createAppStackComponents", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+    });
+  });
+
   describe("start, restart, stop, delete (13)", () => {
     it("stop withdraws the routes then stops; start brings it back and republishes", async () => {
       const { stackId } = await running();

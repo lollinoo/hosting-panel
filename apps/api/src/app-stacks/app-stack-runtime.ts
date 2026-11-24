@@ -463,11 +463,14 @@ export class AppStackRuntime {
         const previous = deploy ? st.previous : st.plan;
         const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
         const observed = stack && previous ? await this.#status(ctx) : null;
-        // A stopped application whose start is refused stays stopped, read or not: nothing was started.
+        // A stopped application whose start, deploy, upgrade or rollback is refused stays stopped, read or not: nothing
+        // was started, and its stopped containers would otherwise read as a failure.
         const replaced =
-          ctx.op.kind === "stack.start" ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId }) : null;
+          ctx.op.kind === "stack.start" || deploy
+            ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId })
+            : null;
         if (replaced?.replacedStatus === "stopped") {
-          return settle({ stackStatus: "stopped" }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
+          return settle({ stackStatus: "stopped", ...restore }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
         }
         if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");
