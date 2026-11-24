@@ -27,6 +27,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -124,6 +125,16 @@ const VIRTUAL_SECRETS_ROOT = "/run/hosting-panel/secrets";
 const startIndex = (c: SimContainer) => Number(c.labels[APP_STACK_LABELS.startIndex]) || 0;
 const byStartDesc = ([ka, a]: [string, SimContainer], [kb, b]: [string, SimContainer]) =>
   startIndex(b) - startIndex(a) || kb.localeCompare(ka);
+/** The real engine's order (#100): by reverse position in `order` when given, a key it does not list first. */
+function stopOrder(order: readonly string[] | undefined): typeof byStartDesc {
+  if (order === undefined) return byStartDesc;
+  const position = new Map(order.map((key, at) => [key, at]));
+  return (a, b) => {
+    const [pa, pb] = [position.get(a[0]), position.get(b[0])];
+    if (pa === undefined || pb === undefined) return pa === pb ? byStartDesc(a, b) : pa === undefined ? -1 : 1;
+    return pb - pa;
+  };
+}
 const notReady = (message: string) => new AppStackExecutorError("STACK_COMPONENT_NOT_READY", message);
 /** The steps the real engine refuses while a backup job holds the application's lane. */
 const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove", "remove_components"]);
@@ -422,10 +433,10 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return this.runComponent("restart", "restartAppStackComponent", req);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.run("stop", { method: "stopAppStack", stackId: req.stackId }, true, async () => {
       const stack = this.own(req.stackId, req.organizationId);
-      const components = [...(stack?.containers ?? [])].sort(byStartDesc).map(([key, c]) => {
+      const components = [...(stack?.containers ?? [])].sort(stopOrder(req.order)).map(([key, c]) => {
         if (c.state !== "running") return { componentKey: key, outcome: "already_stopped" as const };
         c.state = "exited";
         c.exitCode = 0;
@@ -470,7 +481,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const result: AppStackRemoveIpcResult = { removedComponents: [], removedNetworks: [], removedVolumes: [], retainedVolumes: [] };
       if (this.options.secretsRootDir !== null) await purgeAppStackSecrets(this.options.secretsRootDir, req.stackId);
       if (stack === undefined) return result;
-      for (const [key, c] of [...stack.containers].sort(byStartDesc)) {
+      for (const [key, c] of [...stack.containers].sort(stopOrder(req.order))) {
         stack.containers.delete(key);
         this.mutate("container_remove", c.name);
         this.gone(req.stackId, key);

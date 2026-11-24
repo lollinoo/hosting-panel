@@ -127,10 +127,23 @@ export const AppStackComponentIpcRequestSchema = z
   .object({ plan: ApprovedStackPlanSchema, componentKey: AppStackKeySchema, secretFileContents: AppStackSecretFileContentsSchema })
   .strict();
 export type AppStackComponentIpcRequest = z.infer<typeof AppStackComponentIpcRequestSchema>;
-/** stop, unpublish, status. */
+/** unpublish, status. */
 export const AppStackRefIpcRequestSchema = z.object({ stackId: AppEntityIdSchema, organizationId: AppForeignIdSchema }).strict();
 export type AppStackRefIpcRequest = z.infer<typeof AppStackRefIpcRequestSchema>;
-export const AppStackRemoveIpcRequestSchema = AppStackRefIpcRequestSchema.extend({ removeVolumes: z.boolean() }).strict();
+/** The keys of the applied plan's components in plan order. A hint for the order of a stop or a remove only: it never
+ *  selects what is touched, and a key that names no container is ignored. */
+const AppStackOrderSchema = z
+  .array(AppStackKeySchema)
+  .min(1)
+  .max(APP_TEMPLATE_LIMITS.services)
+  .refine((keys) => new Set(keys).size === keys.length, "Duplicate component key");
+/** stop: every container, by reverse position in `order` when it is given. */
+export const AppStackStopIpcRequestSchema = AppStackRefIpcRequestSchema.extend({ order: AppStackOrderSchema.optional() }).strict();
+export type AppStackStopIpcRequest = z.infer<typeof AppStackStopIpcRequestSchema>;
+export const AppStackRemoveIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
+  removeVolumes: z.boolean(),
+  order: AppStackOrderSchema.optional(),
+}).strict();
 export type AppStackRemoveIpcRequest = z.infer<typeof AppStackRemoveIpcRequestSchema>;
 /** Upgrade/rollback cleanup: only these containers; the keys need not be in the plan. */
 export const AppStackComponentsRemoveIpcRequestSchema = z

@@ -72,6 +72,7 @@ import {
   type AppStackRoutesIpcRequest,
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
+  type AppStackStopIpcRequest,
   type AppStackStopIpcResult,
   type AppStackTaskReadIpcRequest,
   type AppStackTaskReadIpcResult,
@@ -1567,7 +1568,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     return this.appStackEngine.restartAppStackComponent(req);
   }
 
-  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+  public stopAppStack(req: AppStackStopIpcRequest): Promise<AppStackStopIpcResult> {
     return this.appStackEngine.stopAppStack(req);
   }
 

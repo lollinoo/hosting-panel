@@ -868,6 +868,31 @@ describe("start and restart (5.11)", () => {
     });
   });
 
+  it("refuses a component that is removed between the read and the start as not created", async () => {
+    const h = await setup();
+    await prepared(h);
+    const held = h.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+    const refused = expect(starting).rejects.toMatchObject({ reason: "STACK_COMPONENT_NOT_READY", message: "Component web is not created" });
+    await vi.waitFor(() => expect(h.fake.log).toContain(`POST /containers/${idOf(h, WEB)}/start`));
+    h.fake.containers.delete(WEB);
+    held.release();
+    await refused;
+  });
+
+  it("refuses a start that is answered 404 for a missing network, with no network or id in the text", async () => {
+    const h = await setup();
+    await prepared(h);
+    h.fake.networks.delete(NET);
+    const error = await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }).catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      reason: "STACK_COMPONENT_NOT_READY",
+      code: "RESOURCE_LOCKED",
+      message: "Component web is attached to a network that is missing",
+    });
+    expect(mutations(h.fake.log)).toEqual([`POST /containers/${idOf(h, WEB)}/start`]);
+  });
+
   it("refuses a foreign container under the derived name", async () => {
     const h = await setup();
     await foreignContainer(h, WEB);
@@ -986,6 +1011,64 @@ async function deployedWithout(h: Harness) {
   await h.fake.request("POST", `/containers/${WEB}/start`);
   h.fake.log.length = 0;
 }
+
+describe("the order of a stop and a remove after an upgrade moved the positions (#100)", () => {
+  /** An older version put web after worker's position: web, which worker uses, carries the later label. */
+  async function shifted() {
+    const h = await setup();
+    await deployed(h);
+    h.fake.containers.get(WEB)!.Labels[APP_STACK_LABELS.startIndex] = "2";
+    h.fake.containers.get(WORKER)!.Labels[APP_STACK_LABELS.startIndex] = "1";
+    h.fake.log.length = 0;
+    return h;
+  }
+  const stopLines = (h: Harness, ...names: string[]) => names.map((name) => `POST /containers/${idOf(h, name)}/stop?t=10`);
+
+  it("a request without an order goes by the labels, as before", async () => {
+    const h = await shifted();
+    await expect(h.engine.stopAppStack(REF)).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "stopped" },
+        { componentKey: "worker", outcome: "stopped" },
+      ],
+    });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WEB, WORKER));
+  });
+
+  it("an order stops what uses a component before it, whatever the labels say", async () => {
+    const h = await shifted();
+    await expect(h.engine.stopAppStack({ ...REF, order: ["web", "worker"] })).resolves.toEqual({
+      components: [
+        { componentKey: "worker", outcome: "stopped" },
+        { componentKey: "web", outcome: "stopped" },
+      ],
+    });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WORKER, WEB));
+  });
+
+  it("a container whose key is not in the order goes first, and so do all of them when none is", async () => {
+    const h = await setup();
+    await deployed(h);
+    await h.engine.stopAppStack({ ...REF, order: ["worker"] });
+    expect(mutations(h.fake.log)).toEqual(stopLines(h, WEB, WORKER));
+    const other = await shifted();
+    await other.engine.stopAppStack({ ...REF, order: ["ghost"] });
+    expect(mutations(other.fake.log)).toEqual(stopLines(other, WEB, WORKER));
+  });
+
+  it("a remove takes the containers in the same order, and by the labels without one", async () => {
+    const removed = async (order?: string[]) => {
+      const h = await shifted();
+      const [web, worker] = [idOf(h, WEB), idOf(h, WORKER)];
+      const result = await h.engine.removeAppStack({ ...REF, removeVolumes: false, ...(order === undefined ? {} : { order }) });
+      const deleted = mutations(h.fake.log).filter((line) => line.startsWith("DELETE /containers/"));
+      return { components: result.removedComponents, deleted: deleted.map((line) => (line.includes(web) ? "web" : line.includes(worker) ? "worker" : line)) };
+    };
+    await expect(removed(["web", "worker"])).resolves.toEqual({ components: ["worker", "web"], deleted: ["worker", "web"] });
+    await expect(removed()).resolves.toEqual({ components: ["web", "worker"], deleted: ["web", "worker"] });
+    await expect(removed(["worker"])).resolves.toEqual({ components: ["web", "worker"], deleted: ["web", "worker"] });
+  });
+});
 
 describe("stopAppStack (5.12)", () => {
   it("stops in reverse start order, keeps secrets and routes, and a re-run is a no-op", async () => {

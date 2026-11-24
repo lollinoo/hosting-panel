@@ -16,6 +16,7 @@ import {
   AppStackRefIpcRequestSchema,
   AppStackRemoveIpcRequestSchema,
   AppStackRoutesIpcRequestSchema,
+  AppStackStopIpcRequestSchema,
   AppStackTerminalOpenIpcRequestSchema,
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
@@ -818,7 +819,7 @@ export class DockerExecutorIpcServer {
         case "/v1/app-stacks/restart":
           return post(AppStackComponentIpcRequestSchema, "restart", (s, req) => s.restartAppStackComponent(req));
         case "/v1/app-stacks/stop":
-          return post(AppStackRefIpcRequestSchema, "stop", (s, req) => s.stopAppStack(req));
+          return post(AppStackStopIpcRequestSchema, "stop", (s, req) => s.stopAppStack(req));
         case "/v1/app-stacks/routes":
           return post(AppStackRoutesIpcRequestSchema, "routes", (s, req) => s.publishAppStackRoutes(req));
         case "/v1/app-stacks/unpublish":
