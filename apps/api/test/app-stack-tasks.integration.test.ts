@@ -538,6 +538,24 @@ describe("tasks of an application (ADR-0042)", () => {
       expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
     });
 
+    it("does not write as missed a time that ran, when the first pass after the clock is set right comes late", async () => {
+      const stackId = await alone();
+      const now = new Date();
+      const slot = new Date((Math.floor(now.getTime() / HOUR) + 3) * HOUR);
+      const at = (minutes: number) => new Date(slot.getTime() + minutes * 60_000);
+
+      // The clock is three hours ahead: the time is queued and the run ends.
+      expect(await scheduler.tick(at(5))).toEqual({ ...NONE, queued: 1 });
+      await worker.processPendingOnce();
+      // The clock is set right; the first pass that sees the time owed again comes after its window of 30 minutes.
+      expect(await scheduler.tick(now)).toEqual(NONE);
+      expect(await scheduler.tick(at(31))).toEqual(NONE);
+      expect(await scheduleRow(stackId)).toMatchObject({ servedSlotAt: slot, skippedSlotAt: null, skipReason: null });
+      expect((await list(stackId)).body.data.tasks[0].skipped).toBeNull();
+      expect((await runRows(stackId)).map((r) => [r.status, r.slotAt?.getTime()])).toEqual([["succeeded", slot.getTime()]]);
+      expect(taskCalls(stackId)).toHaveLength(1);
+    });
+
     it("does not move back a schedule saved a moment after the pass read the clock, nor run an hour that began before it", async () => {
       const stackId = await alone();
       const hour = new Date((Math.floor(Date.now() / HOUR) + 2) * HOUR);

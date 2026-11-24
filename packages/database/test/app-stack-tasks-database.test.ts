@@ -1076,6 +1076,17 @@ describe("@hosting-panel/database — tasks of applications", () => {
       expect(await closeAppStackTaskSlot(db(), { ...slot(S1), skipped: true })).toBe(false);
     });
 
+    it("is served, not closed as skipped, when its window has passed", async () => {
+      // The time of the first test: its run is still there, and its served time was forgotten again.
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S1), skipped: true })).toBe(false);
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null });
+      // A time with no run is written as missed, as before.
+      expect(await closeAppStackTaskSlot(db(), { ...slot(S2), skipped: true })).toBe(true);
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: S2, skippedSlotAt: S2, skipReason: "missed" });
+      await db().update(appStackTaskSchedules).set({ servedSlotAt: S1, skippedSlotAt: null, skipReason: null }).where(eq(appStackTaskSchedules.stackId, STACK));
+    });
+
     it("is told from another refusal of the database by the name of its index", async () => {
       const [first] = await runsOf(STACK);
       const refused = await enqueueAppStackTaskRunTransactional(db(), {

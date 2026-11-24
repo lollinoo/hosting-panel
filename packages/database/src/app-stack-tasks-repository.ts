@@ -548,9 +548,23 @@ export async function noteAppStackTaskSlotRefused(
 /**
  * Closes a time without a run: it is not owed any more. `skipped` writes it as skipped, with the reason already noted
  * for that time or `missed` when there is none; without it the time passes with no note (the installed version does not
- * have the task).
+ * have the task). A time that already has a run (it ran while the clock was ahead) is never written as skipped: it is
+ * served, with no note, in the same transaction, and the answer is false, as for a time that is not owed any more.
  */
 export async function closeAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope & { readonly skipped: boolean }): Promise<boolean> {
+  if (!input.skipped) return writeClosedAppStackTaskSlot(db, input);
+  return db.transaction(async (tx) => {
+    const [ran] = await tx
+      .select({ id: appStackTaskRuns.id })
+      .from(appStackTaskRuns)
+      .where(and(eq(appStackTaskRuns.stackId, input.stackId), eq(appStackTaskRuns.taskKey, input.taskKey), eq(appStackTaskRuns.slotAt, input.slot)));
+    if (!ran) return writeClosedAppStackTaskSlot(tx, input);
+    await serveAppStackTaskSlot(tx, input);
+    return false;
+  });
+}
+
+async function writeClosedAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope & { readonly skipped: boolean }): Promise<boolean> {
   const slot = sql`${input.slot.toISOString()}::timestamptz`;
   const updated = await db
     .update(appStackTaskSchedules)
