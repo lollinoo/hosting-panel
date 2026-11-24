@@ -14,6 +14,17 @@ export interface AppBuiltInTemplate {
   readonly descriptionEn: string;
   /** HCP-STACK/v1 or HCP-STACK/v2, LF only, final newline. */
   readonly source: string;
+  /**
+   * The versions shipped before `versionId`, oldest first, each byte for byte as it shipped: a stored version is never
+   * rewritten, so a change is a new version. The seed adds the missing ones; `versionId` is the newest and the default.
+   */
+  readonly previousVersions?: readonly AppBuiltInTemplateVersion[];
+}
+
+/** An earlier version of a built-in template. */
+export interface AppBuiltInTemplateVersion {
+  readonly versionId: string;
+  readonly source: string;
 }
 
 const HTTP_CACHE_DESCRIPTION =
@@ -22,8 +33,10 @@ const HTTP_CACHE_DESCRIPTION =
 const WORKER_STORAGE_DESCRIPTION =
   "Un lavoro in background che a intervalli regolari aggiorna un contatore in un archivio chiave-valore persistente. I dati sono conservati anche quando lo stack viene cancellato, salvo richiesta esplicita.";
 
-const WORDPRESS_DESCRIPTION =
+const WORDPRESS_DESCRIPTION_1 =
   "Un sito WordPress con il suo database. Le password del database sono generate dalla piattaforma: non c'è nulla da inserire. Dopo aver collegato il dominio, apri subito il sito e completa la configurazione iniziale di WordPress (titolo, utente e password dell'amministratore): finché non lo fai, chiunque raggiunga l'indirizzo può farlo al posto tuo. Sito e database sono conservati anche quando l'applicazione viene cancellata, salvo richiesta esplicita.";
+
+const WORDPRESS_DESCRIPTION = `${WORDPRESS_DESCRIPTION_1} Puoi caricare file fino a 64 MB.`;
 
 const httpCache: AppBuiltInTemplate = Object.freeze({
   templateId: "atpl_http_cache",
@@ -146,27 +159,14 @@ const workerStorage: AppBuiltInTemplate = Object.freeze({
   ].join("\n"),
 });
 
-/**
- * WordPress with its database, in the extended format (ADR-0036 §2.9), written for this repository. Both components run
- * with the "standard" profile: the official images start as root and drop to their own user. The two database
- * passwords are generated, reach the components only through the environment and are never shown. This is not the
- * managed WordPress site of the panel: no automatic install, no backup, no file or database tools.
- */
-const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
-  templateId: "atpl_wordpress_mariadb",
-  versionId: "atv_wordpress_mariadb_1",
-  slug: "wordpress-mariadb",
-  name: "WordPress in contenitore",
-  category: "content",
-  description: WORDPRESS_DESCRIPTION,
-  descriptionEn:
-    "A WordPress site with its own database. The platform generates the database passwords: there is nothing to type. After you connect the domain, open the site right away and complete the first-time setup of WordPress (title, administrator user and password): until you do, anyone who reaches the address can do it in your place. The site and the database are kept even when the application is deleted, unless deletion is explicitly requested.",
-  source: [
+/** The WordPress source; `command` and `environment` are lines added to the wordpress component (version 2). */
+function wordpressSource(description: string, extra: { readonly command: readonly string[]; readonly environment: readonly string[] }): string {
+  return [
     "x-hp-stack:",
     "  schemaVersion: 2",
     '  name: "WordPress in contenitore"',
     "  category: content",
-    `  description: "${WORDPRESS_DESCRIPTION}"`,
+    `  description: "${description}"`,
     "x-hp-parameters:",
     "  - key: db_password",
     '    label: "Password del database"',
@@ -188,6 +188,7 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
     "  wordpress:",
     "    image: wordpress:7.1.4-php8.4-apache@sha256:4bf2c44f19a5eba28de4e5cbe50e1c5dc55ae3f8b894f681f4d7676a7e2512e5",
     "    x-hp-profile: standard",
+    ...extra.command,
     "    environment:",
     "      - name: WORDPRESS_DB_HOST",
     "        value: db",
@@ -197,6 +198,7 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
     "        value: wordpress",
     "      - name: WORDPRESS_DB_PASSWORD",
     "        secret: db_password",
+    ...extra.environment,
     "    volumes:",
     "      - site:/var/www/html",
     "    expose:",
@@ -247,7 +249,44 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
     "    port: 80",
     "    protocol: http",
     "",
-  ].join("\n"),
+  ].join("\n");
+}
+
+/**
+ * WordPress with its database, in the extended format (ADR-0036 §2.9), written for this repository. Both components run
+ * with the "standard" profile: the official images start as root and drop to their own user. The two database
+ * passwords are generated, reach the components only through the environment and are never shown. This is not the
+ * managed WordPress site of the panel: no automatic install, no backup, no file or database tools.
+ */
+const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_wordpress_mariadb",
+  versionId: "atv_wordpress_mariadb_2",
+  slug: "wordpress-mariadb",
+  name: "WordPress in contenitore",
+  category: "content",
+  description: WORDPRESS_DESCRIPTION,
+  descriptionEn:
+    "A WordPress site with its own database. The platform generates the database passwords: there is nothing to type. After you connect the domain, open the site right away and complete the first-time setup of WordPress (title, administrator user and password): until you do, anyone who reaches the address can do it in your place. The site and the database are kept even when the application is deleted, unless deletion is explicitly requested. You can upload files of up to 64 MB.",
+  source: wordpressSource(WORDPRESS_DESCRIPTION, {
+    // The image's own start program, with the PHP limits for uploads on its command line (ADR-0036): the image's
+    // default is 2 MB, too small for the themes and plugins WordPress uploads. No shell, no file written.
+    command: ['    command: ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"]'],
+    // The image runs this one line of PHP in wp-config.php, at every request: the site's address is the host name it
+    // is asked by, lower-cased, when that begins and ends with a letter or digit, with an optional port (the proxy's
+    // ports are configurable, so the browser may send one); otherwise WordPress keeps its stored address. So it answers
+    // on every address of the application instead of sending visitors back to the first one. The proxy forwards only
+    // the application's own addresses. Neither WordPress nor the image's wp-config.php uses $hcp_host, and it is no
+    // hp_ name, which the real-Docker acceptance gate refuses in a request. The line runs in the global scope of the
+    // request, so it unsets its variable at the end. A "$$" is one "$" for PHP.
+    environment: [
+      "      - name: WORDPRESS_CONFIG_EXTRA",
+      `        value: "$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); } unset($$hcp_host);"`,
+    ],
+  }),
+  // Version 1 as it shipped: the stacks installed on it are offered version 2.
+  previousVersions: Object.freeze([
+    Object.freeze({ versionId: "atv_wordpress_mariadb_1", source: wordpressSource(WORDPRESS_DESCRIPTION_1, { command: [], environment: [] }) }),
+  ]),
 });
 
 // ---- databases (ADR-0039): one component, one port, no address; reachable only by the applications linked to it ----
