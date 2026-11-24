@@ -72,9 +72,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. **What it means.** The API sent a step to the executor and lost the answer (a timeout after the connection, problem
    `OPERATION_AMBIGUOUS`), or the operation's lease ran out. An answer the panel could not read after a change was
-   sent (not JSON, not the expected shape, or a server error without the error envelope) counts as lost too. The
-   operation and the stack become `unknown` (a delete in doubt stays `deleting`). The operation keeps its lock, so
-   every new action on that stack is refused until it settles.
+   sent (a success answer that is not JSON or not of the expected shape, or a server error without the error
+   envelope) counts as lost too. The operation and the stack become `unknown` (a delete in doubt stays `deleting`).
+   The operation keeps its lock, so every new action on that stack is refused until it settles. A client error
+   (`4xx`) the panel could not read is not a lost answer: the operation fails as after any other refusal.
 2. **What the panel does.** On every outbox poll and at every API start, recovery reads the stack's state from the
    executor once (a `GET`) and settles the operation from what it sees. It never continues or repeats the action
    (`HARNESS.md`, `TH-08`):
