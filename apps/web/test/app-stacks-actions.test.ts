@@ -489,6 +489,22 @@ describe("upgrade and rollback plan dialog", () => {
     }
   });
 
+  it.each(locales)("a refusal that arrives when the dialog is no longer drawn goes to the page (issue #136, %s)", async (_l, m) => {
+    let release!: (v: unknown) => void;
+    keyedSend.mockReturnValue(new Promise((r) => (release = r)));
+    const refs: Array<{ current: unknown }> = [];
+    const parent = callHooks(AppStackActions, actionProps("running"), m, { 4: "upgrade" }, refs);
+    const confirmed = run(planDialog(parent.out), m, { 0: DIFF, 2: true });
+    const pending = click(button(confirmed.out, m.apps.upgrade.confirm));
+    // The page is drawn again with no version to upgrade to: the dialog is gone while its confirm is out.
+    const again = callHooks(AppStackActions, actionProps("running", { upgrade: null }), m, { 4: "upgrade" }, refs);
+    expect(els(again.out).some((e) => typeof e.type === "function" && e.type.name === "PlanDialog")).toBe(false);
+    release({ ok: false, code: "RESOURCE_LOCKED", reason: "address_removing" });
+    await pending;
+    expect(parent.sets).toContainEqual([2, m.apps.reasons.versionAddressRemoving]);
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
   describe("private values the new version needs (issue #89)", () => {
     const ASKING: AppStackPlanDiffDto = { ...DIFF, dataRisk: false, newSecrets: [{ key: "mail_password", label: "Mail password" }] };
     const TYPED = "typed-mail-password-9c1";

@@ -70,6 +70,9 @@ export function AppStackActions({
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}`;
   const target: PlanTarget | null =
     plan === "upgrade" && upgrade ? { templateVersionId: upgrade.templateVersionId } : plan === "rollback" && rollback ? { revisionId: rollback.revisionId } : null;
+  // Read when an answer arrives, by the closure of the render that sent it: the dialog may be gone by then.
+  const dialogDrawn = useRef(false);
+  dialogDrawn.current = plan !== null && target !== null;
 
   // One change at a time: null when another request is still out.
   async function run(action: QueuedAction, body: object): Promise<Sent | null> {
@@ -85,8 +88,8 @@ export function AppStackActions({
       setNotice(t.accepted);
       router.refresh();
     } else if (sent.ok) setError(appStackRefusalText(m, ""));
-    // The plan dialog shows the refusal of its own confirm, next to what was typed: the page behind says nothing.
-    else if (action !== "upgrade" && action !== "rollback") setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
+    // The plan dialog shows the refusal of its own confirm, next to what was typed: the page behind says nothing, unless the dialog is gone.
+    else if (!((action === "upgrade" || action === "rollback") && dialogDrawn.current)) setError(appStackChangeRefusalText(m, sent.code, sent.reason, status));
     return sent;
   }
 
