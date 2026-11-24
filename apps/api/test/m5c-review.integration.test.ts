@@ -72,6 +72,11 @@ const engineDown = () => new ExecutorCodedError("engine unreachable", "DOCKER_EN
 /** The client's answer when the executor's answer to a change it sent cannot be read (#182). */
 const unreadable = () =>
   new ExecutorIpcClientError("Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON", "OPERATION_AMBIGUOUS", 502, true);
+/** The client's answers to a change it sent: its wait ended, or the answer cannot be read (#182). */
+const LOST: readonly (readonly [string, () => Error])[] = [
+  ["timed out", () => new ExecutorCodedError("timed out", "OPERATION_AMBIGUOUS")],
+  ["answered unreadably", unreadable],
+];
 
 /** Admin list, customer list and site detail of one site, as `org` sees them. */
 async function shown(siteId: string, org: string = PLATFORM_OPS_ORG_ID, as: string = token): Promise<string[]> {
@@ -142,12 +147,6 @@ describe("1.1 a Stop that failed", () => {
     expect((await opOf(await stopSite(siteId))).status).toBe("unknown");
     expect((await svcOf(svcId)).desiredStatus).toBe("stopped");
   });
-
-  /** The client's answers to a Stop it sent: its wait ended, or the answer cannot be read (#182). */
-  const LOST: readonly (readonly [string, () => Error])[] = [
-    ["timed out", () => new ExecutorCodedError("timed out", "OPERATION_AMBIGUOUS")],
-    ["answered unreadably", unreadable],
-  ];
 
   /** A Stop left in doubt, then `act` on the container, then the recovery pass (R196 1.1), which reads and never stops again. */
   async function stopInDoubtThenRecover(act: (svcId: string) => Promise<unknown>, lost: () => Error = LOST[0]![1]) {
@@ -284,6 +283,20 @@ describe("an answer the client cannot read to the site's own changes (#182)", ()
     expect((await opOf(await moveToNewOwner(siteId))).status).toBe("failed");
     expect([running(svcId), (await svcOf(svcId)).desiredStatus]).toEqual([false, "stopped"]);
     expect(await adminStatus(siteId)).toBe("degraded");
+  });
+
+  it.each(LOST)("to a Restart that %s: unknown, then the recovery's read settles it and nothing is sent again", async (_, lost) => {
+    const { siteId, svcId } = await start();
+    const restarts = vi.spyOn(sim, "restartService").mockRejectedValueOnce(lost());
+    const deploys = sim.deployedSpecs.length;
+    const restart = await call("POST", `/v1/admin/sites/${siteId}/restart`, { reason: REASON });
+    expect(restart.status).toBe(202);
+    await run();
+    const opId = restart.body.data.operationId as string;
+    expect((await opOf(opId)).status).toBe("unknown");
+    await app.outboxWorker.recoverUnknownOperations();
+    expect((await opOf(opId)).status).toBe("succeeded");
+    expect([restarts.mock.calls.length, sim.deployedSpecs.length, running(svcId)]).toEqual([1, deploys, true]);
   });
 });
 
