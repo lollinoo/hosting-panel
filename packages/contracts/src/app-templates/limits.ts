@@ -3,6 +3,40 @@ import { z } from "zod";
 /** x-hp-stack.schemaVersion and app_template_versions.spec_version. */
 export const APP_TEMPLATE_SPEC_VERSION = 1 as const;
 export const APP_STACK_PLAN_SCHEMA_VERSION = 1 as const;
+/** `HCP-STACK/v2` (ADR-0036): free digest-pinned images, run profiles, environment secrets, generated secrets. A v2
+ *  source compiles to a version 2 plan; version 1 sources and plans keep their exact shape. */
+export const APP_TEMPLATE_SPEC_VERSION_2 = 2 as const;
+export const APP_STACK_PLAN_SCHEMA_VERSION_2 = 2 as const;
+export const APP_TEMPLATE_SPEC_VERSIONS = [APP_TEMPLATE_SPEC_VERSION, APP_TEMPLATE_SPEC_VERSION_2] as const;
+export type AppTemplateSpecVersion = (typeof APP_TEMPLATE_SPEC_VERSIONS)[number];
+
+/** The closed container bodies of a v2 component; a v1 component is always "strict". What a name means is a constant
+ *  of the executor: no source or plan ever names a capability, a user or a mount option. */
+export const APP_STACK_RUN_PROFILES = ["strict", "standard"] as const;
+export type AppStackRunProfile = (typeof APP_STACK_RUN_PROFILES)[number];
+export const APP_STACK_DEFAULT_RUN_PROFILE: AppStackRunProfile = "strict";
+
+/** How the platform makes the value of a generated secret parameter (v2). `length` counts characters, except for
+ *  "base64" where it counts the random bytes before encoding. */
+export const APP_SECRET_GENERATE_KINDS = ["password", "hex", "base64", "user"] as const;
+export type AppSecretGenerateKind = (typeof APP_SECRET_GENERATE_KINDS)[number];
+export const APP_SECRET_GENERATE_BOUNDS: Readonly<Record<AppSecretGenerateKind, { readonly min: number; readonly max: number }>> =
+  Object.freeze({
+    password: Object.freeze({ min: 16, max: 128 }),
+    hex: Object.freeze({ min: 16, max: 128 }),
+    base64: Object.freeze({ min: 16, max: 96 }),
+    user: Object.freeze({ min: 8, max: 32 }),
+  });
+
+/** Environment secrets (v2): secret references in one value, pieces of one plan entry (literals and references
+ *  alternate), UTF-8 bytes of a secret used in the environment, UTF-8 bytes of one expanded value. The last bound always
+ *  holds for a value the API accepted: 4 references of 4 096 bytes plus 4 096 literal characters of 3 bytes at most. */
+export const APP_STACK_SECRET_ENV_LIMITS = Object.freeze({
+  referencesPerValue: 4,
+  pieces: 9,
+  secretBytes: 4_096,
+  expandedBytes: 32_768,
+});
 
 export const APP_TEMPLATE_LIMITS = {
   sourceBytes: 65_536, // = TEMPLATE_SOURCE_MAX_BYTES (parser)
@@ -48,6 +82,8 @@ export const APP_TEMPLATE_LIMITS = {
 export const APP_STACK_PLAN_MAX_BYTES = 262_144;
 /** HostConfig.PidsLimit of every component: not an input, not in the plan. */
 export const APP_STACK_PIDS_LIMIT = 256;
+/** HostConfig.PidsLimit of a "standard" component (an Apache or a database with its workers). */
+export const APP_STACK_STANDARD_PIDS_LIMIT = 512;
 /** Container dir of the secret files; already a FORBIDDEN_CONTAINER_MOUNT_TARGET. */
 export const APP_STACK_SECRET_DIR = "/run/secrets";
 

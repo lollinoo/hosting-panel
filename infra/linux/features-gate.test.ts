@@ -55,10 +55,10 @@ exit 0
 
 describe("panel_features_in_use", () => {
   it("prints the in-use features; the password only in PGPASSWORD and ON_ERROR_STOP set", () => {
-    const r = run({ inUse: ["manual-tls", "backup-targets", "site-templates", "app-stacks"] });
+    const r = run({ inUse: ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2"] });
     expect(r.code, r.err).toBe(0);
-    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\n");
-    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(5);
+    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\n");
+    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(6);
     for (const c of r.calls.split("\n").filter(Boolean)) {
       expect(c).toMatch(/^-X -qtA -v ON_ERROR_STOP=1 -h 127\.0\.0\.1 -U hosting_panel -d hosting_panel -c /);
     }
@@ -70,6 +70,7 @@ describe("panel_features_in_use", () => {
     expect(run({ inUse: ["backup-targets"] }).out).toBe("backup-targets\n");
     expect(run({ inUse: ["site-templates"] }).out).toBe("site-templates\n");
     expect(run({ inUse: ["app-stacks"] }).out).toBe("app-stacks\n");
+    expect(run({ inUse: ["app-format-v2"] }).out).toBe("app-format-v2\n");
     expect(run({ inUse: [] }).out).toBe("");
   });
 
@@ -81,8 +82,15 @@ describe("panel_features_in_use", () => {
     expect(calls).toContain("app_stacks where deleted_at is null");
   });
 
+  it("asks the extended application format of the stacks that are not deleted: their template version, then their revisions", () => {
+    const { calls } = run({});
+    expect(calls).toContain("select 'app-format-v2' where exists (select 1 from public.app_stacks s where s.deleted_at is null and (");
+    expect(calls).toContain("public.app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2");
+    expect(calls).toContain("public.app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'");
+  });
+
   it("a migration that is not recorded means the feature is not asked and not in use", () => {
-    const all = ["manual-tls", "backup-targets", "site-templates", "app-stacks"];
+    const all = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2"];
     const r = run({ applied: [], inUse: all });
     expect(r.code, r.err).toBe(0);
     expect(r.out).toBe("");
@@ -94,8 +102,11 @@ describe("panel_features_in_use", () => {
     expect(only24.out).toBe("site-templates\n");
     expect(only24.calls.split("\n").filter(Boolean)).toHaveLength(2);
     const only25 = run({ applied: [M25], inUse: all });
-    expect(only25.out).toBe("app-stacks\n");
-    expect(only25.calls.split("\n").filter(Boolean)).toHaveLength(2);
+    // Both application gates read tables of the same migration.
+    expect(only25.out).toBe("app-stacks\napp-format-v2\n");
+    expect(only25.calls.split("\n").filter(Boolean)).toHaveLength(3);
+    const without25 = run({ applied: [M21, M22, M24], inUse: all });
+    expect(without25.out).toBe("manual-tls\nbackup-targets\nsite-templates\n");
   });
 
   it("fails closed: a psql error or a URL that is not the local panel database is non-zero", () => {
@@ -104,6 +115,7 @@ describe("panel_features_in_use", () => {
     expect(run({ failOn: "backup_targets" }).code).not.toBe(0);
     expect(run({ failOn: "template_version_id", inUse: ["site-templates"] }).code).not.toBe(0);
     expect(run({ failOn: "app_stacks where", inUse: ["app-stacks"] }).code).not.toBe(0);
+    expect(run({ failOn: "spec_version", inUse: ["app-format-v2"] }).code).not.toBe(0);
     const bad = run({ url: `postgresql://hosting_panel:${PW}@db.example.com:5432/hosting_panel` });
     expect(bad.code).not.toBe(0);
     expect(bad.calls).toBe("");
@@ -117,7 +129,7 @@ describe("release_features", () => {
   };
   it("reads the features line build-release.mjs writes", () => {
     const json = JSON.stringify({ version: "1.0.0", node: "26.13.1", features: RELEASE_FEATURES.join(" ") }, null, 2);
-    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks");
+    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-format-v2");
   });
   it("is empty when the key is absent or empty", () => {
     expect(parse(`${JSON.stringify({ version: "1.0.0" }, null, 2)}\n`)).toBe("");

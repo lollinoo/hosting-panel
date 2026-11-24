@@ -262,6 +262,7 @@ describe("/admin/templates", () => {
     expect(links.map((l) => [l.props.href, textOf(l)])).toEqual([
       ["/admin/templates/new", tabs.sites],
       ["/admin/templates/apps/new", tabs.apps],
+      ["/admin/templates/apps/import", tabs.importCompose],
     ]);
     const out = html(m, tree);
     expect(out).toContain(m.admin.templates.title);

@@ -13,7 +13,11 @@ import {
   AppTemplateSourceSchema,
   AppTemplateValidationDtoSchema,
   ArchiveAppTemplateInputSchema,
+  COMPOSE_IMPORT_REPORT_MAX,
+  ComposeImportDtoSchema,
+  ComposeImportNoteDtoSchema,
   CreateAppTemplateInputSchema,
+  ImportComposeInputSchema,
   UpdateAppTemplateInputSchema,
   ValidateAppTemplateInputSchema,
 } from "../src/app-templates/admin-dto.js";
@@ -68,8 +72,16 @@ const STACK_SUMMARY = {
   componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com", updatedAt: AT,
 };
 
+const NOTE = { level: "changed", code: "IMAGE_PINNED", path: "services.app.image", message: "The image is pinned to the digest its registry gave." };
+
 const SAMPLES: [string, z.ZodType, unknown][] = [
   ["validation", AppTemplateValidationDtoSchema, { valid: false, issues: [ISSUE], parameters: SPEC.parameters, preview: PREVIEW }],
+  [
+    "compose import",
+    ComposeImportDtoSchema,
+    { source: "x-hp-stack: {}\n", report: [NOTE], validation: { valid: true, issues: [], parameters: SPEC.parameters, preview: PREVIEW } },
+  ],
+  ["compose import refused", ComposeImportDtoSchema, { source: null, report: [{ ...NOTE, level: "refused", code: "IMAGE_UNRESOLVED" }], validation: null }],
   ["admin summary", AdminAppTemplateSummaryDtoSchema, SUMMARY],
   ["admin detail", AdminAppTemplateDetailDtoSchema, DETAIL],
   ["version created", AdminAppTemplateVersionCreatedDtoSchema, { template: DETAIL, versionId: "atv_demo_1", versionNumber: 1, created: true }],
@@ -201,6 +213,7 @@ describe("app API DTO keys pass the public-DTO and plaintext-secret guards", () 
 
 const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["validate", ValidateAppTemplateInputSchema, { source: "x" }, true],
+  ["import compose", ImportComposeInputSchema, { compose: "services: {}", name: "Notes", category: "productivity" }, true],
   ["create template", CreateAppTemplateInputSchema, { slug: "notes-demo", source: "x" }, true],
   ["add version", AddAppTemplateVersionInputSchema, { source: "x" }, true],
   ["update template", UpdateAppTemplateInputSchema, { enabled: false }, true],
@@ -232,6 +245,35 @@ describe("app API input schemas", () => {
     expect(AppTemplateSourceSchema.safeParse("é".repeat(32_768)).success).toBe(true);
     expect(AppTemplateSourceSchema.safeParse(`${"é".repeat(32_768)}a`).success).toBe(false);
     expect(AppTemplateSourceSchema.safeParse("").success).toBe(false);
+  });
+
+  it("a Compose file is bounded like a template source, and its name and category like a template's", () => {
+    const parse = (input: unknown): boolean => ImportComposeInputSchema.safeParse(input).success;
+    expect(parse({ compose: "a".repeat(65_536) })).toBe(true);
+    expect(parse({ compose: "a".repeat(65_537) })).toBe(false);
+    expect(parse({ compose: `${"é".repeat(32_768)}a` })).toBe(false);
+    expect(parse({ compose: "" })).toBe(false);
+    expect(parse({ compose: 1 })).toBe(false);
+    expect(parse({ compose: "x", name: "n".repeat(81) })).toBe(false);
+    expect(parse({ compose: "x", name: "a\u0000b" })).toBe(false);
+    expect(parse({ compose: "x", category: "Not A Slug" })).toBe(false);
+    expect(parse({ compose: "x", name: undefined })).toBe(true);
+  });
+
+  it("an import report holds at most 200 notes, each with a known level, a code in capitals and a bounded text", () => {
+    const report = (count: number): unknown => ({ source: null, report: Array.from({ length: count }, () => NOTE), validation: null });
+    expect(COMPOSE_IMPORT_REPORT_MAX).toBe(200);
+    expect(ComposeImportDtoSchema.safeParse(report(200)).success).toBe(true);
+    expect(ComposeImportDtoSchema.safeParse(report(201)).success).toBe(false);
+    const note = (change: Record<string, unknown>): boolean => ComposeImportNoteDtoSchema.safeParse({ ...NOTE, ...change }).success;
+    expect(note({})).toBe(true);
+    expect(note({ path: "" })).toBe(true);
+    expect(note({ level: "warning" })).toBe(false);
+    expect(note({ code: "image_pinned" })).toBe(false);
+    expect(note({ path: "p".repeat(513) })).toBe(false);
+    expect(note({ message: "" })).toBe(false);
+    expect(note({ message: "m".repeat(601) })).toBe(false);
+    expect(note({ extra: 1 })).toBe(false);
   });
 
   it("a template update must change something", () => {

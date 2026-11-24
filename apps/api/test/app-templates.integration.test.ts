@@ -141,6 +141,7 @@ describe("application template catalogue", () => {
     const routes: [string, string, unknown?][] = [
       ["GET", BASE],
       ["POST", `${BASE}/validate`, { source: NOTES_DEMO_SOURCE }],
+      ["POST", `${BASE}/import-compose`, { compose: "services: {}" }],
       ["POST", BASE, { slug: "other-slug", source: NOTES_DEMO_SOURCE }],
       ["GET", `${BASE}/${templateId}`],
       ["PATCH", `${BASE}/${templateId}`, { enabled: true }],
@@ -464,6 +465,7 @@ describe("application templates while the capability flags are off", () => {
     const routes: [string, string, string, unknown?][] = [
       [h.adminToken, "GET", BASE],
       [h.adminToken, "POST", `${BASE}/validate`, { source: NOTES_DEMO_SOURCE }],
+      [h.adminToken, "POST", `${BASE}/import-compose`, { compose: "services: {}" }],
       [h.adminToken, "POST", BASE, { slug: "notes-demo", source: NOTES_DEMO_SOURCE }],
       [h.adminToken, "GET", `${BASE}/${id}`],
       [h.adminToken, "PATCH", `${BASE}/${id}`, { enabled: true }],

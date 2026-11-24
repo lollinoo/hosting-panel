@@ -394,7 +394,8 @@ describe("parameter definitions", () => {
 describe("header, services and ingress", () => {
   it.each<Row>([
     ["no header", build([["x-hp-stack"], REMOVE]), "HEADER_MISSING", ""],
-    ["schemaVersion 2", build([["x-hp-stack", "schemaVersion"], 2]), "HEADER_VERSION_UNSUPPORTED", "x-hp-stack.schemaVersion"],
+    ["schemaVersion 3", build([["x-hp-stack", "schemaVersion"], 3]), "HEADER_VERSION_UNSUPPORTED", "x-hp-stack.schemaVersion"],
+    ["schemaVersion \"2\"", build([["x-hp-stack", "schemaVersion"], "2"]), "HEADER_VERSION_UNSUPPORTED", "x-hp-stack.schemaVersion"],
     ["no schemaVersion", build([["x-hp-stack", "schemaVersion"], REMOVE]), "HEADER_VERSION_UNSUPPORTED", "x-hp-stack"],
     ["name of 81 chars", build([["x-hp-stack", "name"], "n".repeat(81)]), "HEADER_NAME_INVALID", "x-hp-stack.name"],
     ["category with _", build([["x-hp-stack", "category"], "my_cat"]), "HEADER_CATEGORY_INVALID", "x-hp-stack.category"],

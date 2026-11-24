@@ -17,7 +17,6 @@ import {
   type AppStackDomainDto,
   type AppStackPlanDiffDto,
   type AppStackSummaryDto,
-  type AppTemplateParameter,
   type AppTemplateValidationDto,
   type CustomerAppTemplateDto,
   type CustomerAppTemplateSummaryDto,
@@ -253,7 +252,7 @@ const DOMAIN: AppStackDomainDto = {
 };
 const DOMAINS: AppStackDomainDto[] = [DOMAIN, { ...DOMAIN, id: "sdom_2", hostname: "wiki.example.test", status: "pending", certificateStatus: "requested", certificateExpiresAt: null }];
 
-const PARAMS: AppTemplateParameter[] = [
+const PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "title", label: "Board title", type: "string", default: "My notes", customer: true },
   { key: "port", label: "Listen port", type: "integer", min: 1024, max: 65535, default: 8080, customer: true },
   { key: "mode", label: "Mode", type: "enum", options: ["small", "large"], default: "small", customer: true },
