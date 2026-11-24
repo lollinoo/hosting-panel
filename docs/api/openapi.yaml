@@ -6118,11 +6118,12 @@ paths:
         stores nothing; an upgrade taken back keeps it, and the next preview no longer asks for it). Refusals, with
         `details[].field: secrets.<key>`: one that is missing (`STACK_SECRET_MISSING`, one detail per value), a key
         that is not a private value of the new version or that the customer may not set (`STACK_PARAMETER_INVALID`),
-        an optional one, set among the private values after the upgrade (`secret_not_needed`), and a value over 4096
-        UTF-8 bytes that the new version puts in an environment variable, or over 24576 for any other
-        (`value_too_long`). A value the application has already (stored since the preview, e.g. by an upgrade taken
-        back) means the preview is stale and is refused like a changed plan (`details[0].field: planHash`,
-        `details[0].reason: plan_changed`). The values are never returned, logged or audited (the audit names each
+        an optional one, set among the private values after the upgrade, whether or not the application has a value
+        for it already (`secret_not_needed`), and a value over 4096 UTF-8 bytes that the new version puts in an
+        environment variable, or over 24576 for any other (`value_too_long`). A value the new version requires that
+        the application has already (stored since the preview, e.g. by an upgrade taken back) means the preview is
+        stale and is refused like a changed plan (`details[0].field: planHash`, `details[0].reason: plan_changed`);
+        only such a value is, since no preview asks for any other. The values are never returned, logged or audited (the audit names each
         key and its version as `app.stack.secret.rotate`), and the request hash of the Idempotency-Key covers their keys only: the same key
         with other values replays the first request. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version

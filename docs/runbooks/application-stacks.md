@@ -128,9 +128,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    the transaction that queues the update, and never shown again; **Valori riservati** lists it as set from then on and
    replaces it as usual. An update without it is refused at the request, next to its field (`STACK_SECRET_MISSING`,
    field `secrets.<key>`); an optional value, which is set among the private values after the update, is refused with
-   `secret_not_needed`. An update taken back before create keeps the value, and the next attempt does not ask for it:
-   a dialog still open on the older review that sends it is answered `plan_changed` and shows the review again, without
-   the field. A value over 4096 UTF-8 bytes read from an environment variable, or over 24576 for any other, is refused
+   `secret_not_needed`, also when the application has one already. An update taken back before create keeps the value,
+   and the next attempt does not ask for it: a dialog still open on the older review that sends it is answered
+   `plan_changed` and shows the review again, without the field. Only a value the new version requires and the
+   application has is answered `plan_changed`: no review asks for any other. A value over 4096 UTF-8 bytes read from an environment variable, or over 24576 for any other, is refused
    with `value_too_long` next to its field. Such values are not held to the limit of 10 new versions an
    hour when they are stored (one per key, ever), and count in that hour afterwards like any value the customer sets.
    The audit names each key and its version (`app.stack.secret.rotate`). The keys a stack has, never the values:
