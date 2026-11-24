@@ -126,8 +126,9 @@ export async function recoverAppStackOperation(
     destroyVolumes: (await listAppStackVolumes(db, scope)).some((volume) => volume.retentionPolicy === "destroy"),
   });
   // A create step still pending was never called: an upgrade or a rollback in doubt before it changed nothing, so what
-  // its request wrote is taken back, and an application that was stopped stays stopped. Once create has started, the
-  // executor may have replaced components.
+  // its request wrote is taken back, and an application that was stopped stays stopped once a revision of it was
+  // applied (one never applied has no installed version a start could use). Once create has started, the executor may
+  // have replaced components.
   const [create] = deploys
     ? await db
         .select({ status: operationSteps.status })
@@ -141,7 +142,8 @@ export async function recoverAppStackOperation(
     outcome: v.outcome,
     problem: v.problem,
     // A redeploy's plan matches the stopped containers, so the verdict reads them as applied and failed.
-    stackStatus: untouched && v.outcome === "failed" && deployment.replacedStatus === "stopped" ? "stopped" : v.stackStatus,
+    stackStatus:
+      untouched && v.outcome === "failed" && deployment.replacedStatus === "stopped" && stack.appliedRevisionId !== null ? "stopped" : v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
     ...(untouched && !v.applied && (kind === "stack.upgrade" || kind === "stack.rollback") ? { restoreReplaced: true } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),

@@ -129,10 +129,10 @@ describe("recoverAppStackOperation (RT4)", () => {
     }) as DockerExecutorPort;
   }
 
-  function revision(stackId: string, components: AppStackPlanComponent[]): NewAppStackRevision {
+  function revision(stackId: string, components: AppStackPlanComponent[], ingress = INGRESS): NewAppStackRevision {
     const revisionId = newAppEntityId("srev");
     const volumes = [...new Set(components.flatMap((c) => c.volumes.map((v) => v.volumeKey)))].sort().map((key) => ({ key }));
-    const base = { schemaVersion: 1 as const, stackId, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: versionId, revisionId, components, volumes, ingress: INGRESS };
+    const base = { schemaVersion: 1 as const, stackId, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: versionId, revisionId, components, volumes, ingress };
     const plan: ApprovedStackPlan = { ...base, planHash: computeAppStackPlanHash(base) };
     expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
     return {
@@ -534,6 +534,33 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(await recover(redeploy)).toBe("settled");
     await expectInterrupted(redeploy);
     expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId });
+  });
+
+  it("(8d) a stopped application that never ran, whose upgrade is in doubt before create, ends failed as before (#129)", async () => {
+    // A first install refused at create leaves no applied revision.
+    const { stackId, write } = await create();
+    fake.failNext("createAppStackComponents", "definite");
+    expect(await apply(write)).toBe(APP_STACK_FAILURE.DOCKER_ENGINE_UNAVAILABLE.code);
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    expect((await stackOf(stackId)).status).toBe("stopped");
+    const v2 = revision(stackId, [CACHE, WEB, component("extra")], [{ componentKey: "extra", port: 8080 }, ...INGRESS]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    await addAppStackDomainsTransactional(db(), {
+      organizationId: ORG,
+      stackId,
+      entries: [{ hostname: `extra${String(n)}.example.test`, componentKey: "extra", internalPort: 8080 }],
+    });
+    fake.failNext("pullAppStackImage", "ambiguous");
+    await parked(upgrade);
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stepsOf(upgrade)).toMatchObject({ pull: "failed", create: "failed" });
+    // Not taken back: the address points at a part only the new version has.
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null, desiredRevisionId: v2.revisionId });
   });
 
   it("(9) routes observed published keep the stored routes hash", async () => {

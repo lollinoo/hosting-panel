@@ -463,10 +463,11 @@ export class AppStackRuntime {
         const previous = deploy ? st.previous : st.plan;
         const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
         const observed = stack && previous ? await this.#status(ctx) : null;
-        // A stopped application whose start, deploy, upgrade or rollback is refused stays stopped, read or not: nothing
-        // was started, and its stopped containers would otherwise read as a failure.
+        // A stopped application whose start is refused stays stopped, read or not: nothing was started. So does one whose
+        // deploy, upgrade or rollback is refused once a revision of it was applied, as its stopped containers would
+        // otherwise read as a failure; one never applied has no installed version a start could use, so it stays failed.
         const replaced =
-          ctx.op.kind === "stack.start" || deploy
+          ctx.op.kind === "stack.start" || (deploy && stack?.appliedRevisionId != null)
             ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId })
             : null;
         if (replaced?.replacedStatus === "stopped") {

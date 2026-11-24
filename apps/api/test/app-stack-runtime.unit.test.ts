@@ -706,6 +706,36 @@ describe("AppStackRuntime (RT3)", () => {
 
       expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
     });
+
+    it("one that never ran ends failed, as before: no revision of it was ever installed, so a start has nothing to start", async () => {
+      // A first install refused at create leaves no applied revision.
+      const { stackId, write } = await create([CACHE, WEB]);
+      fake.failNext("createAppStackComponents", "definite");
+      expectFailure(await run(write), "DOCKER_ENGINE_UNAVAILABLE");
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      const v2 = revision(stackId, [CACHE, WEB, component("extra")], [{ componentKey: "extra", port: 8080 }, ...INGRESS]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      await addDomain(stackId, "extra");
+      fake.calls.length = 0;
+      fake.failNext("pullAppStackImage", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(touched()).toEqual([]);
+      // Not taken back: the address points at a part only the new version has.
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null, desiredRevisionId: v2.revisionId });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", replacedStatus: "stopped" });
+
+      // A reinstall of it, stopped again and refused the same way, ends failed too.
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      const redeploy = await enqueue(stackId, "stack.deploy");
+      fake.failNext("pullAppStackImage", "definite");
+      expectFailure(await run(redeploy), "DOCKER_ENGINE_UNAVAILABLE");
+      expect(touched()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+    });
   });
 
   describe("start, restart, stop, delete (13)", () => {
