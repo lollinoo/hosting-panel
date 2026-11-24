@@ -10,6 +10,8 @@ import { isStackExecutor } from "@hosting-panel/executor-contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  APP_STACK_CONTAINER_BODY_VERSION,
+  APP_STACK_LABELS,
   AppStackExecutorError,
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
@@ -58,6 +60,14 @@ async function failure(promise: Promise<unknown>): Promise<{ reason?: string; co
 }
 
 const kinds = (sim: InMemoryDockerSimulatorAdapter) => sim.appStacks.appStackMutations.map((m) => m.kind);
+
+/** Makes a container look built by a release before the body version label (#96). */
+function withoutBodyVersion(sim: InMemoryDockerSimulatorAdapter, key: string): void {
+  const stacks = (sim.appStacks as unknown as { stacks: Map<string, { containers: Map<string, { labels: Record<string, string> }> }> }).stacks;
+  const container = stacks.get(ID)?.containers.get(key);
+  if (container === undefined) throw new Error(`no container ${key}`);
+  container.labels = Object.fromEntries(Object.entries(container.labels).filter(([label]) => label !== APP_STACK_LABELS.bodyVersion));
+}
 
 describe("SimulatedAppStacks deploy flow", () => {
   it("pulls, prepares, creates, starts and reports a healthy stack", async () => {
@@ -371,6 +381,35 @@ describe("SimulatedAppStacks idempotency and removal", () => {
       removedComponents: ["worker"],
     });
     expect(Object.keys(sim.appStacks.getAppStackSnapshot(ID)?.volumes ?? {})).toEqual(["data"]);
+  });
+
+  it("a deploy replaces once a container with an equal hash and no body version label; start and restart leave it", async () => {
+    const sim = simulator();
+    await deploy(sim);
+    withoutBodyVersion(sim, "web");
+    const before = sim.appStacks.appStackMutations.length;
+    expect((await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("already_running");
+    expect((await sim.restartAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("restarted");
+    await sim.stopAppStack(ref);
+    expect((await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("started");
+    expect((await sim.startAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SECRET] })).outcome).toBe("started");
+    const kept = sim.appStacks.appStackMutations.slice(before).map((m) => m.kind);
+    expect(kept).not.toContain("container_remove");
+    expect(kept).not.toContain("container_create");
+    expect(sim.appStacks.getAppStackSnapshot(ID)?.containers.web?.labels[APP_STACK_LABELS.bodyVersion]).toBeUndefined();
+
+    // The worker has the current body version and an equal hash: unchanged.
+    expect(await sim.createAppStackComponents({ plan })).toEqual({
+      components: [
+        { componentKey: "web", outcome: "replaced" },
+        { componentKey: "worker", outcome: "unchanged" },
+      ],
+      removedComponents: [],
+    });
+    const labels = sim.appStacks.getAppStackSnapshot(ID)?.containers.web?.labels;
+    expect(labels?.[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
+    expect(labels?.[APP_STACK_LABELS.componentHash]).toBe(computeAppStackComponentHash(plan, "web"));
+    expect((await sim.createAppStackComponents({ plan })).components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
   });
 
   it("removes components, then the stack, keeping volumes unless asked", async () => {

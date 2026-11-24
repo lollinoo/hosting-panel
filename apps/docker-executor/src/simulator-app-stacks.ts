@@ -34,6 +34,7 @@ import type { APP_STACK_EXECUTOR_METHODS, ServiceLogLine, StackExecutorPort } fr
 import {
   APP_STACK_LABELS,
   AppStackExecutorError,
+  appStackContainerIsCurrent,
   appStackContainerName,
   appStackEdgeNetworkName,
   appStackInternalNetworkName,
@@ -322,7 +323,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
       };
       const payloads = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
-        if (stack.containers.get(key)?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        const existing = stack.containers.get(key);
+        if (existing !== undefined && appStackContainerIsCurrent(existing.labels, plan, key)) continue;
         const payload = buildAppStackContainerCreatePayload(plan, key, ctx);
         assertAppStackPayloadHardening(payload, ctx);
         payloads.set(key, payload);
