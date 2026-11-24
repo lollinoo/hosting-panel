@@ -167,8 +167,8 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       ],
       "accept-app-stack-wordpress.mjs": [
         "gate-self-test", "preflight", "snapshot-before", "plan-compiles-from-seed", "refused-before-docker",
-        "deploy-creates-exact-set", "container-standard-profile", "secrets-reach-only-their-component", "network-shape",
-        "no-control-plane-reach", "route-published-after-health", "wordpress-installs", "logs-mask-environment-secrets",
+        "deploy-creates-exact-set", "image-folder-uncovered-refused", "container-standard-profile",
+        "secrets-reach-only-their-component", "network-shape", "no-control-plane-reach", "route-published-after-health", "wordpress-installs", "logs-mask-environment-secrets",
         "data-survives-stop-and-start", "idempotent-reapply", "upgrade-keeps-data", "recovery-reads-only",
         "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left",
         // The steps of the `--imported` run (the draft the Compose importer writes).

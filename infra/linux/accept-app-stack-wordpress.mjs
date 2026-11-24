@@ -20,8 +20,8 @@
  * The built-in run is made for the newest version of the template; HP_ACCEPT_WORDPRESS_VERSION=1 makes it for version 1,
  * where address-follows-host, address-follows-https and uploads-limit fail: the reproduction of what version 2 fixes (a
  * site that answers only as the name it was installed on, uploads of up to 2 MB). no-redirect-loop is expected to fail
- * there too, the login of version 1 being on that first name. Version 2 without root: RESULT 25/25 passed, 1 skipped;
- * version 1: 21/25.
+ * there too, the login of version 1 being on that first name. Version 2 without root: RESULT 26/26 passed, 1 skipped;
+ * version 1: 22/26.
  *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack id stk_swarmtest_<hex>_a, so every container, network and volume name
@@ -56,8 +56,8 @@
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-wordpress.mjs [--imported]
  *  (version 1: HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs)
  * Steps: gate-self-test, preflight, snapshot-before, plan-compiles-from-seed, refused-before-docker,
- * deploy-creates-exact-set, container-standard-profile, secrets-reach-only-their-component, network-shape,
- * no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, address-follows-https,
+ * deploy-creates-exact-set, image-folder-uncovered-refused, container-standard-profile,
+ * secrets-reach-only-their-component, network-shape, no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, address-follows-https,
  * no-redirect-loop, uploads-limit (these four skipped with --imported: the administrator's draft sets neither the address
  * nor the uploads limit), logs-mask-environment-secrets,
  * data-survives-stop-and-start, idempotent-reapply, upgrade-keeps-data, recovery-reads-only, remove-keeps-volumes,
@@ -947,6 +947,27 @@ async function main() {
       assert(same(ownNames(S1), namesOf(planA)), "own delta: exactly 2 containers, 2 networks, 2 volumes", JSON.stringify(ownNames(S1)));
       assert(otherVolumes(S0, S1).length === 0, "no volume besides the two of the plan (an image volume the plan missed would be one)", otherVolumes(S0, S1).join(","));
       assert(removedSince(S0, S1).length === 0, "no pre-existing object removed", removedSince(S0, S1).join(","));
+    });
+
+    await step("image-folder-uncovered-refused", async () => {
+      // Both images declare a folder (mariadb /var/lib/mysql, wordpress /var/www/html) and the plan covers each with a
+      // volume at exactly that folder, which is why the deploy above went through. The same plan without that volume
+      // (or with it one level up) must be refused at the image step, before anything is created (#98). The images are
+      // here already, so the step only reads them.
+      const mark = gateLog.length;
+      const db = componentOf(planA, T.db);
+      const wp = componentOf(planA, WORDPRESS);
+      const refusals = [
+        ["the database without any volume", withComponent(planA, T.db, { volumes: [] }), db.image, "/var/lib/mysql"],
+        ["wordpress with its volume one level up", withComponent(planA, WORDPRESS, { volumes: [{ ...wp.volumes[0], containerPath: "/var/www" }] }), wp.image, "/var/www/html"],
+      ];
+      for (const [what, plan, image, folder] of refusals) {
+        const err = await rejection(adapter.pullAppStackImage({ plan, image }));
+        assert(err?.reason === "STACK_IMAGE_VOLUME_UNCOVERED", `${what} refused as STACK_IMAGE_VOLUME_UNCOVERED`, err ? reasonOf(err) : "accepted");
+        assert(String(err.message).includes(folder), `${what}: the refusal names ${folder}`, String(err.message));
+      }
+      assert(writesIn(mark).length === 0, "the refusals sent no mutating request (nothing pulled, created or removed)", writesIn(mark).join(" | "));
+      assert(same(ownNames(await snapshot()), namesOf(planA)), "own delta unchanged: still exactly the 2 containers, 2 networks, 2 volumes", "other");
     });
 
     await step("container-standard-profile", async () => {
