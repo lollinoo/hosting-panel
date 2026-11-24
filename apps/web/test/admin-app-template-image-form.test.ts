@@ -287,6 +287,14 @@ describe("the page of a new template from an image", () => {
     expect(await page()).toContain(t.title);
   });
 
+  it("names every image of the allowlist in full, exactly as its row and the written source do", async () => {
+    const form = els(await NewAppTemplateFromImagePage()).find((e) => e.type === AppTemplateImageForm)!;
+    const menu = byId(callHooks(AppTemplateImageForm, form.props as typeof props).tree, "image-form-repository");
+    const options = els(menu.props.children).filter((e) => e.type === "option");
+    expect(options.map((o) => [o.props.value, textOf(o)])).toEqual(APP_IMAGE_ALLOWLIST.map((row) => [row.repository, row.repository]));
+    expect(options.map((o) => o.props.value)).toEqual(expect.arrayContaining(["docker.io/library/mariadb", "docker.io/library/postgres"]));
+  });
+
   it("without a session it goes to the login; with the capability off it shows the notice and no form", async () => {
     getServerSession.mockResolvedValueOnce(null);
     await expect(NewAppTemplateFromImagePage()).rejects.toThrow("REDIRECT:/login");
