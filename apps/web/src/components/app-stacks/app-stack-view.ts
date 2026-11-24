@@ -56,6 +56,13 @@ export function appStackRefusalText(m: Messages, code: string, reason?: string, 
   return errorMessage(m, code);
 }
 
+/** A refused private value: too long names a number of characters only for a value the application reads from its
+ *  environment (`limit: "environment"`); for any other bound, or none named, the sentence names no number. */
+export function appStackSecretRefusalText(m: Messages, sent: { readonly code: string; readonly reason?: string; readonly limit?: string }): string {
+  if (sent.reason === "value_too_long" && sent.limit !== "environment") return m.apps.reasons.value_too_long_store;
+  return appStackRefusalText(m, sent.code, sent.reason);
+}
+
 /** Deployment `problem`: a STACK_* reason or an application code says why; any other value reads as a generic failure. */
 export function appStackProblemText(m: Messages, problem: string | null): string | null {
   if (problem === null) return null;

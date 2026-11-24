@@ -377,6 +377,7 @@ const DIFF: AppStackPlanDiffDto = {
   ],
   volumes: [{ key: "notes", change: "removed" }],
   parameters: [{ key: "SITE_TITLE", change: "unchanged" }],
+  newSecrets: [],
   ingress: [{ componentKey: "web", port: 8080, change: "unchanged" }],
   downtime: true,
   dataRisk: true,

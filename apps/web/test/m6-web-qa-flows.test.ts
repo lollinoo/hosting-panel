@@ -557,6 +557,7 @@ describe("A19: upgrade and rollback", () => {
     ],
     volumes: [{ key: "data", change: "unchanged" }],
     parameters: [],
+    newSecrets: [],
     ingress: [{ componentKey: "web", port: 8080, change: "unchanged" }],
     downtime: true,
     dataRisk: true,

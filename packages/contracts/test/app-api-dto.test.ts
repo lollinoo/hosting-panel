@@ -184,6 +184,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
       components: [{ key: "app", change: "updated", restart: true }],
       volumes: [{ key: "data", change: "unchanged" }],
       parameters: [{ key: "app_secret", change: "updated" }],
+      newSecrets: [{ key: "app_secret", label: "Application secret" }],
       ingress: [{ componentKey: "app", port: 8080, change: "unchanged" }],
       downtime: true, dataRisk: false,
     },
@@ -201,7 +202,7 @@ destroyData parameterKey value limit cursor tail stackId operationId deploymentI
 templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork allowedActions outcomeUnknown revisionNumber health healthObservedAt dependsOn label
 secretParameters required isSet version setAt volumes retentionPolicy upgrade rollback kind problem startedAt endedAt certificateStatus
 certificateProblem certificateExpiresAt checkedAt fromRevisionId fromVersionNumber toTemplateVersionId toVersionNumber newRevision
-change restart downtime dataRisk lines at stream text observedAt stale`.split(/\s+/);
+change restart downtime dataRisk lines at stream text observedAt stale newSecrets secrets`.split(/\s+/);
 
 describe("app API DTO keys pass the public-DTO and plaintext-secret guards", () => {
   it.each(SAMPLES)("%s: a full sample parses and has no forbidden key", (_name, schema, sample) => {
@@ -314,6 +315,20 @@ describe("app API input schemas", () => {
     expect(UpdateAppTemplateInputSchema.safeParse({}).success).toBe(false);
     expect(UpdateAppTemplateInputSchema.safeParse({ name: undefined }).success).toBe(false);
     expect(UpdateAppTemplateInputSchema.safeParse({ description: null }).success).toBe(true);
+  });
+
+  it("an upgrade carries each private value once, under the rule of the private values route", () => {
+    const base = { templateVersionId: "atv_demo_2", planHash: HASH };
+    const parse = (secrets: unknown): boolean => UpgradeAppStackInputSchema.safeParse({ ...base, secrets }).success;
+    expect(parse([{ parameterKey: "mail_password", value: "v" }])).toBe(true);
+    expect(parse([])).toBe(true);
+    expect(parse([{ parameterKey: "mail_password", value: "v" }, { parameterKey: "mail_password", value: "w" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "a\u0000b" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "v".repeat(16_385) }])).toBe(false);
+    expect(parse([{ parameterKey: "hp_reserved", value: "v" }])).toBe(false);
+    expect(parse([{ parameterKey: "mail_password", value: "v", version: 1 }])).toBe(false);
+    expect(parse(Array.from({ length: 9 }, (_, i) => ({ parameterKey: `k${String(i)}`, value: "v" })))).toBe(false);
   });
 
   it("a plan previews a version or a revision, and a rollback takes no parameters", () => {
