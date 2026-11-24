@@ -205,6 +205,9 @@ describe("simulated jobs of application backups", () => {
     await copied(sim, OP(5));
     sim.simulateRestart();
     await refused(OP(5, "-apply"));
+    // A volume the safety copy did not save is never written back.
+    await copied(sim, OP(7), { volumeKeys: ["data"] });
+    await refused(OP(7, "-apply"));
     expect(sim.appStackJobs().filter((job) => job.action === "stackRestore")).toEqual([]);
 
     // One good copy of the two is enough.

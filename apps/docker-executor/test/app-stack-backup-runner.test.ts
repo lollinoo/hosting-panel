@@ -786,6 +786,14 @@ describe("the safety copy a write-back needs (HARNESS.md, ADR-0038 K5)", () => {
     await copied(env, 5);
   });
 
+  it("refuses a write-back of a volume its safety copy did not save", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2, { volumeKeys: ["data"] });
+    await expectNoWriteBack(env.runner, env, restoreReq(OP(2, "-apply"), { volumeKeys: ["data", "db"] }));
+    await expect(env.runner.run(restoreReq(OP(2, "-apply"), { volumeKeys: ["data"] }))).resolves.toMatchObject({ state: "running" });
+    await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "succeeded" });
+  });
+
   it("refuses a write-back after an executor restart: the safety copy it saw went with the process", async () => {
     const env = await setup({ steps: upStep });
     await copied(env, 2);

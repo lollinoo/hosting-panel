@@ -229,7 +229,7 @@ export class SimulatedBackups {
         if (!known) {
           this.assertCanStartJob(stackLane(req.stackId));
           this.assertAppStackAtRest(req.stackId, req.organizationId, req.volumeKeys);
-          if (req.action === "stackRestore") this.assertAppStackSafetyCopy(req.jobId, req.stackId);
+          if (req.action === "stackRestore") this.assertAppStackSafetyCopy(req.jobId, req.stackId, req.volumeKeys);
         }
         const status =
           req.action === "stackStart"
@@ -411,12 +411,22 @@ export class SimulatedBackups {
     }
   }
 
-  /** The real runner's rule: a write-back needs a good copy of the same application as `<op>` or `<op>-t2`. */
-  private assertAppStackSafetyCopy(jobId: string, stackId: string): void {
+  /**
+   * The real runner's rule: a write-back needs a good copy of the same application, every volume it writes included,
+   * as `<op>` or `<op>-t2`.
+   */
+  private assertAppStackSafetyCopy(jobId: string, stackId: string, volumeKeys: readonly string[]): void {
     const op = jobId.slice(0, -"-apply".length);
     const saved = [op, `${op}-t2`].some((id) => {
       const copy = this.jobs.get(id);
-      return copy?.action === "start" && copy.siteId === stackLane(stackId) && copy.state === "succeeded" && copy.snapshot !== null;
+      const asked = this.appStackJobLog.find((job) => job.action === "stackStart" && job.jobId === id);
+      return (
+        copy?.action === "start" &&
+        copy.siteId === stackLane(stackId) &&
+        volumeKeys.every((key) => asked?.volumeKeys.includes(key) === true) &&
+        copy.state === "succeeded" &&
+        copy.snapshot !== null
+      );
     });
     if (!saved) {
       throw new ExecutorCodedError("No good safety copy of this application's data was taken first", "VALIDATION_ERROR");

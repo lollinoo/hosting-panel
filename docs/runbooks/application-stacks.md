@@ -299,7 +299,8 @@ approval.
    volume (what the backup does not hold is deleted from the volume), and starts the application again. The version
    and the settings of the application do not change. If the safety backup reaches no destination, nothing is written
    and the application starts again untouched. The executor checks this by itself: it writes a backup back only after
-   it took, in the same run of the executor, a good safety copy of the same restore (one destination is enough); after
+   it took, in the same run of the executor, a good safety copy of the same restore holding every volume it writes
+   (one destination is enough); after
    an executor restart in between, the restore fails with nothing written. Only a volume that is both in the backup and in the application today
    is written; a backup none of whose volumes exist any more cannot be restored.
 6. **A restore that failed.** When it failed before anything was written, the application starts again by itself.

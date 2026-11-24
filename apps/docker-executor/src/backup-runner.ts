@@ -238,8 +238,8 @@ interface JobRecord {
   status: BackupJobStatus;
   settledAtMs: number | null;
   readonly seq: number;
-  /** The application whose volumes a copy job (`stackStart`) saved. */
-  readonly copyOf?: string;
+  /** The application, and the volumes of it, that a copy job (`stackStart`) saved. */
+  readonly copyOf?: { readonly stackId: string; readonly volumeKeys: readonly string[] };
 }
 
 interface ReadyArchiveRecord {
@@ -872,7 +872,7 @@ export class BackupRunner {
   }
 
   /** Records a job whose lane is already taken and runs it in the background. */
-  private launchJob(jobId: string, runner: (entry: JobRecord) => Promise<void>, copyOf?: string): BackupJobStatus {
+  private launchJob(jobId: string, runner: (entry: JobRecord) => Promise<void>, copyOf?: JobRecord["copyOf"]): BackupJobStatus {
     const initial: BackupJobStatus = {
       jobId,
       state: "running",
@@ -2514,16 +2514,22 @@ export class BackupRunner {
   }
 
   /**
-   * A write-back (`<op>-apply`) needs a good safety copy of the same application's data, taken by this process under
-   * the same operation: `<op>` or `<op>-t2`, one is enough (HARNESS.md, ADR-0038 K5). Only the in-memory record of the
-   * copy job proves it, so after an executor restart the write-back is refused. A snapshot tag in the repository would
-   * outlive a restart, but the safety copy may sit on the other destination, which the request does not name.
+   * A write-back (`<op>-apply`) needs a good safety copy of the same application's data, every volume it writes
+   * included, taken by this process under the same operation: `<op>` or `<op>-t2`, one is enough (HARNESS.md,
+   * ADR-0038 K5). Only the in-memory record of the copy job proves it, so after an executor restart the write-back is
+   * refused. A snapshot tag in the repository would outlive a restart, but the safety copy may sit on the other
+   * destination, which the request does not name.
    */
   private assertAppStackSafetyCopy(req: AppStackRestoreRequest): void {
     const op = req.jobId.slice(0, -"-apply".length);
     const saved = [op, `${op}-t2`].some((jobId) => {
       const copy = this.jobs.get(jobId);
-      return copy?.copyOf === req.stackId && copy.status.state === "succeeded" && copy.status.snapshot !== null;
+      return (
+        copy?.copyOf?.stackId === req.stackId &&
+        req.volumeKeys.every((key) => copy.copyOf?.volumeKeys.includes(key) === true) &&
+        copy.status.state === "succeeded" &&
+        copy.status.snapshot !== null
+      );
     });
     if (!saved) {
       throw new ExecutorCodedError("No good safety copy of this application's data was taken first", "VALIDATION_ERROR");
@@ -2771,7 +2777,7 @@ export class BackupRunner {
             request.action === "stackStart"
               ? this.runAppStackBackupJob(request, entry)
               : this.runAppStackRestoreJob(request, entry),
-          request.action === "stackStart" ? request.stackId : undefined,
+          request.action === "stackStart" ? { stackId: request.stackId, volumeKeys: [...request.volumeKeys] } : undefined,
         ) as BackupsResultByAction[R["action"]];
       }
       case "stackForget":
