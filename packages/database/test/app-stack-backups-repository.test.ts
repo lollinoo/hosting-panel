@@ -642,6 +642,27 @@ describe("@hosting-panel/database — application backups", () => {
       expect((await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id })).backup.incompleteData).toBe(false);
     });
 
+    it("a run of a task never decides, not even one that succeeded: it takes no data as they are (ADR-0042)", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const failed = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
+      await finish(failed);
+      await settleAppStackRestore(db(), { operationId: failed.operation.id, status: "failed", problem: "no_space", mayHaveWritten: true });
+      await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+      // A run that began holds the application's lock, the one the mark reads, until it ends.
+      await db().insert(operations).values({
+        id: `op_${hex("stack.task mark").slice(0, 24)}`,
+        organizationId: orgA,
+        kind: "stack.task",
+        resourceType: "stack",
+        resourceId: stack.id,
+        status: "succeeded",
+        lockKey: `stack:${stack.id}`,
+        idempotencyKey: "sb-stack.task-mark",
+      });
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(failed.backup.id);
+    });
+
     it("an action that failed, a restore aside, leaves the data as the failed restore left them", async () => {
       const stack = await installed();
       const source = await goodBackup(stack);
