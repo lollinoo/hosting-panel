@@ -24,6 +24,7 @@ const scripts = [
   "accept-app-stack-http-cache.mjs",
   "accept-app-stack-worker-storage.mjs",
   "accept-app-stack-wordpress.mjs",
+  "accept-app-routing-options.mjs",
 ];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
@@ -160,5 +161,66 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).toMatch(/skipped \(not counted in n\/m\)/);
       expect(harness, name).toContain(name);
     }
+  });
+});
+
+describe("ADR-0037 docs and the routing options check", () => {
+  it("ADR-0037 has its header and cites existing paths", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0037-.*\.md$/.test(f));
+    expect(adrs).toHaveLength(1);
+    const file = `docs/architecture/adr/${adrs[0]!}`;
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    expect(adr).toMatch(/^- \*\*Stato:\*\* `(?:PROPOSTO|APPROVATO)`/m);
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    expect(paths.size, file).toBeGreaterThanOrEqual(10);
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    for (const s of ["ADR-0035", "0026_app_routing_options.sql", "app-routing-options", "accept-app-routing-options.mjs", "R12"]) expect(adr, s).toContain(s);
+  });
+
+  it("README, HARNESS, runbook, ER diagram and the decisions name the options", () => {
+    const readme = read("README.md");
+    for (const s of ["ADR-0037", "docs/architecture/adr/0037-application-routing-options.md", "app-routing-options"]) expect(readme, s).toContain(s);
+    const harness = read("HARNESS.md");
+    for (const s of ["ADR-0037", "0026_app_routing_options.sql", "accept-app-routing-options.mjs"]) expect(harness, s).toContain(s);
+    // The guards the forbidden action names are files of this repository.
+    const rule = harness.split("\n").filter((l) => l.includes("`ADR-0037`; guarded by"));
+    expect(rule).toHaveLength(1);
+    const guards = [...rule[0]!.matchAll(/`((?:apps|packages|infra)\/[^`\s]+)`/g)].map((m) => m[1]!);
+    expect(guards.length).toBeGreaterThanOrEqual(4);
+    for (const p of guards) expect(existsSync(join(root, p)), `HARNESS: ${p}`).toBe(true);
+    const runbook = read("docs/runbooks/application-stacks.md");
+    expect(runbook).toMatch(/^## 10\. Routing options of an address$/m);
+    for (const s of ["ADR-0037", "app-routing-options", "accept-app-routing-options.mjs"]) expect(runbook, s).toContain(s);
+    // No procedure tells the operator to read the password verifier out of the database.
+    for (const line of runbook.split("\n").filter((l) => l.includes("psql"))) expect(line).not.toContain("access_password_hash");
+    const er = read("docs/architecture/diagrams/domain-er-and-boundaries.md");
+    for (const s of ["0026_app_routing_options.sql", "redirect_to_domain_id", "path_routes"]) expect(er, s).toContain(s);
+    expect(read(".agents/brain/decisions.md")).toContain("ADR-0037");
+  });
+
+  it("the routing options check is registered and machine-safe", () => {
+    const file = "infra/linux/accept-app-routing-options.mjs";
+    const script = read(file);
+    for (const s of ["TraefikIngressFileManager", "writeAppStackRoutes", "buildIngressProxyContainerPayload", "buildTraefikStaticYaml", "apr1Verifier",
+      "APP_BUILT_IN_TEMPLATES", "hp_swarmtest_rt_", "swarmtest_"]) expect(script, `${file} ${s}`).toContain(s);
+    for (const step of ["preflight", "snapshot-before", "backends-up", "test-network-is-ours-only"]) expect(script, step).toContain(`step("${step}"`);
+    for (const step of ["route-file", "addresses-serve", "compression", "password", "paths", "redirect", "change-without-restart", "proxy-log",
+      "plain-http-only-redirects", "certificate-pending"]) expect(script, step).toContain(`step(\`\${p}${step}\``);
+    for (const step of ["foreign-containers-untouched", "nothing-left"]) expect(script, step).toContain(`"PASS ${step}"`);
+    expect(script, file).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script, file).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb|phpmyadmin)["'`]/);
+    expect(script, file).not.toMatch(/["'](?:prune|system|pull)["']/);
+    expect(script, file).not.toMatch(/:latest\b/);
+    // The throw-away proxy is the only thing published, and only on loopback.
+    const published = script.split("\n").filter((l) => /["']-p["']|["']--publish["']/.test(l));
+    expect(published.map((l) => l.trim())).toEqual(['"-p", `${HOST}:${String(PORT.http)}:80`, "-p", `${HOST}:${String(PORT.https)}:443`,']);
+    expect(script).toContain('const HOST = "127.0.0.1";');
+    expect(script).not.toContain("0.0.0.0");
+    // Nothing it creates carries a label: a live executor adopts what it finds labelled.
+    expect(script, file).not.toMatch(/["']--label(?:=[^"']*)?["']/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
+    expect(script, file).toMatch(/console\.log\(`RESULT \$\{/);
+    expect(script, file).toMatch(/nothing was created \(this script never pulls\)/);
   });
 });

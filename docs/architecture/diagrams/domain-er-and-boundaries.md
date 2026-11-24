@@ -543,6 +543,7 @@ erDiagram
         text desired_revision_id FK "composita con id"
         text applied_revision_id FK "composita con id"
         text applied_routes_hash "NULL o sha256"
+        text applied_addresses_hash "0026: NULL o sha256 degli indirizzi pubblicati"
         text idempotency_key "con request_hash, o entrambi NULL"
         timestamptz deleted_at "non NULL se e solo se status = deleted"
     }
@@ -664,3 +665,9 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0026 (`0026_app_routing_options.sql`, `ADR-0037`, additiva)**:
+  - Cinque colonne su `app_stack_domains`: `redirect_to_domain_id` (nulla), `compression` (`BOOLEAN NOT NULL DEFAULT FALSE`), `access_username` e `access_password_hash` (nulle; un verificatore `$apr1$`, mai la password), `path_routes` (`JSONB NOT NULL DEFAULT '[]'`).
+  - Chiave esterna `fk_app_stack_domains_redirect` `(stack_id, redirect_to_domain_id)` → `app_stack_domains (stack_id, id)` con `ON DELETE SET NULL (redirect_to_domain_id)`: la destinazione di un reindirizzamento è un indirizzo della stessa applicazione; il vincolo `uq_app_stack_domains_stack_id` `UNIQUE (stack_id, id)` la rende possibile.
+  - Cinque `CHECK`: `ck_app_stack_domains_redirect_not_self`, `ck_app_stack_domains_access_pair` (nome utente e verificatore insieme), `ck_app_stack_domains_access_shape` (le stesse forme dei contratti: una password in chiaro non può finire nella colonna), `ck_app_stack_domains_path_routes` (un array di al massimo quattro regole) e `ck_app_stack_domains_redirect_alone` (un indirizzo che reindirizza non ha protezione né regole di percorso).
+  - Una colonna nulla su `app_stacks`: `applied_addresses_hash`, l'impronta degli indirizzi e delle opzioni da cui è stata fatta l'ultima pubblicazione riuscita delle route, legata ad `applied_routes_hash`; `routesPending` confronta con essa gli indirizzi salvati.
+  - Nessun backfill: un indirizzo senza opzioni resta la riga che era; la release precedente, dopo un rollback automatico, ignora le colonne.

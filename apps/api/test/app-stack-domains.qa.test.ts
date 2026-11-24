@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/contracts";
 import {
+  appStackDeployments,
   appStackDomains,
   appStacks,
   auditEvents,
@@ -21,6 +22,7 @@ import {
   memberships,
   operations,
   organizations,
+  outboxEvents,
   platformInstallations,
   resourceQuotas,
   tlsCertificates,
@@ -70,6 +72,8 @@ describe("B3: application web addresses touch only the application's own route f
   let sim: InMemoryDockerSimulatorAdapter;
   let observer: AppStackObserverService;
   let calls: string[];
+  /** Every route request the API sent to the executor, as sent. */
+  let routeRequests: { plan: { stackId: string; revisionId: string }; routes: Json[] }[];
   let orgId: string;
   let ownerToken: string;
   let adminToken: string;
@@ -79,6 +83,8 @@ describe("B3: application web addresses touch only the application's own route f
   let otherToken: string;
   let otherStackId: string;
   let lookup: Map<string, string[]>;
+  /** While true the executor does not answer the certificate read (its socket is briefly unreachable). */
+  let certificateReadFails = false;
 
   async function call(method: string, p: string, body?: unknown, token?: string) {
     const res = await fetch(`${app.baseUrl!}${p}`, {
@@ -182,6 +188,7 @@ describe("B3: application web addresses touch only the application's own route f
     tmp = await mkdtemp(path.join(os.tmpdir(), "hp-b3-"));
     dynamicDir = path.join(tmp, "ingress", "dynamic");
     calls = [];
+    routeRequests = [];
     lookup = new Map();
     dbClient = createDatabaseClient({ mode: "pglite" });
     await dbClient.migrate();
@@ -206,6 +213,8 @@ describe("B3: application web addresses touch only the application's own route f
         if (typeof v !== "function" || typeof prop !== "string") return v;
         return (...args: unknown[]) => {
           calls.push(prop);
+          if (prop === "getCertificateStatus" && certificateReadFails) return Promise.reject(new Error("executor unreachable"));
+          if (prop === "publishAppStackRoutes") routeRequests.push(structuredClone(args[0]) as (typeof routeRequests)[number]);
           return (v as (...a: unknown[]) => unknown).apply(target, args);
         };
       },
@@ -436,6 +445,141 @@ describe("B3: application web addresses touch only the application's own route f
     });
   });
 
+  describe("routing options rewrite only the application's file (ADR-0037)", () => {
+    const MAIN = "main.example.test";
+    const OLD = "old.example.test";
+    const PASSWORD = "Routing-Canary-Pass-0001";
+    const OFF = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
+    const FILES = { pathPrefix: "/files", componentKey: "web", port: 8080, stripPrefix: true };
+    const OPTION_WORDS = ["basicAuth", "compress", "redirectRegex", "stripPrefix", "PathPrefix", "apr1"];
+    let plain: string;
+    let plainHash: string | null;
+
+    async function setOptions(hostname: string, body: Json): Promise<void> {
+      const res = await owner("PATCH", `${base()}/${(await rowOf(hostname)).id}`, body);
+      expect(res.status, res.raw).toBe(200);
+      expect(res.raw).not.toContain(PASSWORD);
+      expect(res.raw).not.toContain("apr1");
+    }
+    /** One change of the options: only the application's file moved, with one refresh, and the next pass is idle. */
+    async function expectOneRewrite(act: () => Promise<unknown>, minutes: number): Promise<string> {
+      const r = await change(act, minutes);
+      expect(r.filesAfter.get(appFileName())).not.toBe(r.filesBefore.get(appFileName()));
+      expect([...r.filesAfter.keys()]).toEqual([...r.filesBefore.keys()]);
+      expectSiteAndPanelUntouched(r);
+      expect(r.refreshes).toBe(1);
+      expect(r.publishes).toBe(1);
+      expectOnlyApplicationRequests(r.methods);
+      const next = await change(async () => undefined, minutes + 1);
+      expect(next.refreshes).toBe(0);
+      expect(next.publishes).toBe(0);
+      expect(next.filesAfter).toEqual(next.filesBefore);
+      return r.filesAfter.get(appFileName())!;
+    }
+    /** The password and its verifier are in no audit row, operation or outbox row. */
+    async function expectNoPasswordKept(...verifiers: string[]): Promise<void> {
+      const db = dbClient.db;
+      const kept = JSON.stringify([await db.select().from(auditEvents), await db.select().from(operations), await db.select().from(outboxEvents)]);
+      for (const word of [PASSWORD, "apr1", ...verifiers]) expect(kept).not.toContain(word);
+    }
+
+    it("two addresses without options give a file with none of the options in it", async () => {
+      lookup.set(MAIN, [HOST_IPV4]);
+      lookup.set(OLD, [HOST_IPV4]);
+      await change(async () => expect((await addHost(MAIN)).status).toBe(201), 130);
+      const r = await change(async () => expect((await addHost(OLD)).status).toBe(201), 131);
+      plain = r.filesAfter.get(appFileName())!;
+      plainHash = (await stackRow()).appliedRoutesHash;
+      expect(plain).toContain(MAIN);
+      expect(plain).toContain(OLD);
+      for (const word of OPTION_WORDS) expect(plain).not.toContain(word);
+      expect(plainHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("a password, compression and a path reach the file in one rewrite, with the verifier of the row and never the password", async () => {
+      const text = await expectOneRewrite(
+        () => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest", password: PASSWORD }, pathRoutes: [FILES] }),
+        132,
+      );
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      expect(text).toContain(`- "guest:${verifier}"`);
+      expect(text).toContain("basicAuth:");
+      expect(text).toContain("compress: {}");
+      expect(text).toContain("Host(`main.example.test`) && (Path(`/files`) || PathPrefix(`/files/`))");
+      expect(text).toContain("stripPrefix:");
+      expect(text).not.toContain("redirectRegex");
+      expect(text).not.toContain(PASSWORD);
+      expect((await stackRow()).appliedRoutesHash).not.toBe(plainHash);
+      await expectNoPasswordKept(verifier);
+    });
+
+    it("the same options sent again, with the user name alone, move nothing", async () => {
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      const r = await change(() => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest" }, pathRoutes: [FILES] }), 134);
+      expect((await rowOf(MAIN)).accessPasswordHash).toBe(verifier);
+      expect(r.refreshes).toBe(0);
+      expect(r.publishes).toBe(0);
+      expect(r.filesAfter).toEqual(r.filesBefore);
+    });
+
+    it("a new password rewrites the file with the new verifier and without the old one", async () => {
+      const old = (await rowOf(MAIN)).accessPasswordHash!;
+      const text = await expectOneRewrite(
+        () => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest", password: `${PASSWORD}-b` }, pathRoutes: [FILES] }),
+        135,
+      );
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      expect(verifier).not.toBe(old);
+      expect(text).toContain(`- "guest:${verifier}"`);
+      expect(text).not.toContain(old);
+      await expectNoPasswordKept(old, verifier);
+    });
+
+    it("a redirect sends the old address to the main one, keeps it live, and gives it no other option", async () => {
+      const mainId = (await rowOf(MAIN)).id;
+      const before = (await files()).get(appFileName())!;
+      const text = await expectOneRewrite(() => setOptions(OLD, { ...OFF, compression: true, redirectToDomainId: mainId }), 137);
+      // No certificate yet on this host (ACME off), so the destination is reached over plain HTTP.
+      expect(text).toContain("redirectRegex:");
+      expect(text).toContain('replacement: "http://main.example.test${1}"');
+      expect(text).toContain("permanent: true");
+      // One protected host and one compressed host, as before: the redirecting address added neither.
+      const count = (t: string, word: string) => t.split(word).length - 1;
+      for (const word of ["_auth\"", "_compress\"", "basicAuth:"]) expect(count(text, word), word).toBe(count(before, word));
+      expect((await rowOf(OLD)).status).toBe("active");
+      expect((await rowOf(OLD)).compression).toBe(true);
+    });
+
+    it("with every option cleared the file and its hash are the plain ones again, byte for byte", async () => {
+      await expectOneRewrite(() => setOptions(OLD, OFF), 139);
+      const text = await expectOneRewrite(() => setOptions(MAIN, OFF), 141);
+      expect(text).toBe(plain);
+      expect((await stackRow()).appliedRoutesHash).toBe(plainHash);
+    });
+
+    it("removing the destination of a redirect takes the redirect away: the other address serves content again, compressed as it was set", async () => {
+      const mainId = (await rowOf(MAIN)).id;
+      await expectOneRewrite(() => setOptions(OLD, { ...OFF, compression: true, redirectToDomainId: mainId }), 143);
+      const text = await expectOneRewrite(async () => expect((await owner("DELETE", `${base()}/${mainId}`)).status).toBe(200), 145);
+      expect((await rowOf(OLD)).redirectToDomainId).toBeNull();
+      expect(text).toContain(OLD);
+      expect(text).not.toContain(MAIN);
+      expect(text).not.toContain("redirectRegex");
+      expect(text).toContain("compress: {}");
+    });
+
+    it("removing the last address unpublishes the file, as without options", async () => {
+      const id = (await rowOf(OLD)).id;
+      const r = await change(async () => expect((await owner("DELETE", `${base()}/${id}`)).status).toBe(200), 147);
+      expect(r.filesAfter.has(appFileName())).toBe(false);
+      expectSiteAndPanelUntouched(r);
+      expect(r.refreshes).toBe(1);
+      expect((await stackRow()).appliedRoutesHash).toBeNull();
+      expect((await change(async () => undefined, 148)).refreshes).toBe(0);
+      await expectNoPasswordKept();
+    });
+  });
+
   describe("an ACME state change rewrites only the application's file", () => {
     const HOST = "secure.example.test";
 
@@ -662,6 +806,8 @@ describe("B3: application web addresses touch only the application's own route f
     it("the audit rows share the 24 h throttle with sites: the same name on a site starts failed, not fresh", async () => {
       const host = "refused.example.test";
       const row = await rowOf(host);
+      // The addresses added above queued the panel's route refresh: a removal waits until it ran.
+      await drain();
       expect((await owner("DELETE", `${base()}/${row.id}`)).status).toBe(200);
       await pass(310);
       const added = await owner("POST", `/v1/organizations/${orgId}/managed-sites/${siteId}/domains`, { hostname: host, includeWww: false });
@@ -671,6 +817,336 @@ describe("B3: application web addresses touch only the application's own route f
       expect(siteRow!.certProblem).toBe("rate_limited");
       expect(siteRow!.certAttempts).toBe(1);
       expect(siteRow!.certRequestedAt).not.toBeNull();
+    });
+  });
+
+  // Last in the file: this application of its own moves nothing the tests above count.
+  describe("after an upgrade that failed before it changed anything, the options still reach the file (ADR-0037)", () => {
+    const HOST = "after-upgrade.example.test";
+    const PASSWORD = "Upgrade-Canary-Pass-0001";
+    const V2 = APP_BUILT_IN_TEMPLATES[0]!.source.replace("          memory: 64M", "          memory: 96M");
+    let appId: string;
+
+    const appRow = async () => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+    const appPath = (verb: string) => `/v1/organizations/${orgId}/app-stacks/${appId}/${verb}`;
+
+    it("the application runs revision 1 and its address is published without a password", async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `up-${randomUUID().slice(0, 8)}`, source: APP_BUILT_IN_TEMPLATES[0]!.source }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: tpl.body.data.defaultVersionId, name: "app-up", deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow()).status).toBe("running");
+      // DNS elsewhere: the address is routed, and no certificate request moves the file during this test.
+      lookup.set(HOST, []);
+      expect((await addHost(HOST, appId)).status).toBe(201);
+      await pass(600);
+      expect((await files()).get(`app_${appId}.yml`)).toContain(HOST);
+      expect((await files()).get(`app_${appId}.yml`)).not.toContain("basicAuth");
+
+      const v2 = await call("POST", `/v1/admin/app-templates/${tpl.body.data.id as string}/versions`, { source: V2, makeDefault: true }, adminToken);
+      expect(v2.status, v2.raw).toBe(201);
+      const preview = await owner("POST", appPath("plan"), { templateVersionId: v2.body.data.versionId });
+      expect(preview.status, preview.raw).toBe(200);
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const up = await owner("POST", appPath("upgrade"), { templateVersionId: v2.body.data.versionId, planHash: preview.body.data.planHash });
+      expect(up.status, up.raw).toBe(202);
+      await drain();
+      const row = await appRow();
+      expect(row.status).toBe("running");
+      expect(row.appliedRevisionId).not.toBeNull();
+      expect(row.desiredRevisionId).not.toBe(row.appliedRevisionId);
+    });
+
+    it("a password set now is in the next route request of the revision that runs, and in the file", async () => {
+      const { appliedRevisionId } = await appRow();
+      const sentBefore = routeRequests.length;
+      const address = async () => (await dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.hostname, HOST)))[0]!;
+      const res = await owner("PATCH", `${base(appId)}/${(await address()).id}`, {
+        redirectToDomainId: null,
+        compression: false,
+        protection: { username: "guest", password: PASSWORD },
+        pathRoutes: [],
+      });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.raw).not.toContain(PASSWORD);
+      await pass(601);
+
+      const verifier = (await address()).accessPasswordHash!;
+      const sent = routeRequests.slice(sentBefore).filter((r) => r.plan.stackId === appId);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.plan.revisionId).toBe(appliedRevisionId);
+      expect(sent[0]!.routes.flatMap((e) => e.hosts as Json[]).find((h) => h.hostname === HOST)).toMatchObject({
+        protection: { username: "guest", passwordHash: verifier },
+      });
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${verifier}"`);
+      // The refresh installed nothing and names the revision that runs; the newer one is still the one asked for.
+      const refreshes = (
+        await dbClient.db
+          .select({ key: operations.idempotencyKey, revisionId: appStackDeployments.revisionId, status: appStackDeployments.status })
+          .from(appStackDeployments)
+          .innerJoin(operations, eq(operations.id, appStackDeployments.operationId))
+          .where(eq(appStackDeployments.stackId, appId))
+      ).filter((d) => (d.key ?? "").startsWith("sys_routes_"));
+      expect(refreshes).toHaveLength(2);
+      for (const refresh of refreshes) expect(refresh).toMatchObject({ revisionId: appliedRevisionId, status: "succeeded" });
+      expect(await appRow()).toMatchObject({ status: "running", appliedRevisionId });
+      expect(res.body.applies).toBe("shortly");
+    });
+  });
+
+  // Applications of their own, after every count above.
+  describe("an address change reaches the published routes, or the application says it did not (ADR-0037)", () => {
+    const PASSWORD = "Unreachable-Canary-Pass-0001";
+    let versionId: string;
+
+    const appPath = (appId: string, verb = "") => `/v1/organizations/${orgId}/app-stacks/${appId}${verb === "" ? "" : `/${verb}`}`;
+    const appRow = async (appId: string) => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+    const address = async (hostname: string) => (await dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.hostname, hostname)))[0]!;
+    const refreshesOf = async (appId: string) =>
+      (await dbClient.db.select().from(operations).where(eq(operations.resourceId, appId))).filter(
+        (o) => o.kind === "stack.deploy" && (o.idempotencyKey ?? "").startsWith("sys_routes_") && o.requestedByUserId === null,
+      );
+    const protect = (appId: string, domainId: string) =>
+      owner("PATCH", `${base(appId)}/${domainId}`, { redirectToDomainId: null, compression: false, protection: { username: "guest", password: PASSWORD }, pathRoutes: [] });
+
+    beforeAll(async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `rt-${randomUUID().slice(0, 8)}`, source: APP_BUILT_IN_TEMPLATES[0]!.source }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      versionId = tpl.body.data.defaultVersionId as string;
+    });
+
+    /** A running application of organisation A with `hostname` published; DNS elsewhere, so no certificate moves its file. */
+    async function published(hostname: string, minutes: number): Promise<{ appId: string; domainId: string }> {
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      const appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow(appId)).status).toBe("running");
+      lookup.set(hostname, []);
+      const added = await addHost(hostname, appId);
+      expect(added.status, added.raw).toBe(201);
+      await pass(minutes);
+      expect((await files()).get(`app_${appId}.yml`)).toContain(hostname);
+      return { appId, domainId: (added.body.data as Json[]).find((d) => d.hostname === hostname)!.id as string };
+    }
+
+    it("a password saved while the executor cannot be reached queues the route refresh in the same request: no action starts before it", async () => {
+      const { appId, domainId } = await published("unreachable-a.example.test", 700);
+      const before = (await refreshesOf(appId)).length;
+      certificateReadFails = true;
+      try {
+        const res = await protect(appId, domainId);
+        expect(res.status, res.raw).toBe(200);
+        expect(res.body.applies).toBe("shortly");
+        const refreshes = await refreshesOf(appId);
+        expect(refreshes).toHaveLength(before + 1);
+        expect(refreshes.filter((o) => o.status === "queued")).toHaveLength(1);
+        const restart = await owner("POST", appPath(appId, "restart"), {});
+        expect(restart.status, restart.raw).toBe(409);
+        expect(restart.body.error.code).toBe("RESOURCE_LOCKED");
+      } finally {
+        certificateReadFails = false;
+      }
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${(await address("unreachable-a.example.test")).accessPasswordHash!}"`);
+      expect((await appRow(appId)).status).toBe("running");
+    });
+
+    it("when that refresh fails and a restart fails after it, the file has no password and the application says its options are not published", async () => {
+      const { appId, domainId } = await published("unreachable-b.example.test", 701);
+      const detail = async () => {
+        const res = await owner("GET", appPath(appId));
+        expect(res.status, res.raw).toBe(200);
+        return res.body.data as Json;
+      };
+      certificateReadFails = true;
+      try {
+        expect((await protect(appId, domainId)).status).toBe(200);
+        await drain();
+        sim.appStacks.failNextAppStackStep("restart", "engine_unavailable");
+        const restart = await owner("POST", appPath(appId, "restart"), {});
+        expect(restart.status, restart.raw).toBe(202);
+        await drain();
+        expect((await appRow(appId)).status).toBe("failed");
+        const verifier = (await address("unreachable-b.example.test")).accessPasswordHash!;
+        const text = (await files()).get(`app_${appId}.yml`)!;
+        expect(text).toContain("unreachable-b.example.test");
+        expect(text).not.toContain(verifier);
+        expect((await detail()).routesPending).toBe(true);
+      } finally {
+        certificateReadFails = false;
+      }
+      // A restart that works publishes what was saved, and nothing is pending any more.
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${(await address("unreachable-b.example.test")).accessPasswordHash!}"`);
+      expect((await detail()).routesPending).toBe(false);
+    });
+
+    it("a failed application keeps an address its file still serves: another organisation cannot take the name until the route is withdrawn", async () => {
+      const name = "held.example.test";
+      const theirs = () => call("POST", `/v1/organizations/${otherOrgId}/app-stacks/${otherStackId}/domains`, { hostname: name, ...WEB }, otherToken);
+      const { appId, domainId } = await published(name, 702);
+      sim.appStacks.failNextAppStackStep("restart", "engine_unavailable");
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await appRow(appId)).status).toBe("failed");
+      expect((await files()).get(`app_${appId}.yml`)).toContain(name);
+
+      const before = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "app.stack.domain.remove"));
+      const removed = await owner("DELETE", `${base(appId)}/${domainId}`);
+      expect(removed.status, removed.raw).toBe(409);
+      expect(removed.body.error.code).toBe("RESOURCE_LOCKED");
+      expect(removed.body.error.details).toContainEqual(expect.objectContaining({ field: "status", reason: "failed" }));
+      expect(await address(name)).toMatchObject({ id: domainId, stackId: appId });
+      expect(await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "app.stack.domain.remove"))).toHaveLength(before.length);
+      const taken = await theirs();
+      expect(taken.status, taken.raw).toBe(409);
+      expect(taken.body.error.code).toBe("DOMAIN_CONFLICT");
+      await pass(703);
+      for (const [file, text] of await files()) if (file !== `app_${appId}.yml`) expect(text, file).not.toContain(name);
+
+      // Once it runs again the removal is accepted and withdraws the route; only then does the name change hands.
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await owner("DELETE", `${base(appId)}/${domainId}`)).status).toBe(200);
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
+      expect((await theirs()).status).toBe(201);
+      await pass(704);
+      expect((await files()).get(`app_${otherStackId}.yml`)).toContain(name);
+      expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
+    });
+  });
+
+  // ADR-0037: "pending" is exact. Two entry points, web:8080 and cache:11211; the addresses are on web unless said.
+  describe("a change the published route file does not hold is queued in the request and reads pending, whatever entry point it names", () => {
+    const TWO_DOORS = `${APP_BUILT_IN_TEMPLATES[0]!.source}  - service: cache\n    port: 11211\n    protocol: http\n`;
+    const CACHE = { componentKey: "cache", port: 11211 };
+    const pathTo = (pathPrefix: string) => ({ pathPrefix, ...CACHE, stripPrefix: false });
+    const rule = (hostname: string, pathPrefix: string) => `Host(\`${hostname}\`) && (Path(\`${pathPrefix}\`) || PathPrefix(\`${pathPrefix}/\`))`;
+    let versionId: string;
+
+    const appPath = (appId: string, verb = "") => `/v1/organizations/${orgId}/app-stacks/${appId}${verb === "" ? "" : `/${verb}`}`;
+    const refreshesOf = async (appId: string) =>
+      (await dbClient.db.select().from(operations).where(eq(operations.resourceId, appId))).filter(
+        (o) => o.kind === "stack.deploy" && (o.idempotencyKey ?? "").startsWith("sys_routes_") && o.requestedByUserId === null,
+      ).length;
+    const pending = async (appId: string) => {
+      const res = await owner("GET", appPath(appId));
+      expect(res.status, res.raw).toBe(200);
+      return (res.body.data as Json).routesPending as boolean;
+    };
+    const setPaths = (appId: string, domainId: string, pathRoutes: readonly unknown[]) =>
+      owner("PATCH", `${base(appId)}/${domainId}`, { redirectToDomainId: null, compression: false, protection: null, pathRoutes });
+    const fileOf = async (appId: string) => (await files()).get(`app_${appId}.yml`) ?? "";
+    /** While the executor cannot be reached the reconcile after a request queues nothing: only the request itself can. */
+    async function unreachable<T>(act: () => Promise<T>): Promise<T> {
+      certificateReadFails = true;
+      try {
+        return await act();
+      } finally {
+        certificateReadFails = false;
+      }
+    }
+
+    beforeAll(async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `two-${randomUUID().slice(0, 8)}`, source: TWO_DOORS }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      versionId = tpl.body.data.defaultVersionId as string;
+    });
+
+    /** A running application of organisation A with both entry points healthy and no address. */
+    async function running(): Promise<string> {
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: versionId, name: `two-${randomUUID().slice(0, 8)}`, deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      const appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow(appId)).status).toBe("running");
+      return appId;
+    }
+    const appRow = async (appId: string) => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+
+    /** `hostname` on web, published; DNS elsewhere, so no certificate moves the file. */
+    async function published(hostname: string, minutes: number): Promise<{ appId: string; domainId: string }> {
+      const appId = await running();
+      lookup.set(hostname, []);
+      const added = await addHost(hostname, appId);
+      expect(added.status, added.raw).toBe(201);
+      await pass(minutes);
+      expect(await fileOf(appId)).toContain(hostname);
+      expect(await pending(appId)).toBe(false);
+      return { appId, domainId: (added.body.data as Json[]).find((d) => d.hostname === hostname)!.id as string };
+    }
+
+    it("a path to the entry point that has no address of its own is queued in the request and reads pending until the file holds it", async () => {
+      const name = "pending-a.example.test";
+      const { appId, domainId } = await published(name, 710);
+      const before = await refreshesOf(appId);
+      await unreachable(async () => {
+        const res = await setPaths(appId, domainId, [pathTo("/admin")]);
+        expect(res.status, res.raw).toBe(200);
+        expect(res.body.applies).toBe("shortly");
+        expect(await refreshesOf(appId)).toBe(before + 1);
+        expect(await pending(appId)).toBe(true);
+        // No action of the customer can start before that refresh, so none can fail in front of it.
+        expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(409);
+      });
+      await drain();
+      expect(await fileOf(appId)).toContain(rule(name, "/admin"));
+      expect(await pending(appId)).toBe(false);
+    });
+
+    it("a second path while the first is published, then a path removed: each is queued in the request and reads pending", async () => {
+      const name = "pending-b.example.test";
+      const { appId, domainId } = await published(name, 712);
+      expect((await setPaths(appId, domainId, [pathTo("/admin")])).status).toBe(200);
+      await drain();
+      expect(await fileOf(appId)).toContain(rule(name, "/admin"));
+      expect(await pending(appId)).toBe(false);
+
+      for (const [pathRoutes, present, absent] of [
+        [[pathTo("/admin"), pathTo("/stats")], ["/admin", "/stats"], []],
+        [[pathTo("/stats")], ["/stats"], ["/admin"]],
+      ] as const) {
+        const before = await refreshesOf(appId);
+        await unreachable(async () => {
+          expect((await setPaths(appId, domainId, pathRoutes)).status).toBe(200);
+          expect(await refreshesOf(appId)).toBe(before + 1);
+          expect(await pending(appId)).toBe(true);
+        });
+        await drain();
+        for (const p of present) expect(await fileOf(appId)).toContain(rule(name, p));
+        for (const p of absent) expect(await fileOf(appId)).not.toContain(rule(name, p));
+        expect(await pending(appId)).toBe(false);
+      }
+    });
+
+    it("the first address of an application, and the first one of an entry point, are queued in the request like any other", async () => {
+      const appId = await running();
+      const first = "first-c.example.test";
+      const door = "door-c.example.test";
+      for (const n of [first, door]) lookup.set(n, []);
+      for (const [hostname, target] of [
+        [first, WEB],
+        [door, CACHE],
+      ] as const) {
+        const before = await refreshesOf(appId);
+        await unreachable(async () => {
+          const added = await owner("POST", base(appId), { hostname, ...target });
+          expect(added.status, added.raw).toBe(201);
+          expect(await refreshesOf(appId)).toBe(before + 1);
+          expect(await pending(appId)).toBe(true);
+        });
+        await drain();
+        expect(await fileOf(appId)).toContain(hostname);
+        expect(await pending(appId)).toBe(false);
+      }
     });
   });
 });

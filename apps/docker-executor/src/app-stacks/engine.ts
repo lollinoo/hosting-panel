@@ -62,6 +62,7 @@ import {
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
 } from "./plan-check.js";
+import { assertAppStackRoutesInPlan } from "./routes-check.js";
 import {
   appStackLogMaskValues,
   maskAppStackLogLines,
@@ -431,19 +432,12 @@ export class AppStackEngine implements StackExecutorPort {
   public publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
     return this.locked(req.plan.stackId, async () => {
       const plan = this.check(req.plan);
-      for (const route of req.routes) {
-        if (!plan.ingress.some((i) => i.componentKey === route.componentKey && i.port === route.internalPort)) {
-          refuse("STACK_PLAN_INVALID", "The route is not an ingress of the plan");
-        }
-        if (route.hosts.some((host) => host.source !== undefined || host.redirectTo !== null)) {
-          refuse("STACK_UNSUPPORTED_FEATURE", "Only automatic certificates and plain host routes are supported for applications");
-        }
-      }
+      const receiving = assertAppStackRoutesInPlan(plan, req.routes);
       if (req.routes.length > 0) {
         const edge = appStackEdgeNetworkName(plan.stackId);
         const view = await this.get<NetworkView>(`/networks/${enc(edge)}`, "inspect a stack network");
         if (view === null || !isOwnNetwork(view, plan, "app_edge")) refuse("STACK_COMPONENT_NOT_READY", "The stack network is not prepared");
-        for (const key of new Set(req.routes.map((route) => route.componentKey))) {
+        for (const key of receiving) {
           const target = await this.get<ContainerInspect>(
             `/containers/${enc(appStackContainerName(plan.stackId, key))}/json`,
             "inspect an application container",

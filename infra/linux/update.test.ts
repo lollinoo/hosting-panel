@@ -122,6 +122,19 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(cur(f.root)).toBe("releases/0.1.0");
   });
 
+  it("refuses a downgrade while an application address has routing options (exit 8), naming only that feature", () => {
+    const all = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options";
+    const f = gated("echo app-routing-options", all);
+    // The target knows application stacks and their extended format, not the options of their addresses.
+    const older = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2");
+    const r = update(["--archive", older, "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-routing-options", "--allow-feature-loss", "password-protected address"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
   it("--allow-feature-loss lets the downgrade through", () => {
     const f = gated("echo manual-tls");
     const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);

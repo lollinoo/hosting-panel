@@ -206,8 +206,8 @@ describe("missingSecretKeys and buildDomainEntries", () => {
       { hostname: "b.example.test", target: 0 },
     ];
     expect(buildDomainEntries(rows, ENTRY.ingress)).toEqual([
-      { hostname: "notes.example.test", componentKey: "admin", port: 9000 },
-      { hostname: "b.example.test", componentKey: "web", port: 8080 },
+      { hostname: "notes.example.test", componentKey: "admin", port: 9000, compression: true },
+      { hostname: "b.example.test", componentKey: "web", port: 8080, compression: true },
     ]);
     expect(buildDomainEntries([], ENTRY.ingress)).toEqual([]);
   });
@@ -400,7 +400,7 @@ describe("AppWizard install", () => {
       templateVersionId: "atv_notes_2",
       name: "team-notes",
       parameters: [{ key: "port", value: 9000 }],
-      domains: [{ hostname: "notes.example.test", componentKey: "web", port: 8080 }],
+      domains: [{ hostname: "notes.example.test", componentKey: "web", port: 8080, compression: true }],
       deploy: false,
     });
     expect(sent[1]!.body).toEqual({ parameterKey: "admin_password", value: PLANTED });

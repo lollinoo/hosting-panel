@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { ErrorCode } from "../errors.js";
-import { SiteHostRouteSchema } from "../ipc-schemas.js";
 import { APP_STACK_IMAGE_LOOKUP_MAX_LENGTH, APP_STACK_IMAGE_LOOKUP_PATTERN, APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
 import {
   APP_STACK_DIGEST_PATTERN,
@@ -13,6 +12,7 @@ import {
 import { ApprovedStackPlanSchema } from "./plan.js";
 import { AppEntityIdSchema, AppForeignIdSchema } from "./stack-ids.js";
 import { MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
+import { AppStackHostRouteSchema } from "./stack-routing.js";
 
 /** Chars of one secret file (= setAppStackSecretTransactional bound). */
 export const APP_STACK_SECRET_CONTENT_MAX_CHARS = 16_384;
@@ -138,7 +138,7 @@ export const AppStackRouteWireSchema = z
   .object({
     componentKey: AppStackKeySchema,
     internalPort: AppStackPortSchema,
-    hosts: z.array(SiteHostRouteSchema.strict()).min(1).max(MAX_APP_STACK_DOMAINS),
+    hosts: z.array(AppStackHostRouteSchema).min(1).max(MAX_APP_STACK_DOMAINS),
   })
   .strict();
 export type AppStackRouteWire = z.infer<typeof AppStackRouteWireSchema>;

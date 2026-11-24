@@ -394,6 +394,33 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect((await enqueue(stack, "stack.upgrade", { plan: { ingress } })).revision?.revisionNumber).toBe(2);
   });
 
+  it("refuses PATH_IN_USE when a new plan drops the target of a path rule (ADR-0037), whatever the API checked before", async () => {
+    const ingress = [
+      { componentKey: "web", port: 8080 },
+      { componentKey: "cache", port: 6379 },
+    ];
+    const stack = await ready((await create(orgA, { ingress })).stack.id);
+    const [row] = await domain(stack, "path.inuse.example", "web", 8080);
+    // The path commits between the API's own check of the new plan and this transaction.
+    await db()
+      .update(appStackDomains)
+      .set({ pathRoutes: [{ pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false }] })
+      .where(eq(appStackDomains.id, row!.id));
+    const plans: PlanOptions[] = [
+      { ingress: [{ componentKey: "web", port: 8080 }] },
+      { ingress: [{ componentKey: "web", port: 8080 }, { componentKey: "cache", port: 7000 }] },
+    ];
+    for (const kind of ["stack.upgrade", "stack.rollback"] as const) {
+      for (const plan of plans) {
+        const err = await enqueue(stack, kind, { plan }).catch((e: unknown) => e);
+        expect(err, kind).toBeInstanceOf(AppStackRepositoryError);
+        expect(err, kind).toMatchObject({ code: "PATH_IN_USE" });
+        expect(await keysOf(stack.id)).toEqual({ components: ["cache", "web"], volumes: ["data"], revisions: 1, deployments: 1 });
+      }
+    }
+    expect((await enqueue(stack, "stack.upgrade", { plan: { ingress } })).revision?.revisionNumber).toBe(2);
+  });
+
   it("delete with destroyData marks every volume for destruction", async () => {
     const stack = await ready((await create(orgA, { volumes: ["data", "logs"] })).stack.id);
     const result = await enqueue(stack, "stack.delete", { destroyData: true });
@@ -476,6 +503,20 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect(row?.endedAt).toBeInstanceOf(Date);
     const components = await listAppStackComponents(db(), { organizationId: orgA, stackId: stack.id });
     expect(components.map((c) => c.appliedRevisionId)).toEqual([revision!.id, revision!.id]);
+  });
+
+  it("writes the fingerprint of the published addresses with the routes hash only; a routes hash written alone clears it (ADR-0037)", async () => {
+    const { stack, deployment } = await create();
+    const scope = { organizationId: orgA, stackId: stack.id, deploymentId: deployment!.id, problem: null, stackStatus: null };
+    const stored = async () => (await getAppStack(db(), { organizationId: orgA, stackId: stack.id }))!;
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running", appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    // A write that names neither leaves both.
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "running" });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: hex("routes"), appliedAddressesHash: hex("addresses") });
+    // A stop or a recovery writes the routes hash alone: what the addresses were is not known any more.
+    await updateAppStackDeploymentTransactional(db(), { ...scope, deploymentStatus: "succeeded", appliedRoutesHash: null });
+    expect(await stored()).toMatchObject({ appliedRoutesHash: null, appliedAddressesHash: null });
   });
 
   it("finalises a delete: quota released, domains and components gone, volumes retained, secrets kept, name reusable", async () => {

@@ -149,7 +149,7 @@ describe("releaseImages", () => {
 
 describe("RELEASE_FEATURES", () => {
   it("lists the gated features as sed-safe identifiers", () => {
-    expect(RELEASE_FEATURES).toEqual(["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2"]);
+    expect(RELEASE_FEATURES).toEqual(["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options"]);
     for (const f of RELEASE_FEATURES) expect(f).toMatch(/^[a-z0-9-]+$/);
   });
 });
