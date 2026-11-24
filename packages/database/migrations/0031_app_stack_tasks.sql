@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS app_stack_task_runs (
   CONSTRAINT ck_app_stack_task_runs_ended CHECK ((status IN ('queued','running')) = (ended_at IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_app_stack_task_runs_task ON app_stack_task_runs (stack_id, task_key, requested_at);
--- A time of a schedule is queued at most once, whatever the writer.
+-- A time of a schedule has at most one run at a time, whatever the writer. A run that could not begin is deleted and
+-- its time queued again: a time STARTS at most once.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_app_stack_task_runs_slot ON app_stack_task_runs (stack_id, task_key, slot_at)
   WHERE slot_at IS NOT NULL;
 

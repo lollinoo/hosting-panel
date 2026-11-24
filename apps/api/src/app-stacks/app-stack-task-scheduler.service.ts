@@ -31,9 +31,10 @@ export interface AppStackTaskSchedulePass {
 }
 
 /**
- * Queues the tasks that are due (ADR-0042 A7). Each time of a schedule is queued at most once (the database writes the
- * served time with the operation), tried again while the application is busy or stopped, and given up after the retry
- * window; an older time is never caught up. A schedule whose task the installed version does not have stays idle.
+ * Queues the tasks that are due (ADR-0042 A7). Each time of a schedule starts at most once (the database writes the
+ * served time with the operation; a run that could not begin gives its time back, to be queued again), tried again
+ * while the application is busy or stopped, and given up after the retry window; an older time is never caught up. A
+ * schedule whose task the installed version does not have stays idle.
  * Without the task calls of the executor nothing is queued: the time stays owed and is written as missed after its window.
  */
 @Injectable()

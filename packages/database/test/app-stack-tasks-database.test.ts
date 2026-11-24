@@ -51,7 +51,8 @@ import {
 } from "../src/index.js";
 
 // Tasks of applications (0031, ADR-0042): what the two tables refuse, what a deleted application leaves, and the
-// repository — a run is queued under the application's lock, a time of a schedule at most once.
+// repository — a run waits under a lock of its own and takes the application's lock when it begins, a time of a
+// schedule starts at most once.
 const orgA = "org_tk_a";
 const orgB = "org_tk_b";
 const USER = "usr_tk";
