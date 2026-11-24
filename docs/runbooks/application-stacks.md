@@ -162,7 +162,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026`, `0027`, `0028` and `0030` are additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025`–`0028`, `0030`, `0032` and `0033` are
+   additive.
 6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
    knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
    with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
@@ -207,8 +208,11 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    while a running database is still attached to its private network (`STACK_NAMESPACE_CONFLICT`).
 10. **Addresses being removed (issue #112).** Before installing an older release, wait until no address is being
     removed (the query in procedure 10, step 1 lists none): an older release reads such an address as a live one and
-    publishes it again. No gate checks it, as the state lasts one route refresh (about a minute, ten after a failed
-    one).
+    publishes it again. No gate checks it. The state normally lasts one route refresh (about a minute, ten after a
+    failed one); while the application is `failed` (a start, a restart or a change of version that did not pass
+    leaves the route file as it was), or after a stop that failed before it withdrew the routes, the routes are not
+    refreshed and the address stays marked until a start, a restart, a stop or the deletion of the application
+    succeeds.
 
 ## 5. Restore the panel on a new server
 
@@ -424,9 +428,14 @@ administrator's console has no such action, and nobody writes proxy configuratio
    destination and counts in no limit, and the same name added again, by any customer, is refused with
    `DOMAIN_CONFLICT`. With nothing published it goes at once. When the refresh fails (the executor does not answer)
    the address stays marked and the name stays held; the periodic check queues the refresh again after the ten
-   minutes of a failed action, as often as needed. A removal that stays pending for long means the refresh keeps
-   failing: look at the stack's last `stack.deploy` operations with an `sys_routes_` idempotency key and at the
-   executor, then let the next refresh run or restart the application; nobody deletes the row by hand. To list the
+   minutes of a failed action, as long as the application is `running` or `degraded` and its last action was not a
+   stop. While the application is `failed` (a start, a restart or a change of version that did not pass leaves the
+   route file as it was), or after a stop that failed before it withdrew the routes, no refresh is queued: the address
+   stays marked until a start, a restart, a stop or the deletion of the application succeeds, and until then an
+   upgrade or a rollback that drops what it points at is refused with `address_removing`. A removal that stays pending
+   for long means the refresh keeps failing or is not queued: look at the stack's status, at its last `stack.deploy`
+   operations with an `sys_routes_` idempotency key and at the executor, then let the next refresh run or restart the
+   application; nobody deletes the row by hand. To list the
    addresses being removed (read-only):
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, hostname, removal_requested_at from app_stack_domains where removal_requested_at is not null order by removal_requested_at"
