@@ -132,6 +132,27 @@ describe("accounts CLI", () => {
         process.stdout.write = write;
       }
     });
+
+    it("runCli setup prints the IPv4 it leaves recorded on a line of its own", async () => {
+      const open: DatabaseClient = { mode: dbClient.mode, db: dbClient.db, migrate: () => dbClient.migrate(), close: () => Promise.resolve() };
+      const lines: string[] = [];
+      const setup = async (...address: string[]) => {
+        lines.length = 0;
+        await runCli(["setup", "--name", "Test", "--hostname", "host.test", ...address], open);
+        return lines.join("").split("\n");
+      };
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = ((chunk: string) => (lines.push(chunk), true)) as typeof process.stdout.write;
+      try {
+        const first = await setup("--ipv4-default", "198.51.100.7");
+        expect(JSON.parse(first[0]!)).toEqual({ installationId: expect.any(String), hostId: expect.any(String) });
+        expect(first.slice(1)).toEqual(['{"recordedIpv4":"198.51.100.7"}', ""]);
+        expect((await setup("--ipv4", "203.0.113.10")).slice(1)).toEqual(['{"recordedIpv4":"203.0.113.10"}', ""]);
+        expect((await setup("--ipv4-default", "198.51.100.7")).slice(1)).toEqual(['{"recordedIpv4":"203.0.113.10"}', ""]);
+      } finally {
+        process.stdout.write = write;
+      }
+    });
   });
 
   describe("the server's IPv6", () => {

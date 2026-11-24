@@ -245,6 +245,25 @@ describe("install.sh public addresses", () => {
     }
   });
 
+  it("after setup it warns when the panel keeps another IPv4 than this run uses, and goes on", () => {
+    const warn = (recorded: string, inUse: string) =>
+      spawnSync(
+        "bash",
+        ["-c", `source "${SCRIPT}"; set -euo pipefail; recorded_ipv4_warning "$1" "$2"; echo went-on`, "bash",
+          `{"installationId":"pin_1","hostId":"hst_1"}\n{"recordedIpv4":"${recorded}"}`, inUse],
+        { encoding: "utf8" },
+      );
+    const differs = warn("203.0.113.7", "203.0.113.8");
+    expect(differs.status, differs.stderr).toBe(0);
+    expect(differs.stdout).toBe(
+      "  WARNING: the panel has 203.0.113.7 recorded as this server's public IPv4, but this run uses 203.0.113.8. " +
+        "Run the installer again with --ipv4 <address> to record the right one.\nwent-on\n",
+    );
+    const same = warn("203.0.113.7", "203.0.113.7");
+    expect(same.status, same.stderr).toBe(0);
+    expect(same.stdout).toBe("went-on\n");
+  });
+
   it("--ipv6 hands the address to hp-accounts setup, --ipv6 none removes the recorded one", () => {
     expect(install(["--help"]).out).toContain("--ipv6 <addr> | --ipv6 none");
     const given = dry({}, ["--ipv4", "203.0.113.7", "--ipv6", "2001:db8::1"]);
