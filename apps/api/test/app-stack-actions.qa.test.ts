@@ -25,6 +25,14 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
 
 /** storage (volume `data`) <- worker: the storage is essential, its crash shows the application failed. */
 const BASE = APP_BUILT_IN_TEMPLATES[1]!.source;
+/** The same with a task on its store (ADR-0042). */
+const WITH_TASK = `${BASE.trimEnd()}
+x-hp-tasks:
+  - key: save
+    label: Salva i dati adesso
+    service: storage
+    command: ["valkey-cli", "BGSAVE"]
+`;
 /** What a settled application whose stored status is `running` or `degraded` allows its owner, backups included. */
 const LIVE = ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"];
 
@@ -65,8 +73,8 @@ describe("the actions an application offers are the ones the API accepts (issue 
     throw new Error("the operation never settled");
   }
 
-  async function install(): Promise<string> {
-    const { versionId } = await h.publish(BASE);
+  async function install(source: string = BASE): Promise<string> {
+    const { versionId } = await h.publish(source);
     const res = await h.call(
       h.a.token,
       "POST",
@@ -145,6 +153,43 @@ describe("the actions an application offers are the ones the API accepts (issue 
     const doubt = await detail(stackId);
     expect([doubt.status, doubt.outcomeUnknown]).toEqual(["unknown", true]);
     expect(doubt.allowedActions).toEqual(["stack.deploy", "stack.start", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"]);
+  });
+
+  it("a task run is shown while it waits and while it runs; only a running one empties the list, as the routes answer", async () => {
+    const stackId = await install(WITH_TASK);
+    const worker = h.app.nestApp.get(OutboxWorkerService);
+    const runTask = async (): Promise<{ runId: string; operationId: string }> => {
+      const res = await h.call(h.a.token, "POST", `${path(stackId, "tasks")}/save/runs`, {}, { "Idempotency-Key": randomUUID() });
+      expect(res.status, res.raw).toBe(202);
+      return res.body.data as { runId: string; operationId: string };
+    };
+    const opOf = async (id: string) => (await opsOf(stackId)).find((o) => o.id === id)!;
+
+    // A run that has started holds the application's own lock: nothing is offered and a stop meets the lock.
+    h.sim.appStackTasks.failNextAppStackTaskStep("run", "ambiguous_running");
+    const going = await runTask();
+    await worker.processPendingOnce();
+    expect(await opOf(going.operationId)).toMatchObject({ lockKey: `stack:${stackId}` });
+    const held = await detail(stackId);
+    expect([held.activeOperationId, held.allowedActions]).toEqual([going.operationId, []]);
+    const refused = await act(h.a, stackId, "stop");
+    expect([refused.status, refused.body.error?.code]).toEqual([409, "RESOURCE_LOCKED"]);
+    h.sim.appStackTasks.settleAppStackTaskRun(going.runId);
+    await worker.recoverUnknownOperations();
+    expect((await opOf(going.operationId)).status).toBe("succeeded");
+    expect((await detail(stackId)).allowedActions).toEqual(LIVE);
+
+    // A run that waits for its lane holds a lock of its own, which no action of the application reads: the page follows
+    // it, and the list is the one without it.
+    const waiting = await runTask();
+    expect(await opOf(waiting.operationId)).toMatchObject({ status: "queued", lockKey: `stack:${stackId}:task` });
+    const queued = await detail(stackId);
+    expect([queued.activeOperationId, queued.allowedActions]).toEqual([waiting.operationId, LIVE]);
+    const stop = await act(h.a, stackId, "stop");
+    expect(stop.status, stop.raw).toBe(202);
+    await drain(stackId);
+    expect((await stackRow(stackId)).status).toBe("stopped");
+    expect((await opOf(waiting.operationId)).status).toBe("failed");
   });
 
   it("the list is the caller's: a reader gets none, an editor only what app.update allows, a suspended organisation none", async () => {
