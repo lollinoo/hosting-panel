@@ -157,10 +157,13 @@ next messages go unsigned.
   every webhook and Telegram message ends as `unreachable`.
 - **A receiver on this server or on a private network cannot be used.** The panel refuses an address that resolves to
   one of this server's own addresses or to a private one, at save and at every send. This server's own addresses are
-  those of its network interfaces and the public IPv4 and IPv6 addresses the panel records for it (the ones given to
-  the installer, also by hand for a server behind address translation, where no interface has them); the recorded ones
-  are read at every check, so a rerun of the installer counts at the next send. If they cannot be read, nothing is
-  sent and the attempt is `unreachable`. Put the receiver on another machine with a public address.
+  those of its network interfaces and the public addresses the panel records for it: the IPv4 the installer was given
+  with `--ipv4` (by hand for a server behind address translation, where no interface has it) or detected, and an IPv6
+  stored for the server, which the installer does not write today (issue #184). The recorded address is the one the
+  last run of the installer recorded, read at every check: after the server's public address changes, run the
+  installer again with `--ipv4 <new address>`, and it counts at the next send (issue #184 tracks that a rerun without
+  the flag does not keep it). If the recorded addresses cannot be read, nothing is sent and the attempt is
+  `unreachable`. Put the receiver on another machine with a public address.
 
 ## 5. A channel went quiet
 
