@@ -5673,7 +5673,9 @@ paths:
       description: >-
         Volumes are kept unless `destroyData` is true. A name that does not match exactly is refused
         (`VALIDATION_ERROR`, `details[0].field: confirmName`, `details[0].reason: confirmation_mismatch`) and nothing
-        is written. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        is written. A database that an application still uses is refused (`VALIDATION_ERROR`,
+        `details[0].field: links`, `details[0].reason: database_in_use`): disconnect it from every application first.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -5946,7 +5948,9 @@ paths:
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
         drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
-        `path_target_removed` (`details[0].field: domains`). Volumes are never removed by an upgrade. Returns 422
+        `path_target_removed` (`details[0].field: domains`). A database that an application still uses is refused with
+        `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
+        Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
         false.
       parameters:
@@ -5996,7 +6000,9 @@ paths:
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
         refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
-        `path_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        `path_target_removed`. A database that an application still uses is refused with `database_in_use`
+        (`details[0].field: links`) when that revision is not one component with one port. Volume data is never
+        touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6582,6 +6588,130 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/links:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackLinks
+      summary: List the private links between a database and applications, seen from one of them (app.read)
+      description: >-
+        For a database (an application whose template has category `database`): where a connected application
+        reaches it, and the applications connected to it. For any other application: the databases it is connected
+        to, and the customer's databases it can still be connected to. Nothing here is reserved: the address works
+        only from a connected application, and no password is ever part of a link. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The links of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [App Stacks]
+      operationId: createAppStackLink
+      summary: Connect an application to a database of the same customer (app.update; audited as app.stack.link.create)
+      description: >-
+        `stackId` is the application. The link starts `pending` and becomes `active` once the database is attached to
+        the private network of the application; nothing is restarted, and a link that cannot be applied yet stays
+        `pending` and is retried. A database of another customer does not exist (404). Refused with `VALIDATION_ERROR`
+        when `stackId` is itself a database (`details[0].reason: database_as_application`), when the other application
+        is not a database (`not_a_database`) or is a database with more than one component or port
+        (`database_not_linkable`), and past 4 databases for an application or 8 applications for a database
+        (`details[0].field: links`, `details[0].reason: STACK_QUOTA_EXCEEDED`). No Idempotency-Key. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppStackLinkInput"
+      responses:
+        "201":
+          description: The links of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "The two are already connected (`ALREADY_EXISTS`, `details[0].reason: link_exists`), or one of them is being changed or deleted (`RESOURCE_LOCKED`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/links/{linkId}:
+    delete:
+      tags: [App Stacks]
+      operationId: removeAppStackLink
+      summary: Disconnect an application from a database (app.update; audited as app.stack.link.remove)
+      description: >-
+        `stackId` is either side of the link. The link is listed as `removing` until the database is detached from the
+        private network of the application, then it is gone; nothing is restarted. No Idempotency-Key. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackLinkIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "200":
+          description: The links left
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackLinksDto"
         "400":
           $ref: "#/components/responses/ErrorResponse"
         "401":
@@ -9410,6 +9540,12 @@ components:
     AppStackIdParam:
       in: path
       name: stackId
+      required: true
+      schema:
+        type: string
+    AppStackLinkIdParam:
+      in: path
+      name: linkId
       required: true
       schema:
         type: string
@@ -14290,6 +14426,93 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppStackDomainPathRoute"
+
+    CreateAppStackLinkInput:
+      type: object
+      additionalProperties: false
+      required: [databaseStackId]
+      properties:
+        databaseStackId:
+          $ref: "#/components/schemas/AppEntityId"
+
+    AppStackLinkConnectionDto:
+      type: object
+      description: Where a connected application reaches the database. It works only from a connected application.
+      required: [host, port]
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+
+    AppStackLinkDto:
+      type: object
+      required: [id, state, createdAt, databaseStackId, databaseName, databaseKind, applicationStackId, applicationName, connection]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        state:
+          type: string
+          enum: [pending, active, removing]
+          description: "`pending`: not applied on the server yet. `removing`: a disconnection the server has not confirmed yet"
+        createdAt:
+          type: string
+          format: date-time
+        databaseStackId:
+          $ref: "#/components/schemas/AppEntityId"
+        databaseName:
+          type: string
+        databaseKind:
+          type: string
+          description: The name of the database's template
+        applicationStackId:
+          $ref: "#/components/schemas/AppEntityId"
+        applicationName:
+          type: string
+        connection:
+          nullable: true
+          description: "`null` when the database is no longer something to connect to"
+          allOf:
+            - $ref: "#/components/schemas/AppStackLinkConnectionDto"
+
+    AppStackLinksDto:
+      type: object
+      required: [stackId, role, connection, links, candidates, limit]
+      properties:
+        stackId:
+          $ref: "#/components/schemas/AppEntityId"
+        role:
+          type: string
+          enum: [database, application]
+        connection:
+          nullable: true
+          description: "A database's own address; `null` for an application"
+          allOf:
+            - $ref: "#/components/schemas/AppStackLinkConnectionDto"
+        links:
+          type: array
+          description: "For a database the applications that use it; for an application the databases it uses"
+          items:
+            $ref: "#/components/schemas/AppStackLinkDto"
+        candidates:
+          type: array
+          description: "For an application, the customer's databases it can still be connected to; always empty for a database"
+          items:
+            type: object
+            required: [stackId, name, kind]
+            properties:
+              stackId:
+                $ref: "#/components/schemas/AppEntityId"
+              name:
+                type: string
+              kind:
+                type: string
+        limit:
+          type: integer
+          minimum: 1
+          description: The most links this side can have (4 for an application, 8 for a database)
 
     AppStackPlanDiffDto:
       type: object

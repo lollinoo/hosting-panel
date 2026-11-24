@@ -14,12 +14,14 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackLinks,
   appStackParameters,
   appStackRevisions,
   appStacks,
   appStackSecrets,
   appStackVolumes,
   AppStackRepositoryError,
+  createAppStackLinkTransactional,
   createAppStackTransactional,
   createAppTemplate,
   createDatabaseClient,
@@ -33,11 +35,13 @@ import {
   hosts,
   listAppStackComponents,
   listAppStackDeployments,
+  listAppStackLinksOfProvider,
   listAppStackParameters,
   listAppStackRevisions,
   listAppStacks,
   listAppStacksByStatus,
   listAppStackVolumes,
+  markAppStackLinkRemoving,
   newAppEntityId,
   operations,
   operationSteps,
@@ -74,6 +78,8 @@ interface PlanOptions {
   readonly components?: readonly string[];
   readonly volumes?: readonly string[];
   readonly ingress?: readonly { componentKey: string; port: number }[];
+  /** Ports every component listens on. */
+  readonly expose?: readonly number[];
   readonly templateVersionId?: string;
   readonly parameters?: NewAppStackRevision["parameters"];
 }
@@ -95,7 +101,11 @@ function revisionFor(stack: Pick<AppStackRow, "id" | "organizationId" | "templat
       templateVersionId,
       revisionId,
       planHash,
-      components: componentKeys.map((key) => ({ key, resources: { cpuMilli: 250, memoryBytes: "134217728" } })),
+      components: componentKeys.map((key) => ({
+        key,
+        resources: { cpuMilli: 250, memoryBytes: "134217728" },
+        ...(options.expose ? { expose: options.expose } : {}),
+      })),
       volumes: volumeKeys.map((key) => ({ key })),
       ingress: options.ingress ?? [{ componentKey: componentKeys[0], port: 8080 }],
     },
@@ -648,6 +658,95 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
       ["data", "destroy"],
       ["logs", "destroy"],
     ]);
+  });
+
+  it("a database that applications still use is not deleted, whatever the state of the link (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const app = await ready((await create()).stack.id);
+    const link = await createAppStackLinkTransactional(db(), {
+      organizationId: orgA,
+      consumerStackId: app.id,
+      providerStackId: database.id,
+      createdBy: null,
+    });
+    const operationsBefore = (await db().select().from(operations).where(eq(operations.resourceId, database.id))).length;
+    for (const prepare of [
+      async () => undefined,
+      async () => void (await db().execute(`update app_stack_links set state = 'active' where id = '${link.id}'`)),
+      async () => void (await markAppStackLinkRemoving(db(), { organizationId: orgA, stackId: app.id, linkId: link.id })),
+    ]) {
+      await prepare();
+      const err = await enqueue(database, "stack.delete").then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AppStackRepositoryError);
+      expect((err as AppStackRepositoryError).code).toBe("DATABASE_IN_USE");
+    }
+    expect((await stackOf(database.id)).status).toBe("running");
+    expect((await db().select().from(operations).where(eq(operations.resourceId, database.id))).length).toBe(operationsBefore);
+    // Every other change of the database is still taken.
+    expect((await enqueue(database, "stack.restart")).stack.status).not.toBe("running");
+  });
+
+  it("a database that applications use takes only a version with one part on one port (ADR-0039)", async () => {
+    const one = { components: ["db"], ingress: [] };
+    const database = await ready((await create(orgA, { ...one, expose: [3306] })).stack.id);
+    const app = await ready((await create()).stack.id);
+    const refused = async (plan: PlanOptions) => {
+      const err = await enqueue(await ready(database.id), "stack.upgrade", { plan }).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AppStackRepositoryError);
+      expect((err as AppStackRepositoryError).code).toBe("DATABASE_IN_USE");
+    };
+    // With no application linked, any version is taken.
+    expect((await enqueue(database, "stack.upgrade", { plan: { ...one, expose: [3306, 33060] } })).revision?.revisionNumber).toBe(2);
+    await ready(database.id);
+    const link = await createAppStackLinkTransactional(db(), {
+      organizationId: orgA,
+      consumerStackId: app.id,
+      providerStackId: database.id,
+      createdBy: null,
+    });
+    await refused({ components: ["db", "admin"], ingress: [], expose: [3306] });
+    await refused({ ...one, expose: [3306, 33060] });
+    await refused({ ...one, expose: [] });
+    await refused(one);
+    expect((await stackOf(database.id)).status).toBe("running");
+    expect((await enqueue(await ready(database.id), "stack.upgrade", { plan: { ...one, expose: [5432] } })).revision?.revisionNumber).toBe(3);
+    // Once the application is gone from the link, the database is free again.
+    await db().delete(appStackLinks).where(eq(appStackLinks.id, link.id));
+    expect((await enqueue(await ready(database.id), "stack.upgrade", { plan: { components: ["db", "admin"], ingress: [] } })).revision?.revisionNumber).toBe(4);
+  });
+
+  it("deleting an application takes its own links with it and leaves the links of the others (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const [leaving, staying] = [await ready((await create()).stack.id), await ready((await create()).stack.id)];
+    for (const app of [leaving, staying]) {
+      await createAppStackLinkTransactional(db(), { organizationId: orgA, consumerStackId: app.id, providerStackId: database.id, createdBy: null });
+    }
+    // A change that is not a delete touches no link.
+    await enqueue(leaving, "stack.stop");
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toHaveLength(2);
+    const result = await enqueue(await ready(leaving.id, "stopped"), "stack.delete");
+    expect(result.stack.status).toBe("deleting");
+    expect((await listAppStackLinksOfProvider(db(), database.id)).map((row) => row.consumerStackId)).toEqual([staying.id]);
+    // The database can go once the last application has.
+    await enqueue(await ready(staying.id), "stack.delete");
+    expect((await enqueue(database, "stack.delete")).stack.status).toBe("deleting");
+  });
+
+  it("a link of an application that is already deleted does not hold its database back, and goes with it (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const app = await ready((await create()).stack.id);
+    await createAppStackLinkTransactional(db(), { organizationId: orgA, consumerStackId: app.id, providerStackId: database.id, createdBy: null });
+    // What a previous release does when it deletes the application: the row is marked, the link is left.
+    await db().update(appStacks).set({ status: "deleted", deletedAt: new Date() }).where(eq(appStacks.id, app.id));
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toHaveLength(1);
+    expect((await enqueue(database, "stack.delete")).stack.status).toBe("deleting");
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toEqual([]);
   });
 
   it("writes the retention policy from destroyData on every delete, and ignores it for every other kind", async () => {

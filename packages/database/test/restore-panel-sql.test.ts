@@ -87,6 +87,10 @@ const SEED = `
   INSERT INTO app_stack_components (stack_id, organization_id, component_key, health, health_observed_at, applied_revision_id)
     VALUES ('stk_run','o','app','healthy', now(),'rev_run');
   INSERT INTO app_stack_volumes (stack_id, organization_id, volume_key, status) VALUES ('stk_run','o','data','present');
+  INSERT INTO app_stack_links (id, organization_id, consumer_stack_id, provider_stack_id, state) VALUES
+    ('slnk_active','o','stk_run','stk_del','active'),
+    ('slnk_pending','o','stk_gone','stk_del','pending'),
+    ('slnk_removing','o','stk_del','stk_run','removing');
   INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status,
     cert_expires_at, dns_next_check_at) VALUES ('dom_run','stk_run','o','app',8080,'app.example','active','active', now(), '2027-01-01');
 
@@ -140,6 +144,7 @@ const LEDGER = `
   UNION ALL SELECT 'bp', id, nightly_run_started_at::text, last_nightly_run_on::text, NULL FROM backup_policies
   UNION ALL SELECT 'bs', id, nightly_run_started_at::text, last_panel_backup_status, NULL FROM backup_settings
   UNION ALL SELECT 'as', id, status, applied_addresses_hash, applied_routes_hash FROM app_stacks
+  UNION ALL SELECT 'al', id, state, NULL, NULL FROM app_stack_links
   UNION ALL SELECT 'ad', id, status, problem, ended_at::text FROM app_stack_deployments
   UNION ALL SELECT 'ac', component_key, health, NULL, health_observed_at::text FROM app_stack_components
   UNION ALL SELECT 'av', volume_key, status, NULL, NULL FROM app_stack_volumes
@@ -237,6 +242,12 @@ describe.each([
     expect(byId("ad", "dep_run")).toMatchObject({ status: "failed", problem: "OPERATION_INTERRUPTED" });
     expect(byId("ad", "dep_run")?.x).not.toBeNull();
     expect(byId("ac", "app")).toMatchObject({ status: "missing", x: null });
+    // ADR-0039: no database is attached to anything on the new host; a disconnection still to confirm stays one.
+    expect(first.filter((r) => r.t === "al").map((r) => [r.id, r.status])).toEqual([
+      ["slnk_active", "pending"],
+      ["slnk_pending", "pending"],
+      ["slnk_removing", "removing"],
+    ]);
     expect(byId("av", "data")).toMatchObject({ status: "missing" });
     expect(byId("am", "dom_run")).toMatchObject({ status: "pending", problem: "none", x: "t" });
     expect(

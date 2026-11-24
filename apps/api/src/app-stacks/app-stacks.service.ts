@@ -114,7 +114,12 @@ export interface AppStackRequestContext {
   readonly idempotencyKey: string;
   readonly audit: (
     tx: DatabaseExecutor,
-    event: { readonly action: string; readonly targetType: "app_stack"; readonly targetId: string; readonly details: Record<string, unknown> },
+    event: {
+      readonly action: string;
+      readonly targetType: "app_stack" | "app_stack_link";
+      readonly targetId: string;
+      readonly details: Record<string, unknown>;
+    },
   ) => Promise<void>;
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APP_AUDIT_ACTIONS,
   APP_AUDIT_TARGET_TYPES,
@@ -52,6 +52,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { AppStackLinksApplier } from "./app-stack-links-applier.js";
 import {
   APP_STACK_OBSERVE_BATCH,
   APP_STACK_OBSERVE_PASS_BUDGET_MS,
@@ -100,6 +101,8 @@ export class AppStackObserverService {
   #stopped = false;
   #timer: NodeJS.Timeout | null = null;
   #serial: Promise<unknown> = Promise.resolve();
+  /** A full pass queued and not started yet: a call meanwhile joins it, so a long pass is followed by one pass, not one per tick. */
+  #waitingPass: Promise<void> | null = null;
   readonly #certSeenAt = new Map<string, number>();
   /** Stack id → when its last route refresh was queued, and the fingerprint of its saved addresses and options then. */
   readonly #routesQueuedAt = new Map<string, { readonly at: number; readonly addresses: string }>();
@@ -110,6 +113,7 @@ export class AppStackObserverService {
     @Inject(DNS_LOOKUP_TOKEN) private readonly dns: DnsLookup,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
+    @Optional() @Inject(AppStackLinksApplier) private readonly links: AppStackLinksApplier | null = null,
   ) {}
 
   public startBackgroundLoop(): void {
@@ -131,7 +135,13 @@ export class AppStackObserverService {
   }
 
   public reconcileOnce(now = new Date()): Promise<void> {
-    return this.#queue(() => this.#run(null, now, () => false));
+    if (this.#waitingPass !== null) return this.#waitingPass;
+    const pass = this.#queue(() => {
+      this.#waitingPass = null;
+      return this.#run(null, now, () => false);
+    });
+    this.#waitingPass = pass;
+    return pass;
   }
 
   /**
@@ -183,7 +193,11 @@ export class AppStackObserverService {
     optionsChanged = false,
   ): Promise<void> {
     if (this.config.runtimeBackend === "disabled") return;
-    if (only === null) await this.#observeHealth(now);
+    if (only === null) {
+      await this.#observeHealth(now);
+      // Links between a database and an application that are still to attach or to detach (ADR-0039).
+      await this.links?.retry();
+    }
     const db = this.dbClient.db;
     const rows = await db
       .select({

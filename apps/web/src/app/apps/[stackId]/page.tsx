@@ -3,6 +3,7 @@ import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackBackups } from "@/components/app-stacks/app-stack-backups";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
+import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
@@ -18,6 +19,7 @@ import {
   fetchServerOrgAppStackBackups,
   fetchServerOrgAppStackDeployments,
   fetchServerOrgAppStackDomains,
+  fetchServerOrgAppStackLinks,
 } from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
@@ -48,10 +50,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains, backups] = await Promise.all([
+  const [deployments, domains, backups, links] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
     fetchServerOrgAppStackBackups(orgId, stackId),
+    fetchServerOrgAppStackLinks(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
@@ -102,6 +105,9 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       <Section id="settings" title={d.section.settings}>
         <AppStackSettings parameters={s.parameters} m={m} />
         <AppStackSecrets {...ids} secrets={s.secretParameters} />
+      </Section>
+      <Section id="links" title={links?.role === "database" ? d.section.connection : d.section.links}>
+        <AppStackLinks {...ids} initial={links} />
       </Section>
       <Section id="domains" title={d.section.domains}>
         <AppStackDomains {...ids} initial={domains} ingress={s.ingress} pathTargets={s.pathTargets} pending={s.routesPending} />
