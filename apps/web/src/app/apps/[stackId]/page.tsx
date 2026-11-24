@@ -3,11 +3,13 @@ import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackBackups } from "@/components/app-stacks/app-stack-backups";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
+import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
 import { AppStackComponents, AppStackData, AppStackHistory, AppStackResources, AppStackSettings } from "@/components/app-stacks/app-stack-sections";
 import { StackStatusBadge } from "@/components/app-stacks/app-stack-status";
+import { AppStackTasks } from "@/components/app-stacks/app-stack-tasks";
 import { AppsUnavailable, appsGate } from "@/components/app-stacks/apps-unavailable";
 import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -18,6 +20,8 @@ import {
   fetchServerOrgAppStackBackups,
   fetchServerOrgAppStackDeployments,
   fetchServerOrgAppStackDomains,
+  fetchServerOrgAppStackLinks,
+  fetchServerOrgAppStackTasks,
 } from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
@@ -48,10 +52,12 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains, backups] = await Promise.all([
+  const [deployments, domains, backups, links, tasks] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
     fetchServerOrgAppStackBackups(orgId, stackId),
+    fetchServerOrgAppStackLinks(orgId, stackId),
+    fetchServerOrgAppStackTasks(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
@@ -99,9 +105,17 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       <Section id="logs" title={d.section.logs}>
         <AppStackLogs orgId={orgId} stackId={stackId} componentKeys={s.components.map((c) => c.key)} />
       </Section>
+      {tasks !== null && tasks.length > 0 && (
+        <Section id="tasks" title={d.section.tasks}>
+          <AppStackTasks {...ids} initial={tasks} />
+        </Section>
+      )}
       <Section id="settings" title={d.section.settings}>
         <AppStackSettings parameters={s.parameters} m={m} />
         <AppStackSecrets {...ids} secrets={s.secretParameters} />
+      </Section>
+      <Section id="links" title={links?.role === "database" ? d.section.connection : d.section.links}>
+        <AppStackLinks {...ids} initial={links} />
       </Section>
       <Section id="domains" title={d.section.domains}>
         <AppStackDomains {...ids} initial={domains} ingress={s.ingress} pathTargets={s.pathTargets} pending={s.routesPending} />

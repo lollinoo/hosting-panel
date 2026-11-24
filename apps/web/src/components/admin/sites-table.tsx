@@ -151,7 +151,13 @@ export function SitesTable({
               <TableCell>
                 <Badge variant="outline">{m.admin.appTemplates.stackStatus[s.status]}</Badge>
               </TableCell>
-              <TableCell />
+              <TableCell>
+                <Button asChild size="sm" variant="outline">
+                  <Link href={`/admin/apps/${s.id}`} aria-label={format(m.admin.appStack.linkAria, { name: s.name })}>
+                    {m.admin.appStack.linkLabel}
+                  </Link>
+                </Button>
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

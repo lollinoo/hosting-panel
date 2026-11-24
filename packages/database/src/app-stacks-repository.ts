@@ -34,6 +34,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackLinks,
   appStackParameters,
   appStackRevisions,
   appStacks,
@@ -58,7 +59,8 @@ export type AppStackRepositoryErrorCode =
   | "INVALID_TRANSITION"
   | "NO_REVISION"
   | "COMPONENT_IN_USE"
-  | "PATH_IN_USE";
+  | "PATH_IN_USE"
+  | "DATABASE_IN_USE";
 
 export class AppStackRepositoryError extends Error {
   constructor(
@@ -231,6 +233,17 @@ async function insertRevision(
     })
     .returning();
   return row!;
+}
+
+/** A link, in any state, to an application that is not deleted (ADR-0039). */
+async function usedByAnApplication(tx: DatabaseExecutor, providerStackId: string): Promise<boolean> {
+  const [used] = await tx
+    .select({ id: appStackLinks.id })
+    .from(appStackLinks)
+    .innerJoin(appStacks, eq(appStacks.id, appStackLinks.consumerStackId))
+    .where(and(eq(appStackLinks.providerStackId, providerStackId), isNull(appStacks.deletedAt)))
+    .limit(1);
+  return used !== undefined;
 }
 
 /** Inserts the plan's new components and volumes; drops components the plan no longer has (volumes are never dropped). */
@@ -574,6 +587,13 @@ export async function enqueueAppStackOperationTransactional(
       if (domains.some((d) => d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
         throw new AppStackRepositoryError("PATH_IN_USE", "A path of a web address still points at a part this version removes.");
       }
+      // ADR-0039: a database that applications use stays one component listening on one port. With more, the executor
+      // could attach nothing and a disconnection could never be confirmed.
+      const parts = planList(next.plan, "components");
+      const linkable = parts.length === 1 && Array.isArray(parts[0]!.expose) && parts[0]!.expose.length === 1;
+      if (!linkable && (await usedByAnApplication(tx, stack.id))) {
+        throw new AppStackRepositoryError("DATABASE_IN_USE", "Applications still use this database. Disconnect them first.");
+      }
 
       const [last] = await tx
         .select({ n: max(appStackRevisions.revisionNumber) })
@@ -593,6 +613,13 @@ export async function enqueueAppStackOperationTransactional(
       });
     }
     if (input.kind === "stack.delete") {
+      // ADR-0039, under the stack row lock a link insert takes too: a database goes only once no application uses it;
+      // an application takes its own links with it (the executor detaches the databases before it removes the network).
+      // A link whose application is already deleted (a previous release deleted it during a rollback) holds nothing back.
+      if (await usedByAnApplication(tx, stack.id)) {
+        throw new AppStackRepositoryError("DATABASE_IN_USE", "Applications still use this database. Disconnect them first.");
+      }
+      await tx.delete(appStackLinks).where(or(eq(appStackLinks.consumerStackId, stack.id), eq(appStackLinks.providerStackId, stack.id)));
       await tx
         .update(appStackVolumes)
         .set({ retentionPolicy: input.destroyData ? "destroy" : "retain", updatedAt: now })

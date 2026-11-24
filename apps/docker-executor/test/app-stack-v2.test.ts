@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ApprovedStackPlan, ApprovedStackPlanV2 } from "@hosting-panel/contracts";
+import { AppStackSecretFileContentSchema, type ApprovedStackPlan, type ApprovedStackPlanV2 } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_RESOLVE_ENGINE_TIMEOUT_MS,
@@ -226,6 +226,61 @@ describe("the container body of a version 2 plan", () => {
     }
     expect(expandAppStackSecretEnvironment(plan.components[2]!, {})).toEqual([]);
     expect(expandAppStackSecretEnvironment(appStackTestPlan().components[1]!, {})).toEqual([]);
+  });
+
+  it("refuses a value whose pieces spell a platform mark only once joined, and names no value (ADR-0041 §4)", () => {
+    // Each piece passes the mark rule alone: the schema of the secret contents checks one content at a time.
+    for (const content of ["xHP_TERMINAL_", "SESSION=term_", "HP_TERMINAL_", "HP_TASK_", "RUN=srun_1"]) {
+      expect(AppStackSecretFileContentSchema.safeParse({ parameterKey: "db_password", version: 1, content }).success, content).toBe(true);
+    }
+    const refused: ReadonlyArray<readonly [separator: string | null, first: string, second: string]> = [
+      [null, "xHP_TERMINAL_", "SESSION=term_"], // DB_PAIR: "${db_password}${db_root_password}"
+      ["SESSION=", "HP_TERMINAL_", "term_1"],
+      [null, "HP_TASK_", "RUN=srun_1"],
+    ];
+    for (const [separator, first, second] of refused) {
+      const pair = withPair(separator);
+      const contents = { db_password: first, db_root_password: second };
+      for (const attempt of [
+        () => expandAppStackSecretEnvironment(pair.components[0]!, contents),
+        () => build("db", pair, contents),
+      ]) {
+        const err = thrown(attempt);
+        expect(err).toMatchObject({ reason: "STACK_PLAN_INVALID", message: "An environment value of component db holds the mark of a platform process" });
+        for (const value of [first, second]) expect(shown(err)).not.toContain(value);
+      }
+    }
+    // Joined text that holds no mark is the value as before.
+    expect(expandAppStackSecretEnvironment(withPair(null).components[0]!, { db_password: "-d PHP_", db_root_password: "INI_SCAN_DIR=/x" })).toEqual([
+      "DB_PAIR=-d PHP_INI_SCAN_DIR=/x",
+    ]);
+  });
+
+  it("logs one line naming the application and the component when it refuses a joined value, never a value (ADR-0041 §4)", () => {
+    // The API turns the refusal into a generic one, so this line is the only place that says which component it was.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const pair = withPair(null);
+      const [first, second] = ["xHP_TERMINAL_", "SESSION=term_"];
+      thrown(() => build("db", pair, { db_password: first, db_root_password: second }));
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0]![0]);
+      expect(JSON.parse(line)).toEqual({
+        component: "hp-docker-executor",
+        event: "app_stack_env_mark_refused",
+        stackId: pair.stackId,
+        componentKey: "db",
+        timestamp: expect.any(String) as unknown,
+      });
+      for (const value of [first, second]) expect(line).not.toContain(value);
+      // An accepted value and a refusal of another kind log nothing.
+      warn.mockClear();
+      build("db", pair, { db_password: "-d PHP_", db_root_password: "INI_SCAN_DIR=/x" });
+      expect(thrown(() => build("db", pair, { db_password: first }))).toMatchObject({ reason: "STACK_SECRET_MISSING" });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

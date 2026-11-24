@@ -16,15 +16,22 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type {
+  AlertKind,
+  AlertSeverity,
   AppStackBackupCopyStatus,
   AppStackBackupKind,
   AppStackBackupStatus,
   AppStackComponentHealth,
   AppStackDeploymentStatus,
   AppStackDomainPathRoute,
+  AppStackLinkState,
   AppStackRestoreStatus,
   AppStackRetentionPolicy,
   AppStackStatus,
+  AppStackTaskRunProblem,
+  AppStackTaskRunStatus,
+  AppStackTaskSkipReason,
+  AppStackTaskTrigger,
   AppStackVolumeStatus,
   AppTemplateParameterEntry,
   AuditActorType,
@@ -48,6 +55,12 @@ import type {
   HostDaemonStatus,
   HostStatus,
   HostingMode,
+  NotificationChannelKind,
+  NotificationDeliveryStatus,
+  NotificationEvent,
+  NotificationGroup,
+  NotificationLocale,
+  NotificationProblem,
   OperationKind,
   OperationResourceType,
   OperationStatus,
@@ -584,6 +597,27 @@ export const appStackDomains = pgTable(
   ],
 );
 
+/** A database's only component attached to the private network of another application of the same customer (ADR-0039). */
+export const appStackLinks = pgTable(
+  "app_stack_links",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    consumerStackId: text("consumer_stack_id").notNull(),
+    providerStackId: text("provider_stack_id").notNull(),
+    state: text("state").$type<AppStackLinkState>().notNull().default("pending"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_links_pair").on(t.consumerStackId, t.providerStackId),
+    stackOrg("fk_app_stack_links_consumer_org", { stackId: t.consumerStackId, organizationId: t.organizationId }),
+    stackOrg("fk_app_stack_links_provider_org", { stackId: t.providerStackId, organizationId: t.organizationId }),
+    index("idx_app_stack_links_provider").on(t.providerStackId),
+  ],
+);
+
 export const appStackDeployments = pgTable(
   "app_stack_deployments",
   {
@@ -615,6 +649,58 @@ export const appStackDeployments = pgTable(
       name: "fk_app_stack_deployments_replaced_revision",
     }),
     index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
+  ],
+);
+
+// Tasks of applications (0031, ADR-0042). No schedule row = the task never runs by itself.
+export const appStackTaskSchedules = pgTable(
+  "app_stack_task_schedules",
+  {
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    taskKey: text("task_key").notNull(),
+    frequency: text("frequency").$type<"hourly" | "daily" | "weekly">().notNull(),
+    hourUtc: integer("hour_utc"),
+    weekday: integer("weekday"),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+    changedBy: text("changed_by").references(() => users.id, { onDelete: "set null" }),
+    servedSlotAt: timestamp("served_slot_at", { withTimezone: true }),
+    skippedSlotAt: timestamp("skipped_slot_at", { withTimezone: true }),
+    skipReason: text("skip_reason").$type<AppStackTaskSkipReason>(),
+  },
+  (t) => [
+    primaryKey({ name: "app_stack_task_schedules_pkey", columns: [t.stackId, t.taskKey] }),
+    stackOrg("fk_app_stack_task_schedules_stack_org", t),
+  ],
+);
+
+// What a run printed (masked and bounded by the executor) lives only in `output`.
+export const appStackTaskRuns = pgTable(
+  "app_stack_task_runs",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    taskKey: text("task_key").notNull(),
+    componentKey: text("component_key").notNull(),
+    trigger: text("run_trigger").$type<AppStackTaskTrigger>().notNull(),
+    requestedBy: text("requested_by").references(() => users.id, { onDelete: "set null" }),
+    slotAt: timestamp("slot_at", { withTimezone: true }),
+    operationId: text("operation_id").notNull(),
+    status: text("status").$type<AppStackTaskRunStatus>().notNull().default("queued"),
+    problem: text("problem").$type<AppStackTaskRunProblem>(),
+    exitCode: integer("exit_code"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    output: text("output").notNull().default(""),
+    outputTruncated: boolean("output_truncated").notNull().default(false),
+  },
+  (t) => [
+    unique("uq_app_stack_task_runs_operation").on(t.operationId),
+    stackOrg("fk_app_stack_task_runs_stack_org", t),
+    index("idx_app_stack_task_runs_task").on(t.stackId, t.taskKey, t.requestedAt),
+    uniqueIndex("uq_app_stack_task_runs_slot").on(t.stackId, t.taskKey, t.slotAt).where(sql`${t.slotAt} IS NOT NULL`),
   ],
 );
 
@@ -1446,13 +1532,16 @@ export const siteWordpressState = pgTable(
   ],
 );
 
-// No foreign keys: the row and its audit outlive the site and the user.
+// No foreign keys: the row and its audit outlive the site, the application and the user.
+// A session is on a site or on one component of an application, exactly one (CHECK of migration 0030).
 export const adminTerminalSessions = pgTable(
   "admin_terminal_sessions",
   {
     id: text("id").primaryKey(),
     userId: text("user_id").notNull(),
-    siteId: text("site_id").notNull(),
+    siteId: text("site_id"),
+    stackId: text("stack_id"),
+    componentKey: text("component_key"),
     organizationId: text("organization_id").notNull(),
     containerName: text("container_name").notNull(),
     openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1471,3 +1560,78 @@ export const firewallBlocks = pgTable("firewall_blocks", {
   note: text("note"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Notifications (ADR-0040). organizationId null is the server's scope. The address of a webhook, its signing key and
+// a bot token live only inside the encrypted config; displayHost and chat are what a page may show.
+export const notificationChannels = pgTable(
+  "notification_channels",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<NotificationChannelKind>().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    groups: jsonb("groups").$type<NotificationGroup[]>().notNull(),
+    recipients: jsonb("recipients").$type<string[]>(),
+    displayHost: text("display_host"),
+    chat: text("chat"),
+    signed: boolean("signed").notNull().default(false),
+    locale: text("locale").$type<NotificationLocale>().notNull().default("it"),
+    configCiphertextBase64: text("config_ciphertext_base64"),
+    configIvBase64: text("config_iv_base64"),
+    configAuthTagBase64: text("config_auth_tag_base64"),
+    configKeyVersion: text("config_key_version").notNull().default("v1"),
+    lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+    updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_notification_channels_server_kind").on(t.kind).where(sql`${t.organizationId} IS NULL`),
+    uniqueIndex("uq_notification_channels_org_kind").on(t.organizationId, t.kind).where(sql`${t.organizationId} IS NOT NULL`),
+  ],
+);
+
+// What a channel was already told: one row per alert open for it, with the event as it was when it opened.
+export const notificationChannelAlerts = pgTable(
+  "notification_channel_alerts",
+  {
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => notificationChannels.id, { onDelete: "cascade" }),
+    alertKey: text("alert_key").notNull(),
+    kind: text("kind").$type<AlertKind>().notNull(),
+    severity: text("severity").$type<AlertSeverity>().notNull(),
+    event: jsonb("event").$type<NotificationEvent>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    announcedAt: timestamp("announced_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.channelId, t.alertKey] })],
+);
+
+export const notificationDeliveries = pgTable(
+  "notification_deliveries",
+  {
+    id: text("id").primaryKey(),
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => notificationChannels.id, { onDelete: "cascade" }),
+    events: jsonb("events").$type<NotificationEvent[]>().notNull(),
+    omitted: integer("omitted").notNull().default(0),
+    openedCount: integer("opened_count").notNull().default(0),
+    closedCount: integer("closed_count").notNull().default(0),
+    test: boolean("test").notNull().default(false),
+    recipient: text("recipient"),
+    locale: text("locale").$type<NotificationLocale>().notNull(),
+    status: text("status").$type<NotificationDeliveryStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    problem: text("problem").$type<NotificationProblem>(),
+    httpStatus: integer("http_status"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_notification_deliveries_due").on(t.nextAttemptAt).where(sql`${t.status} = 'pending'`),
+    index("idx_notification_deliveries_channel_created").on(t.channelId, t.createdAt),
+  ],
+);

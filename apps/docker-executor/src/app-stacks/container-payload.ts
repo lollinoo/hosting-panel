@@ -1,16 +1,21 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
+  APP_IMAGE_SCRATCH_PATH_PATTERN,
+  APP_IMAGE_SCRATCH_PATHS_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
   APP_STACK_PIDS_LIMIT,
+  APP_STACK_PROCESS_MARK_PATTERN,
   APP_STACK_SECRET_ENV_LIMITS,
   APP_STACK_STANDARD_PIDS_LIMIT,
   APP_TEMPLATE_LIMITS,
   appStackComponentProfile,
   appStackComponentSecretEnvironment,
   appStackHealthPathProblem,
+  appStackImageScratchPaths,
   appStackSecretFilePath,
+  type AppImageAllowlistEntry,
   type AppStackHealthcheck,
   type AppStackPlanComponent,
   type ApprovedStackPlan,
@@ -29,6 +34,8 @@ import {
 } from "./names.js";
 
 export const APP_STACK_TMPFS = Object.freeze({ "/tmp": "rw,noexec,nosuid,nodev,size=64m" });
+/** A scratch area the allowlist row of an image declares (ADR-0039): in memory, 1 MB, nothing executable. */
+export const APP_STACK_SCRATCH_TMPFS_OPTIONS = "rw,noexec,nosuid,nodev,size=1m";
 /** The whole capability set of the "standard" run profile (ADR-0036): what an image that starts as root and then drops
  *  to its own user needs to take over its data directory and listen on a low port. A template never names a capability. */
 export const APP_STACK_STANDARD_CAP_ADD: readonly string[] = Object.freeze([
@@ -83,11 +90,29 @@ export interface AppStackContainerCreatePayload {
   };
 }
 
+/**
+ * The temporary areas of a "strict" component: `/tmp`, and the ones the allowlist row of its image declares (ADR-0039).
+ * No plan, template or customer names one. The row is checked again here, so a row that asks for anything else is refused.
+ */
+export function appStackTmpfs(image: string, allowlist?: readonly AppImageAllowlistEntry[]): Record<string, string> {
+  const paths = appStackImageScratchPaths(image, allowlist);
+  if (
+    paths.length > APP_IMAGE_SCRATCH_PATHS_MAX ||
+    new Set(paths).size !== paths.length ||
+    paths.some((scratch) => typeof scratch !== "string" || !APP_IMAGE_SCRATCH_PATH_PATTERN.test(scratch))
+  ) {
+    throw new ExecutorCodedError("The application container body breaks the Tmpfs rule", "HOST_POLICY_DENIED");
+  }
+  return { ...APP_STACK_TMPFS, ...Object.fromEntries(paths.map((scratch) => [scratch, APP_STACK_SCRATCH_TMPFS_OPTIONS])) };
+}
+
 /** The environment secrets of a version 2 component as "NAME=value" entries, in plan order; [] for a version 1 one.
- *  The values exist only in the returned strings: no message of this function carries one. */
+ *  The values exist only in the returned strings: no message or log line of this function carries one. `stackId` names
+ *  the application in the log line of a refused joined value. */
 export function expandAppStackSecretEnvironment(
   component: AppStackPlanComponent,
   contents: Readonly<Record<string, string>>,
+  stackId?: string,
 ): string[] {
   return appStackComponentSecretEnvironment(component).map((entry) => {
     const value = entry.pieces
@@ -103,17 +128,35 @@ export function expandAppStackSecretEnvironment(
     if (Buffer.byteLength(value, "utf8") > APP_STACK_SECRET_ENV_LIMITS.expandedBytes) {
       throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} is too long`);
     }
+    // Every piece passed the mark rule alone; joined they can still spell a mark the terminal's clean-up looks for (ADR-0041 §4).
+    if (APP_STACK_PROCESS_MARK_PATTERN.test(value)) {
+      // The API answers this refusal with a generic one: this line is what tells the operator which component it was.
+      console.warn(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_stack_env_mark_refused",
+          stackId: stackId ?? null,
+          componentKey: component.key,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} holds the mark of a platform process`);
+    }
     return `${entry.name}=${value}`;
   });
 }
 
-/** The stack container create body (L16): no ports, no Entrypoint; the run profile decides the root filesystem, /tmp,
- *  the process limit and the fixed capability set ("strict": read-only, no CapAdd). `secretContents` (parameterKey ->
- *  value) is needed only by a component with environment secrets. */
+/** The stack container create body (L16): no ports, no Entrypoint; the run profile decides the root filesystem, the
+ *  temporary areas, the process limit and the fixed capability set ("strict": read-only, no CapAdd, the temporary areas
+ *  of `appStackTmpfs`). `secretContents` (parameterKey -> value) is needed only by a component with environment secrets. */
 export function buildAppStackContainerCreatePayload(
   plan: ApprovedStackPlan,
   componentKey: string,
-  ctx: { readonly secretsRootDir: string; readonly secretContents?: Readonly<Record<string, string>> },
+  ctx: {
+    readonly secretsRootDir: string;
+    readonly allowlist?: readonly AppImageAllowlistEntry[];
+    readonly secretContents?: Readonly<Record<string, string>>;
+  },
 ): AppStackContainerCreatePayload {
   const c = plan.components.find((component) => component.key === componentKey);
   if (c === undefined) throw new RangeError(`Unknown stack component: ${componentKey}`);
@@ -129,7 +172,7 @@ export function buildAppStackContainerCreatePayload(
     Env: [
       ...c.environment.map((entry) => `${entry.name}=${entry.value}`),
       ...c.secretFiles.map((file) => `${file.envName}=${appStackSecretFilePath(file.parameterKey)}`),
-      ...expandAppStackSecretEnvironment(c, ctx.secretContents ?? {}),
+      ...expandAppStackSecretEnvironment(c, ctx.secretContents ?? {}, plan.stackId),
     ],
     Labels: appStackComponentLabels(plan, c.key),
     ExposedPorts: Object.fromEntries(c.expose.map((port) => [`${port}/tcp`, {}])),
@@ -140,7 +183,7 @@ export function buildAppStackContainerCreatePayload(
       ...(standard ? { CapAdd: [...APP_STACK_STANDARD_CAP_ADD] } : {}),
       SecurityOpt: ["no-new-privileges:true"],
       ReadonlyRootfs: !standard,
-      ...(standard ? {} : { Tmpfs: { ...APP_STACK_TMPFS } }),
+      ...(standard ? {} : { Tmpfs: appStackTmpfs(c.image, ctx.allowlist) }),
       PidsLimit: standard ? APP_STACK_STANDARD_PIDS_LIMIT : APP_STACK_PIDS_LIMIT,
       NanoCpus: c.resources.cpuMilli * 1_000_000,
       Memory: Number(c.resources.memoryBytes),
@@ -194,10 +237,11 @@ const inRange = (value: number, min: number, max: number) => Number.isSafeIntege
 
 /** Run on every body before POST /containers/create: refuses a body that lost any hardening property.
  *  With the plan, the User, the edge network, the run profile and the environment names must also be the plan
- *  component's; without it only the "strict" body passes. */
+ *  component's; without it only the "strict" body passes. The temporary areas of a "strict" body must be exactly the
+ *  ones the image of the body gives (`appStackTmpfs`), under the same allowlist the plan was checked with. */
 export function assertAppStackPayloadHardening(
   payload: AppStackContainerCreatePayload,
-  ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan },
+  ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan; readonly allowlist?: readonly AppImageAllowlistEntry[] },
 ): void {
   const refuse = (rule: string): never => {
     throw new ExecutorCodedError(`The application container body breaks the ${rule} rule`, "HOST_POLICY_DENIED");
@@ -240,7 +284,7 @@ export function assertAppStackPayloadHardening(
     if (host.PidsLimit !== APP_STACK_STANDARD_PIDS_LIMIT) refuse("PidsLimit");
   } else {
     if (host.ReadonlyRootfs !== true) refuse("ReadonlyRootfs");
-    if (!isDeepStrictEqual(host.Tmpfs, APP_STACK_TMPFS)) refuse("Tmpfs");
+    if (typeof payload.Image !== "string" || !isDeepStrictEqual(host.Tmpfs, appStackTmpfs(payload.Image, ctx.allowlist))) refuse("Tmpfs");
     if (host.PidsLimit !== APP_STACK_PIDS_LIMIT) refuse("PidsLimit");
   }
   // The body carries no plan: the limits must be ones a plan can hold (memory = swap, whole millicores).

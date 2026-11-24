@@ -1,4 +1,4 @@
-import type { PanelMailRequest, PanelMailResult } from "@hosting-panel/contracts";
+import { renderNotification, type PanelMailRequest, type PanelMailResult } from "@hosting-panel/contracts";
 import { submitLocalMail } from "./smtp-submit.js";
 
 /** Fixed texts of the panel's own mails; the link is the only variable part. */
@@ -17,6 +17,16 @@ export const PANEL_MAIL_TEXTS = {
   },
 } as const;
 
+/** The subject and the body of a panel mail: fixed texts, or the words of a notification's events (ADR-0040). */
+export function composePanelMail(req: PanelMailRequest): { subject: string; text: string } {
+  if (req.kind === "notification") {
+    const { subject, text } = renderNotification(req);
+    return { subject, text: `${text}\n` };
+  }
+  const texts = PANEL_MAIL_TEXTS[req.kind][req.locale];
+  return { subject: texts.subject, text: texts.body(req.link) };
+}
+
 /** Submits one panel mail to the relay; never throws. */
 export async function deliverPanelMail(
   host: string | null,
@@ -25,9 +35,8 @@ export async function deliverPanelMail(
   req: PanelMailRequest,
 ): Promise<PanelMailResult> {
   if (host === null) return { outcome: "failed" };
-  const texts = PANEL_MAIL_TEXTS[req.kind][req.locale];
   try {
-    await submitLocalMail({ host, port, heloName, from: req.from, to: req.to, subject: texts.subject, text: texts.body(req.link), timeoutMs: 5_000 });
+    await submitLocalMail({ host, port, heloName, from: req.from, to: req.to, ...composePanelMail(req), timeoutMs: 5_000 });
     return { outcome: "queued" };
   } catch (err) {
     // The error message can quote the relay's reply; only the code is logged, never the address or the link.

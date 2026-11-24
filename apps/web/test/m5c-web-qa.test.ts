@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AdminHealthDtoSchema,
+  AppTerminalSessionDtoSchema,
   OperationDtoSchema,
   PANEL_COMPONENTS,
   PANEL_CONTAINERS,
@@ -229,7 +230,9 @@ const M5C_SOURCES = [
   "src/components/admin/restart-dialog.tsx",
   "src/app/admin/health/page.tsx",
   "src/app/admin/sites/[siteId]/terminal/page.tsx",
+  "src/app/admin/apps/[stackId]/terminal/[componentKey]/page.tsx",
   "src/app/api/admin/sites/[siteId]/terminal/route.ts",
+  "src/app/api/admin/app-stacks/[stackId]/components/[componentKey]/terminal/route.ts",
   "src/app/api/admin/terminal/[sessionId]/write/route.ts",
   "src/app/api/admin/terminal/[sessionId]/read/route.ts",
   "src/app/api/admin/terminal/[sessionId]/close/route.ts",
@@ -662,6 +665,12 @@ describe("8. accessibility in the markup", () => {
 describe("9. the screen and the routes fit together", () => {
   const CLIENT = [
     ["POST", "`/api/admin/sites/${siteId}/terminal`", "src/app/api/admin/sites/[siteId]/terminal/route.ts"],
+    // ADR-0041: the same page opens a session in one component of an application.
+    [
+      "POST",
+      "`/api/admin/app-stacks/${component.stackId}/components/${component.componentKey}/terminal`",
+      "src/app/api/admin/app-stacks/[stackId]/components/[componentKey]/terminal/route.ts",
+    ],
     ["POST", "`/api/admin/terminal/${s.id}/write`", "src/app/api/admin/terminal/[sessionId]/write/route.ts"],
     ["POST", "`/api/admin/terminal/${s.id}/close`", "src/app/api/admin/terminal/[sessionId]/close/route.ts"],
     ["POST", "`/api/admin/terminal/${o.sessionId}/read`", "src/app/api/admin/terminal/[sessionId]/read/route.ts"],
@@ -677,6 +686,8 @@ describe("9. the screen and the routes fit together", () => {
     for (const [method, , file] of CLIENT) expect(read(file), file).toMatch(new RegExp(`export async function ${method}\\(`));
     expect(read("src/app/admin/health/page.tsx")).toContain("href={`/admin/sites/${s.siteId}/terminal`}");
     expect(fs.existsSync(path.join(ROOT, "src/app/admin/sites/[siteId]/terminal/page.tsx"))).toBe(true);
+    expect(read("src/app/admin/apps/[stackId]/page.tsx")).toContain("href={`/admin/apps/${stack.id}/terminal/${c.key}`}");
+    expect(fs.existsSync(path.join(ROOT, "src/app/admin/apps/[stackId]/terminal/[componentKey]/page.tsx"))).toBe(true);
   });
 
   it("every BFF route forwards to a path and method an API controller serves", () => {
@@ -692,10 +703,17 @@ describe("9. the screen and the routes fit together", () => {
     expect(health).toContain('@Controller("v1/admin")');
     expect(health).toContain('@Post("panel-containers/:component/restart")');
     expect(health).toContain('@Get("operations/:operationId")');
+    const apps = api("admin-app-stacks.controller.ts");
+    expect(apps).toContain('@Controller("v1/admin/app-stacks")');
+    expect(apps).toContain('@Post(":stackId/components/:componentKey/terminal")');
+    expect(read("src/app/api/admin/app-stacks/[stackId]/components/[componentKey]/terminal/route.ts")).toContain(
+      "`v1/admin/app-stacks/${stackId}/components/${componentKey}/terminal`",
+    );
   });
 
   it("the fields the pages read exist in the contract", () => {
     expect(Object.keys(TerminalSessionDtoSchema.shape)).toEqual(expect.arrayContaining(["sessionId", "expiresAt"]));
+    expect(Object.keys(AppTerminalSessionDtoSchema.shape)).toEqual(expect.arrayContaining(["sessionId", "expiresAt"]));
     expect(Object.keys(TerminalReadDtoSchema.shape)).toEqual(expect.arrayContaining(["output", "cursor", "dropped", "ended"]));
     expect(Object.keys(OperationDtoSchema.shape)).toContain("status");
     const row = AdminHealthDtoSchema.shape.siteContainers.element.shape;

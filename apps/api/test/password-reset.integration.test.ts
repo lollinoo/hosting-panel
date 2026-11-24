@@ -11,7 +11,7 @@ import {
   type DatabaseClient,
 } from "@hosting-panel/database";
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
-import type { PanelMailRequest, PanelMailResult } from "@hosting-panel/executor-contracts";
+import type { PanelMailRequest, PanelMailResult, PasswordResetMailRequest } from "@hosting-panel/executor-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // index.js first: the service sits in the import cycle cli/accounts -> create-app -> app.module.
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
@@ -72,12 +72,12 @@ describe("password reset by mail", () => {
 
   const request = (email: string) => post("/v1/auth/password-reset/request", { email });
   const confirm = (token: string, newPassword = NEW_PW) => post("/v1/auth/password-reset/confirm", { token, newPassword });
-  const tokenOf = (mail: PanelMailRequest) => mail.link.split("#")[1]!;
+  const tokenOf = (mail: PasswordResetMailRequest) => mail.link.split("#")[1]!;
   const userId = async (email: string) => (await dbClient.db.select().from(users).where(eq(users.email, email)))[0]!.id;
   const tokens = (id: string) => dbClient.db.select().from(passwordResetTokens).where(eq(passwordResetTokens.userId, id));
   const audits = (action: string) => dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, action));
 
-  async function requestMail(email = CUSTOMER): Promise<PanelMailRequest> {
+  async function requestMail(email = CUSTOMER): Promise<PasswordResetMailRequest> {
     const before = sim.panelMails.length;
     expect((await request(email)).status).toBe(202);
     await service.idle();

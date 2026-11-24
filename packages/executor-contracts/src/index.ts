@@ -1,6 +1,8 @@
 export * from "./spec.js";
 export * from "./port.js";
 export * from "./stack-port.js";
+export * from "./stack-terminal-port.js";
+export * from "./stack-task-port.js";
 export * from "./phase1-executor.js";
 export {
   ApprovedServiceSpecWireSchema,

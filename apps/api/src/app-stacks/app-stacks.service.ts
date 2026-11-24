@@ -10,6 +10,7 @@ import {
   ApprovedStackPlanSchema,
   appStackLockKey,
   appStackPlanImageProblems,
+  appStackTaskQueueKey,
   appTemplateHiddenSecretKeys,
   effectiveComponentHealth,
   redactSensitiveString,
@@ -38,6 +39,7 @@ import {
   ACTIVE_OPERATION_LOCK_STATUSES,
   addAppStackDomainsTransactional,
   and,
+  asc,
   appStackComponents,
   appStackDeployments,
   appStackDomains,
@@ -114,7 +116,12 @@ export interface AppStackRequestContext {
   readonly idempotencyKey: string;
   readonly audit: (
     tx: DatabaseExecutor,
-    event: { readonly action: string; readonly targetType: "app_stack"; readonly targetId: string; readonly details: Record<string, unknown> },
+    event: {
+      readonly action: string;
+      readonly targetType: "app_stack" | "app_stack_link";
+      readonly targetId: string;
+      readonly details: Record<string, unknown>;
+    },
   ) => Promise<void>;
 }
 
@@ -353,11 +360,19 @@ export class AppStacksService {
       listAppStackParameters(db, scope),
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
-      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7).
+      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7). A run of a task
+      // that waits for its lane holds a lock of its own; an operation under the application's lock ("stack:<id>" sorts
+      // first) is the one shown.
       db
         .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
         .from(operations)
-        .where(and(eq(operations.lockKey, appStackLockKey(stack.id)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
+        .where(
+          and(
+            inArray(operations.lockKey, [appStackLockKey(stack.id), appStackTaskQueueKey(stack.id)]),
+            inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
+          ),
+        )
+        .orderBy(asc(operations.lockKey))
         .limit(1),
       // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
       // (only the routes were refused, and that revision was applied).

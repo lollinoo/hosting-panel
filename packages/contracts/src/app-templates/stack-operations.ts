@@ -102,8 +102,17 @@ export const APP_AUDIT_ACTIONS = Object.freeze({
   domainUpdate: "app.stack.domain.update",
   backupCreate: "app.stack.backup.create",
   backupRestore: "app.stack.backup.restore",
+  linkCreate: "app.stack.link.create",
+  linkRemove: "app.stack.link.remove",
+  taskRun: "app.task.run",
+  taskSchedule: "app.task.schedule",
 } as const);
-export const APP_AUDIT_TARGET_TYPES = Object.freeze({ template: "app_template", stack: "app_stack", domain: "app_stack_domain" } as const);
+export const APP_AUDIT_TARGET_TYPES = Object.freeze({
+  template: "app_template",
+  stack: "app_stack",
+  domain: "app_stack_domain",
+  link: "app_stack_link",
+} as const);
 
 const LIVE = ["running", "degraded", "stopped", "failed", "unknown"] as const;
 const toUpdating = Object.fromEntries(LIVE.map((s) => [s, "updating"] as const));

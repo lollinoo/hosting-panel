@@ -14,7 +14,10 @@ const M24 = "0024_site_templates.sql";
 const M25 = "0025_app_stacks.sql";
 const M26 = "0026_app_routing_options.sql";
 const M27 = "0027_app_stack_backups.sql";
-const ALL = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups"];
+const M28 = "0028_app_stack_links.sql";
+const M29 = "0029_notifications.sql";
+const M31 = "0031_app_stack_tasks.sql";
+const ALL = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups", "app-stack-links", "notifications", "app-tasks"];
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -47,7 +50,7 @@ exit 0
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       D: d,
-      APPLIED: (opts.applied ?? [M21, M22, M24, M25, M26, M27]).join("\n"),
+      APPLIED: (opts.applied ?? [M21, M22, M24, M25, M26, M27, M28, M29, M31]).join("\n"),
       IN_USE: (opts.inUse ?? []).join(" "),
       FAIL_ON: opts.failOn ?? ""
     }
@@ -60,8 +63,8 @@ describe("panel_features_in_use", () => {
   it("prints the in-use features; the password only in PGPASSWORD and ON_ERROR_STOP set", () => {
     const r = run({ inUse: ALL });
     expect(r.code, r.err).toBe(0);
-    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\n");
-    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(8);
+    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\nnotifications\napp-tasks\n");
+    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(11);
     for (const c of r.calls.split("\n").filter(Boolean)) {
       expect(c).toMatch(/^-X -qtA -v ON_ERROR_STOP=1 -h 127\.0\.0\.1 -U hosting_panel -d hosting_panel -c /);
     }
@@ -75,8 +78,12 @@ describe("panel_features_in_use", () => {
     expect(run({ inUse: ["app-stacks"] }).out).toBe("app-stacks\n");
     expect(run({ inUse: ["app-format-v2"] }).out).toBe("app-format-v2\n");
     expect(run({ inUse: ["app-routing-options"] }).out).toBe("app-routing-options\n");
-    // the two names share a prefix: each predicate answers for its own name only
+    // the names share a prefix: each predicate answers for its own name only ("app-stacks" is not read out of
+    // 'app-stack-backups' or 'app-stack-links', nor the reverse)
     expect(run({ inUse: ["app-stack-backups"] }).out).toBe("app-stack-backups\n");
+    expect(run({ inUse: ["app-stack-links"] }).out).toBe("app-stack-links\n");
+    expect(run({ inUse: ["notifications"] }).out).toBe("notifications\n");
+    expect(run({ inUse: ["app-tasks"] }).out).toBe("app-tasks\n");
     expect(run({ inUse: [] }).out).toBe("");
   });
 
@@ -93,6 +100,12 @@ describe("panel_features_in_use", () => {
     expect(calls).not.toContain("compression");
     // every backup counts, whatever its status and also when its application is gone (ADR-0038 K10)
     expect(calls).toContain("select 'app-stack-backups' where exists (select 1 from public.app_stack_backups)");
+    expect(calls).toContain("select 'app-stack-links' where exists (select 1 from public.app_stack_links)");
+    expect(calls).toContain("select 'notifications' where exists (select 1 from public.notification_channels)");
+    // ADR-0042: a template version that declares at least one task.
+    expect(calls).toContain(
+      "app_template_versions where jsonb_typeof(compiled_schema -> 'tasks') = 'array' and jsonb_array_length(compiled_schema -> 'tasks') > 0",
+    );
   });
 
   it("asks the extended application format of the stacks that are not deleted: their template version, then their revisions", () => {
@@ -124,6 +137,12 @@ describe("panel_features_in_use", () => {
     const only27 = run({ applied: [M27], inUse: all });
     expect(only27.out).toBe("app-stack-backups\n");
     expect(only27.calls.split("\n").filter(Boolean)).toHaveLength(2);
+    const only28 = run({ applied: [M28], inUse: all });
+    expect(only28.out).toBe("app-stack-links\n");
+    expect(only28.calls.split("\n").filter(Boolean)).toHaveLength(2);
+    const only29 = run({ applied: [M29], inUse: all });
+    expect(only29.out).toBe("notifications\n");
+    expect(only29.calls.split("\n").filter(Boolean)).toHaveLength(2);
     const without25 = run({ applied: [M21, M22, M24], inUse: all });
     expect(without25.out).toBe("manual-tls\nbackup-targets\nsite-templates\n");
     // The release before the routing options: its stacks are asked about, the options it never had are not.
@@ -135,6 +154,22 @@ describe("panel_features_in_use", () => {
     expect(before27.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\n");
     expect(before27.calls).not.toContain("'app-stack-backups'");
     expect(before27.calls.split("\n").filter(Boolean)).toHaveLength(7);
+    // A panel that never ran 0028 has no such table: the question is not asked at all.
+    const before28 = run({ applied: [M21, M22, M24, M25, M26, M27], inUse: all, failOn: "public.app_stack_links" });
+    expect(before28.code, before28.err).toBe(0);
+    expect(before28.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\n");
+    // A panel that never ran 0029 has no such table: the question is not asked at all.
+    const before29 = run({ applied: [M21, M22, M24, M25, M26, M27, M28], inUse: all, failOn: "public.notification_channels" });
+    expect(before29.code, before29.err).toBe(0);
+    expect(before29.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\n");
+    // The previous release's database has no 0031: tasks are neither asked nor in use.
+    const before31 = run({ applied: [M21, M22, M24, M25, M26, M27, M28, M29], inUse: all });
+    expect(before31.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\nnotifications\n");
+    expect(before31.calls).not.toContain("'app-tasks'");
+    expect(before31.calls.split("\n").filter(Boolean)).toHaveLength(10);
+    const only31 = run({ applied: [M31], inUse: all });
+    expect(only31.out).toBe("app-tasks\n");
+    expect(only31.calls.split("\n").filter(Boolean)).toHaveLength(2);
   });
 
   it("fails closed: a psql error or a URL that is not the local panel database is non-zero", () => {
@@ -146,6 +181,9 @@ describe("panel_features_in_use", () => {
     expect(run({ failOn: "spec_version", inUse: ["app-format-v2"] }).code).not.toBe(0);
     expect(run({ failOn: "app_stack_domains where", inUse: ["app-routing-options"] }).code).not.toBe(0);
     expect(run({ failOn: "app_stack_backups", inUse: ["app-stack-backups"] }).code).not.toBe(0);
+    expect(run({ failOn: "public.app_stack_links", inUse: ["app-stack-links"] }).code).not.toBe(0);
+    expect(run({ failOn: "public.notification_channels", inUse: ["notifications"] }).code).not.toBe(0);
+    expect(run({ failOn: "jsonb_array_length", inUse: ["app-tasks"] }).code).not.toBe(0);
     const bad = run({ url: `postgresql://hosting_panel:${PW}@db.example.com:5432/hosting_panel` });
     expect(bad.code).not.toBe(0);
     expect(bad.calls).toBe("");
@@ -159,7 +197,7 @@ describe("release_features", () => {
   };
   it("reads the features line build-release.mjs writes", () => {
     const json = JSON.stringify({ version: "1.0.0", node: "26.13.1", features: RELEASE_FEATURES.join(" ") }, null, 2);
-    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups");
+    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications app-tasks");
   });
   it("is empty when the key is absent or empty", () => {
     expect(parse(`${JSON.stringify({ version: "1.0.0" }, null, 2)}\n`)).toBe("");

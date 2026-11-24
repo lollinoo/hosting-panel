@@ -63,13 +63,46 @@ export interface MockDockerDaemon {
   readonly failStarts: { remaining: number };
   /** The next `remaining` container inspects answer 500. */
   readonly failInspects: { remaining: number };
+  /** With `execUpgrade`: the next exec starts each write these frames (stream 1 or 2) and their inspect answers this ExitCode. */
+  readonly execReplies: Array<{ readonly frames: ReadonlyArray<readonly [1 | 2, string]>; readonly exitCode: number }>;
   /** With `execUpgrade`: the next `remaining` exec starts answer 500 instead of the stream. */
   readonly failExecStarts: { remaining: number };
+  /** With `execScript`: ends the stream of an exec that stays open, as if its process ended (or was killed). */
+  endExec(execId: string, exitCode?: number | null): void;
   /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
   readonly deleteConflicts: { remaining: number; removeFromMap?: boolean };
   /** The next `remaining` container deletes answer 500 and remove nothing. */
   readonly failDeletes: { remaining: number };
   close(): Promise<void>;
+}
+
+/** What one exec does, chosen by `execScript` when the exec is created. */
+export interface MockExecPlan {
+  /** Written when the exec starts, in this order: [1 = standard output | 2 = standard error, bytes]. */
+  readonly frames?: ReadonlyArray<readonly [1 | 2, string | Buffer]>;
+  /** Raw bytes written after the frames, as they are (a broken or unframed stream). */
+  readonly raw?: Buffer;
+  /** What GET /exec/<id>/json answers once the exec ended (default: the daemon's `execExitCode`); null = not told. */
+  readonly exitCode?: number | null;
+  /** The `Pid` GET /exec/<id>/json answers (0: the engine never started the process); not set = no `Pid`. */
+  readonly pid?: number;
+  /** Once the exec ended, GET /exec/<id>/json answers 404: the engine dropped it (its container stopped). */
+  readonly forgotten?: boolean;
+  /** The stream stays open and the exec stays running until `endExec`. */
+  readonly stayOpen?: boolean;
+  /** The exec start answers 500 instead of the stream. */
+  readonly failStart?: boolean;
+  /** The stream is cut without an end once the frames are written. */
+  readonly cut?: boolean;
+}
+
+/** One frame of Docker's multiplexed stream. */
+export function mockDockerFrame(stream: 1 | 2, data: string | Buffer): Buffer {
+  const payload = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  const header = Buffer.alloc(8);
+  header[0] = stream;
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
 }
 
 export async function startMockDockerDaemon(options?: {
@@ -89,6 +122,16 @@ export async function startMockDockerDaemon(options?: {
   readonly onRequest?: (method: string, routePath: string) => void;
   /** Exec start upgrades to a raw stream; a stream whose client half-closes is ended. */
   readonly execUpgrade?: boolean;
+  /**
+   * With `execUpgrade`: asked at each exec create. An exec that gets a plan follows it (its stream does not end when
+   * the client half-closes); one that gets none behaves as before.
+   */
+  readonly execScript?: (call: {
+    readonly execId: string;
+    readonly container: string;
+    readonly Cmd: string[];
+    readonly Env: string[];
+  }) => MockExecPlan | undefined;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -113,12 +156,15 @@ export async function startMockDockerDaemon(options?: {
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
   const execBodies: Array<Record<string, unknown>> = [];
   const execStreams: Array<{ execId: string; socket: Duplex }> = [];
+  const execPlans = new Map<string, { plan: MockExecPlan; ended: boolean; exitCode: number | null; socket: Duplex | null }>();
   const holdRestarts: { until: Promise<void> | null } = { until: null };
   const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
   const failCreates = { remaining: 0 };
   const failStarts = { remaining: 0 };
   const failInspects = { remaining: 0 };
   const failExecStarts = { remaining: 0 };
+  const execReplies: MockDockerDaemon["execReplies"] = [];
+  const execExitCodes = new Map<string, number>();
   const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
   const failDeletes = { remaining: 0 };
   const pulledImages = new Set<string>();
@@ -220,13 +266,32 @@ export async function startMockDockerDaemon(options?: {
         }
         execCalls.push({ container, Cmd: (JSON.parse(bodyStr) as { Cmd: string[] }).Cmd });
         execBodies.push(JSON.parse(bodyStr) as Record<string, unknown>);
+        const createdExecId = `exec_${String(execCalls.length)}`;
+        const created = JSON.parse(bodyStr) as { Cmd: string[]; Env?: string[] };
+        const plan = options?.execScript?.({ execId: createdExecId, container, Cmd: created.Cmd, Env: created.Env ?? [] });
+        if (plan !== undefined) {
+          const exitCode = plan.exitCode === undefined ? (options?.execExitCode ?? 0) : plan.exitCode;
+          execPlans.set(createdExecId, { plan, ended: false, exitCode, socket: null });
+        }
         res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Id: `exec_${String(execCalls.length)}` }));
+        res.end(JSON.stringify({ Id: createdExecId }));
         return;
       }
 
       const execMatch = /^\/exec\/([^/]+)\/(start|json)$/.exec(routePath);
       if (execMatch && ((method === "POST" && execMatch[2] === "start") || method === "GET")) {
+        const planned = execMatch[2] === "json" ? execPlans.get(decodeURIComponent(execMatch[1] ?? "")) : undefined;
+        if (planned !== undefined) {
+          if (planned.ended && planned.plan.forgotten === true) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: "No such exec instance" }));
+            return;
+          }
+          const pid = planned.plan.pid === undefined ? {} : { Pid: planned.plan.pid };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(planned.ended ? { Running: false, ExitCode: planned.exitCode, ...pid } : { Running: true, ExitCode: null, ...pid }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           execMatch[2] === "start"
@@ -234,7 +299,7 @@ export async function startMockDockerDaemon(options?: {
             : JSON.stringify(
                 options?.execStaysRunning
                   ? { Running: true, ExitCode: null }
-                  : { Running: false, ExitCode: options?.execExitCode ?? 0 },
+                  : { Running: false, ExitCode: execExitCodes.get(decodeURIComponent(execMatch[1]!)) ?? options?.execExitCode ?? 0 },
               ),
         );
         return;
@@ -639,10 +704,44 @@ export async function startMockDockerDaemon(options?: {
         socket.end("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
       }
+      const planned = execPlans.get(decodeURIComponent(execId));
+      if (planned !== undefined) {
+        if (planned.plan.failStart === true) {
+          planned.ended = true;
+          socket.end("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+          return;
+        }
+        socket.resume();
+        socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+        for (const [stream, data] of planned.plan.frames ?? []) socket.write(mockDockerFrame(stream, data));
+        if (planned.plan.raw !== undefined) socket.write(planned.plan.raw);
+        execStreams.push({ execId: decodeURIComponent(execId), socket });
+        if (planned.plan.cut === true) {
+          // Let the frames leave before the stream is cut without an end.
+          setTimeout(() => socket.destroy(), 20);
+        } else if (planned.plan.stayOpen === true) {
+          planned.socket = socket;
+        } else {
+          planned.ended = true;
+          socket.end();
+        }
+        return;
+      }
       socket.on("end", () => socket.end());
       socket.resume();
       socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
       execStreams.push({ execId: decodeURIComponent(execId), socket });
+      const reply = execReplies.shift();
+      if (reply) {
+        execExitCodes.set(decodeURIComponent(execId), reply.exitCode);
+        for (const [stream, text] of reply.frames) {
+          const payload = Buffer.from(text, "utf8");
+          const header = Buffer.alloc(8);
+          header[0] = stream;
+          header.writeUInt32BE(payload.length, 4);
+          socket.write(Buffer.concat([header, payload]));
+        }
+      }
     });
   }
 
@@ -673,7 +772,15 @@ export async function startMockDockerDaemon(options?: {
     failCreates,
     failStarts,
     failInspects,
+    execReplies,
     failExecStarts,
+    endExec(execId: string, exitCode?: number | null) {
+      const planned = execPlans.get(execId);
+      if (planned === undefined || planned.ended) return;
+      planned.ended = true;
+      if (exitCode !== undefined) planned.exitCode = exitCode;
+      planned.socket?.end();
+    },
     deleteConflicts,
     failDeletes,
     async close() {

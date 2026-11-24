@@ -196,6 +196,9 @@ describe("every administrator route refuses a customer before it does anything",
       service: "api",
       stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
       componentKey: "web",
+      taskKey: "save",
+      linkId: `slnk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      channel: "webhook",
     };
   });
 

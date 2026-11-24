@@ -161,6 +161,70 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(asked(f)).toBe(false);
   });
 
+  it("refuses a downgrade while a database is connected to an application (exit 8), naming only that feature", () => {
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links";
+    const f = gated("echo app-stack-links", ALL);
+    // The target knows application stacks, their extended format, the options of their addresses and their backups, not their links.
+    const target = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups");
+    const r = update(["--archive", target, "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-stack-links", "--allow-feature-loss", "disconnect the databases"]) expect(r.err).toContain(t);
+    expect(r.err).not.toMatch(/does not know (?!app-stack-links,)/);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("a target that knows the links is not held back by them", () => {
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links";
+    const f = gated("echo app-stack-links", ALL);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", ALL), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+  });
+
+  it("refuses a downgrade while a notification channel exists (exit 8), naming only that feature", () => {
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications";
+    const f = gated("echo notifications", ALL);
+    // The target knows everything but the notifications.
+    const target = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links");
+    const r = update(["--archive", target, "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["notifications", "--allow-feature-loss", "remove the notification channels"]) expect(r.err).toContain(t);
+    expect(r.err).toMatch(/does not know notifications, which this panel uses/);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("a target that knows the notifications is not held back by a channel", () => {
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications";
+    const f = gated("echo notifications", ALL);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", ALL), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+  });
+
+  it("refuses a downgrade while an application template declares tasks (exit 8), unless forced (ADR-0042)", () => {
+    const features = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications app-tasks";
+    const f = gated("echo app-tasks", features);
+    const r = update(["--archive", old(), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-tasks", "--allow-feature-loss", "declares tasks"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups", "app-stack-links", "notifications"]) {
+      expect(r.err).not.toContain(t);
+    }
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+
+    const forced = gated("echo app-tasks", features);
+    const done = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], forced.env);
+    expect(done.code, done.err).toBe(0);
+    expect(done.err).toContain("app-tasks stays unreachable");
+    expect(cur(forced.root)).toBe("releases/0.1.0");
+    // Nothing in use: the older release is installed without the flag.
+    const unused = gated("true", features);
+    expect(update(["--archive", old(), "--allow-downgrade"], unused.env).code).toBe(0);
+  });
+
   it("--allow-feature-loss lets the downgrade through", () => {
     const f = gated("echo manual-tls");
     const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);
