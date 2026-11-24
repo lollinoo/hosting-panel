@@ -4,6 +4,7 @@ import {
   ApprovedStackPlanSchema,
   type AppStackOperationKind,
   type AppStackPlanComponent,
+  type AppStackPlanComponentV2,
   type AppStackRouteWire,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -131,10 +132,10 @@ describe("AppStackRuntime (RT3)", () => {
     };
   }
 
-  async function create(components: AppStackPlanComponent[], ingress = INGRESS) {
+  async function create(components: AppStackPlanComponent[], ingress = INGRESS, make = revision) {
     n += 1;
     const stackId = newAppEntityId("stk");
-    const rev = revision(stackId, components, ingress);
+    const rev = make(stackId, components, ingress);
     const write = await createAppStackTransactional(db(), {
       stackId,
       organizationId: ORG,
@@ -794,6 +795,173 @@ describe("AppStackRuntime (RT3)", () => {
       expectFailure(await run(redeploy), "DOCKER_ENGINE_UNAVAILABLE");
       expect(touched()).toEqual([]);
       expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+    });
+  });
+
+  describe("a deploy, upgrade or rollback that fails in the API before the executor is asked to create (#186)", () => {
+    // A version 2 plan whose web component has an environment secret: its create step reads the private values itself.
+    const DB_PASSWORD = { name: "DB_PASSWORD", pieces: [{ parameterKey: "db_password", version: 1 }] };
+    const v2 = (c: AppStackPlanComponent, secretEnvironment: AppStackPlanComponentV2["secretEnvironment"] = []): AppStackPlanComponentV2 => ({
+      ...c,
+      profile: "strict",
+      secretEnvironment,
+    });
+    const WEB_V2 = v2({ ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }, [DB_PASSWORD]);
+    const touched = () => trace().filter((c) => /^(create|start|restart|remove)AppStack|^publishAppStackRoutes/.test(c));
+
+    function revisionV2(stackId: string, components: AppStackPlanComponent[], ingress = INGRESS): NewAppStackRevision {
+      const revisionId = newAppEntityId("srev");
+      const volumes = [...new Set(components.flatMap((c) => c.volumes.map((v) => v.volumeKey)))].sort().map((key) => ({ key }));
+      const base = {
+        schemaVersion: 2 as const,
+        stackId,
+        organizationId: ORG,
+        hostAllocationId: ALLOC,
+        templateVersionId: versionId,
+        revisionId,
+        components: components as AppStackPlanComponentV2[],
+        volumes,
+        ingress,
+      };
+      const plan: ApprovedStackPlan = { ...base, planHash: computeAppStackPlanHash(base) };
+      expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
+      return {
+        revisionId,
+        templateVersionId: versionId,
+        plan,
+        planHash: plan.planHash,
+        componentKeys: components.map((c) => c.key),
+        volumeKeys: volumes.map((v) => v.key),
+        cpuMilli: 250 * components.length,
+        memoryBytes: 134217728 * components.length,
+        parameters: [],
+      };
+    }
+
+    /** An application of that plan brought to running, then stopped when asked, the fake's trace cleared. */
+    async function installed(stop: boolean) {
+      const created = await create([v2(CACHE), v2(WEB, [DB_PASSWORD])], INGRESS, revisionV2);
+      await setAppStackSecretTransactional(db(), {
+        organizationId: ORG,
+        stackId: created.stackId,
+        parameterKey: "db_password",
+        value: "first",
+        masterKey: config.secretsMasterKey,
+      });
+      await addDomain(created.stackId);
+      expect(await run(created.write)).toBeUndefined();
+      if (stop) expect(await run(await enqueue(created.stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(created.stackId)).status).toBe(stop ? "stopped" : "running");
+      fake.calls.length = 0;
+      return created;
+    }
+
+    /** A runtime whose first lease renewal once `when` holds fails, as a database error would. */
+    function refusingARenewal(when: () => boolean): AppStackRuntime {
+      let spent = false;
+      const guarded = new Proxy(db(), {
+        get(target, prop) {
+          const value: unknown = Reflect.get(target, prop, target);
+          if (prop !== "update" || typeof value !== "function") return value;
+          return (table: unknown) => {
+            if (!spent && table === operations && when()) {
+              spent = true;
+              throw new Error("the lease could not be renewed");
+            }
+            return (value as (t: unknown) => unknown).call(target, table);
+          };
+        },
+      });
+      return new AppStackRuntime({ ...dbClient, db: guarded } as DatabaseClient, fake, config, clock);
+    }
+
+    /** A runtime that reads the private values once and cannot decrypt them the second time (the create step's). */
+    function failingTheSecondRead(): AppStackRuntime {
+      let reads = 0;
+      const cfg = Object.defineProperty({ ...config }, "secretsMasterKey", {
+        get: () => {
+          reads += 1;
+          return reads === 1 ? config.secretsMasterKey : randomBytes(32);
+        },
+      });
+      return runtime(fake, cfg);
+    }
+
+    const FAILURES: readonly { readonly where: string; readonly start: () => Promise<AppStackRuntime>; readonly end?: () => Promise<void> }[] = [
+      {
+        where: "the lease renewal of the create step",
+        start: async () => refusingARenewal(() => trace().at(-1) === "prepareAppStack"),
+      },
+      {
+        where: "the write that marks the create step running",
+        start: async () => {
+          await db().execute(sql`CREATE FUNCTION rt3_refuse_create_running() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`);
+          await db().execute(
+            sql`CREATE TRIGGER rt3_refuse_create_running BEFORE UPDATE ON operation_steps FOR EACH ROW WHEN (NEW.key = 'create' AND NEW.status = 'running') EXECUTE FUNCTION rt3_refuse_create_running()`,
+          );
+          return runtime();
+        },
+        end: async () => {
+          await db().execute(sql`DROP TRIGGER rt3_refuse_create_running ON operation_steps`);
+          await db().execute(sql`DROP FUNCTION rt3_refuse_create_running()`);
+        },
+      },
+      { where: "the read of the private values", start: async () => failingTheSecondRead() },
+    ];
+
+    for (const { where, start, end } of FAILURES) {
+      it(`an upgrade of a running application that fails at ${where} ends as a pre-flight failure: it runs as before, its target is taken back`, async () => {
+        const { stackId, rev } = await installed(false);
+        const v2Rev = revisionV2(stackId, [v2(CACHE), WEB_V2]);
+        const upgrade = await enqueue(stackId, "stack.upgrade", v2Rev);
+        const rt = await start();
+        let err: unknown;
+        try {
+          err = await run(upgrade, rt);
+        } finally {
+          await end?.();
+        }
+
+        expectFailure(err, "DOCKER_ENGINE_UNAVAILABLE");
+        expect(touched()).toEqual([]);
+        expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+        expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+        expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2Rev.revisionId, problem: "DOCKER_ENGINE_UNAVAILABLE" });
+        expect((await opOf(upgrade.operation!.id)).status).toBe("failed");
+        // The customer is still told where it stopped.
+        expect((await stepsOf(upgrade))["create"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      });
+
+      it(`one of a stopped application that fails at ${where} leaves it stopped, its target taken back`, async () => {
+        const { stackId, rev } = await installed(true);
+        const upgrade = await enqueue(stackId, "stack.upgrade", revisionV2(stackId, [v2(CACHE), WEB_V2]));
+        const rt = await start();
+        let err: unknown;
+        try {
+          err = await run(upgrade, rt);
+        } finally {
+          await end?.();
+        }
+
+        expectFailure(err, "DOCKER_ENGINE_UNAVAILABLE");
+        expect(touched()).toEqual([]);
+        expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+        expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+        expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", replacedStatus: "stopped" });
+        expect((await stepsOf(upgrade))["create"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      });
+    }
+
+    it("a refusal of the create call itself ends as before: the executor was asked, so the target stays and the application fails", async () => {
+      const { stackId, rev } = await installed(false);
+      const v2Rev = revisionV2(stackId, [v2(CACHE), WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2Rev);
+      fake.failNext("createAppStackComponents", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toContain("createAppStackComponents");
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2Rev.revisionId });
     });
   });
 
