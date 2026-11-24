@@ -144,7 +144,7 @@ const FORBIDDEN_TOP_KEYS = [
  *  real allowlist declares it (ADR-0039: the directory of PostgreSQL's socket). A test allowlist declares none. */
 function expectedTmpfs(image: string, allowlist: readonly AppImageAllowlistEntry[] | undefined): Record<string, string> {
   const base = { "/tmp": "rw,noexec,nosuid,nodev,size=64m" };
-  if (allowlist !== undefined || !image.startsWith("postgres@")) return base;
+  if (allowlist !== undefined || !image.startsWith("docker.io/library/postgres@")) return base;
   return { ...base, "/run/postgresql": "rw,noexec,nosuid,nodev,size=1m" };
 }
 
@@ -251,11 +251,11 @@ describe("container body hardening matrix (builder)", () => {
       const plan = planFor({ image, user: true, argv: false, mounts: "none", secrets: "none", edge: false });
       return buildAppStackContainerCreatePayload(plan, KEY, { ...ctx, ...(allowlist === undefined ? {} : { allowlist }) }).HostConfig.Tmpfs ?? {};
     };
-    for (const image of CAP_TRAP_IMAGES) {
-      expect(Object.keys(areas(image)).sort()).toStrictEqual(image === "postgres" ? ["/run/postgresql", "/tmp"] : ["/tmp"]);
+    for (const image of [...CAP_TRAP_IMAGES, "docker.io/library/postgres", "docker.io/library/mariadb"]) {
+      expect(Object.keys(areas(image)).sort()).toStrictEqual(image === "docker.io/library/postgres" ? ["/run/postgresql", "/tmp"] : ["/tmp"]);
       expect(Object.keys(areas(image, [{ repository: image, runAsUser: USER, note: "QA hardening matrix image." }]))).toStrictEqual(["/tmp"]);
     }
-    expect(areas("postgres")).toStrictEqual({
+    expect(areas("docker.io/library/postgres")).toStrictEqual({
       "/tmp": "rw,noexec,nosuid,nodev,size=64m",
       "/run/postgresql": "rw,noexec,nosuid,nodev,size=1m",
     });

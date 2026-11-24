@@ -287,11 +287,13 @@ describe("temporary areas follow the allowlist row of the image (ADR-0039)", () 
 
   it("in the real allowlist only PostgreSQL has one: the directory of its socket", () => {
     const withArea = APP_IMAGE_ALLOWLIST.filter((entry) => (entry.scratchPaths ?? []).length > 0).map((entry) => entry.repository);
-    expect(withArea).toEqual(["postgres"]);
+    expect(withArea).toEqual(["docker.io/library/postgres"]);
     for (const entry of APP_IMAGE_ALLOWLIST) {
       const areas = appStackTmpfs(`${entry.repository}@sha256:${"a".repeat(64)}`);
-      expect(areas).toEqual(entry.repository === "postgres" ? { ...APP_STACK_TMPFS, "/run/postgresql": SCRATCH } : APP_STACK_TMPFS);
+      expect(areas).toEqual(entry.repository === "docker.io/library/postgres" ? { ...APP_STACK_TMPFS, "/run/postgresql": SCRATCH } : APP_STACK_TMPFS);
     }
+    // A row is matched as written: the short name has no row, so no area.
+    expect(appStackTmpfs(`postgres@sha256:${"a".repeat(64)}`)).toEqual(APP_STACK_TMPFS);
   });
 
   it("refuses a body whose areas are not the ones the row of its image gives", () => {

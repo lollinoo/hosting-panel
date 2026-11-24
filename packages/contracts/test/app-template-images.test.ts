@@ -71,8 +71,8 @@ describe("appStackImageProblem", () => {
       { repository: "nginxinc/nginx-unprivileged", runAsUser: null },
       { repository: "memcached", runAsUser: null },
       { repository: "valkey/valkey", runAsUser: "999:1000" },
-      { repository: "mariadb", runAsUser: "999:999" },
-      { repository: "postgres", runAsUser: "999:999" },
+      { repository: "docker.io/library/mariadb", runAsUser: "999:999" },
+      { repository: "docker.io/library/postgres", runAsUser: "999:999" },
     ]);
   });
 });
@@ -80,7 +80,7 @@ describe("appStackImageProblem", () => {
 describe("scratch areas", () => {
   it("only the postgres row declares one, and it is the socket directory", () => {
     expect(APP_IMAGE_ALLOWLIST.filter((entry) => entry.scratchPaths !== undefined).map(({ repository, scratchPaths }) => ({ repository, scratchPaths }))).toEqual([
-      { repository: "postgres", scratchPaths: ["/run/postgresql"] },
+      { repository: "docker.io/library/postgres", scratchPaths: ["/run/postgresql"] },
     ]);
   });
 
@@ -112,8 +112,9 @@ describe("scratch areas", () => {
     expect(appStackImageScratchPaths(`evil/postgres@${DIGEST}`, rows)).toEqual([]);
     expect(appStackImageScratchPaths(`postgres2@${DIGEST}`, rows)).toEqual([]);
     expect(appStackImageScratchPaths("postgres", rows)).toEqual(["/run/postgresql"]);
-    expect(appStackImageScratchPaths(`postgres@${DIGEST}`)).toEqual(["/run/postgresql"]);
-    expect(appStackImageScratchPaths(`mariadb@${DIGEST}`)).toEqual([]);
+    expect(appStackImageScratchPaths(`docker.io/library/postgres@${DIGEST}`)).toEqual(["/run/postgresql"]);
+    expect(appStackImageScratchPaths(`postgres@${DIGEST}`)).toEqual([]);
+    expect(appStackImageScratchPaths(`docker.io/library/mariadb@${DIGEST}`)).toEqual([]);
   });
 });
 

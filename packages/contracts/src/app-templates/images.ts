@@ -32,13 +32,15 @@ export const APP_IMAGE_ALLOWLIST: readonly AppImageAllowlistEntry[] = Object.fre
     runAsUser: "999:1000",
     note: "BSD-3-Clause, packaging BSD-3-Clause; Docker-Sponsored Open Source (publisher valkey); tini MIT, setpriv/libcap-ng GPL-2.0-or-later; Alpine base with unmodified GPL-2.0-only busybox/apk-tools; image default root, forced to 999:1000; registry read 2026-11-22",
   }),
+  // The two database images are written in full, never `mariadb` or `postgres` short: the WordPress template of release
+  // 0.10.0 names `mariadb` short and runs it as the image's own user, and a short row would refuse its stored plans.
   Object.freeze({
-    repository: "mariadb",
+    repository: "docker.io/library/mariadb",
     runAsUser: "999:999",
     note: "MariaDB Server GPL-2.0-only, packaging GPL-2.0 (image label org.opencontainers.image.licenses); Docker Official Image, source github.com/MariaDB/mariadb-docker; Ubuntu noble base; a separate program reached over the network, nothing of it is linked into the panel; image user unset (the entrypoint drops to mysql 999:999), forced here so the entrypoint never runs as root; port 3306; local image read 2026-11-23",
   }),
   Object.freeze({
-    repository: "postgres",
+    repository: "docker.io/library/postgres",
     runAsUser: "999:999",
     note: "PostgreSQL Licence, packaging MIT; Docker Official Image; Debian bookworm base; image user unset (the entrypoint drops to postgres 999:999), forced here so the entrypoint never runs as root; port 5432; needs its socket directory writable, declared as the one scratch area; local image read 2026-11-23",
     scratchPaths: Object.freeze(["/run/postgresql"]),

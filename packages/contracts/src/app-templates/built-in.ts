@@ -289,7 +289,7 @@ const mariadb: AppBuiltInTemplate = Object.freeze({
     "    customer: true",
     "services:",
     "  db:",
-    "    image: mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
+    "    image: docker.io/library/mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
     // Socket and pid file under /tmp: the root file system is read-only.
     '    command: ["mariadbd", "--socket=/tmp/mysqld.sock", "--pid-file=/tmp/mysqld.pid"]',
     "    environment:",
@@ -335,7 +335,7 @@ const postgresql: AppBuiltInTemplate = Object.freeze({
     ...databasePassword,
     "services:",
     "  db:",
-    "    image: postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1",
+    "    image: docker.io/library/postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1",
     '    command: ["postgres"]',
     "    environment:",
     "      - name: POSTGRES_DB",
